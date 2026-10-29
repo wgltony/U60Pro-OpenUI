@@ -1,4 +1,4 @@
-/* Whitelisted DevUI actions. No scripts, passwords or keys in the UI.
+/* Whitelisted DevUI actions. Credential editing is local and uses typed hex IPC.
  * Copyright (c) 2026 ZweiChen. GPL-3.0-or-later. */
 /* Node pages read a page of the agent's cached view; indices are only valid with the
  * generation they came with. */
@@ -33,7 +33,10 @@ static void refresh_page(void) {
   else if(page==GROUP)fetch_nodes();
 }
 static void go(int p) {
+  if(p!=UPLINK){relay_editor_clear();relay_view=RV_STATUS;}
   page=p;notice[0]=0;need_draw=1;
+  if(p==USB_PAGE)usb_draft=-1;
+  if(p==WIFI_PAGE){wifi_view=0;wifi_offset=0;}
   if(p==NODES)fetch_groups();
   /* Reading the card changes nothing: done on entry until the card has been read once. */
   if(p==ESIM){esim_offset=0;if(!data.esim.card[0]&&esim_idle())send_job("esim scan\n",JOB_ESIM,0);}
@@ -44,6 +47,7 @@ static int parent(int p) {
   case NODES: case SUBS: case CORE: return CLASH;
   case GROUP: return NODES;
   case DIAG: return (diag_from==PROXY||diag_from==CLASH)&&reachable(diag_from)?diag_from:MENU;
+  case TAILSCALE: return ts_from==PROXY&&reachable(PROXY)?PROXY:MENU;
   case UPLINK: return uplink_from==OVERVIEW&&reachable(OVERVIEW)?OVERVIEW:MENU;
   default: return MENU;
   }
@@ -66,17 +70,19 @@ static void ask(int what, int target, int job, unsigned long long rev, const cha
  * the one shown as on and that backend, which the agent checks is still the one on. */
 static void confirm_backend(int target) {
   const struct backend_info *b=&data.backend;
-  unsigned long long rev=b->rev[target==BK_OFF?b->active==BK_CLASH:target==BK_CLASH];
-  const char *to=target==BK_WG?"wireguard":target==BK_CLASH?"clash":b->active==BK_CLASH?"off clash":"off wireguard";
+  unsigned long long rev=b->rev[target==BK_OFF?(b->active?b->active-1:0):target-1];
+  const char *to=target==BK_WG?"wireguard":target==BK_CLASH?"clash":b->active==BK_TS?"off tailscale":b->active==BK_CLASH?"off clash":"off wireguard";
   char req[64];
   snprintf(req,sizeof(req),"backend %llu %s\n",rev,to);
   ask(CF_BACKEND,target,JOB_BACKEND,rev,req);
 }
 static int digit_id(const char *a, char c, char max) { return a[0]==c&&a[1]>='0'&&a[1]<=max&&!a[2]?a[1]-'0':-1; }
+#include "relay_actions.h"
 /* The power menu: a long press opens it over any page or dialog, but never twice while
  * the device is already going down. */
 static void power_menu(void) {
   if(dialog==DLG_POWERING)return;
+  relay_editor_clear();relay_view=RV_STATUS;
   dialog=DLG_POWER;power_error[0]=0;need_draw=1;
 }
 /* The agent restores the stock UI and then restarts or shuts the device down; this panel
@@ -107,16 +113,24 @@ static void power_tap(const char *a) {
 }
 static void dialog_tap(const char *a) {
   if(dialog>=DLG_POWER){power_tap(a);return;}
+  if(dialog==5&&confirm_what==CF_RELAY) {
+    if(!strcmp(a,"dismiss")||!strcmp(a,"back")){relay_editor_clear();relay_view=RV_STATUS;dialog=0;}
+    else if(!strcmp(a,"confirm"))relay_confirm_send();
+    return;
+  }
   if(!strcmp(a,"dismiss"))dialog=0;
   else if(!strcmp(a,"confirm")&&!blocked()) {
     if(dialog==1)submit(1,0);
     else if(dialog==4)submit(2,0);
-    else if(dialog==5)send_job(confirm_req,confirm_job,confirm_rev);
+    else if(dialog==5&&(confirm_what!=CF_TS||!ts_blocked())&&
+            (confirm_what!=CF_ADMIN||admin_confirm_valid())&&
+             (confirm_what!=CF_UPLINK||uplink_confirm_ok()))send_job(confirm_req,confirm_job,confirm_what==CF_UPLINK&&confirm_target==2?0:confirm_rev);
   } else if(!strcmp(a,"saveback")&&dialog==2&&!blocked()) {
     return_after_save=1;submit(0,0);
   } else if(!strcmp(a,"discard")&&dialog==2) {
     dirty=0;page=parent(DEVICES);dialog=0;
   } else if(!strcmp(a,"refresh")&&dialog==3) {
+    relay_editor_clear();relay_view=RV_STATUS;
     dialog=0;notice[0]=0;failure_text[0]=0;
     /* Profiles and devices go back to WireGuard, or to the menu without it. */
     if(page==WG||page==PROFILES||page==DEVICES){dirty=0;if(page!=WG)page=parent(page);}
@@ -137,7 +151,10 @@ static void tap(int x,int y) {
   if(!strcmp(a,"none"))return;
   need_draw=1;
   if(dialog){dialog_tap(a);return;}
-  if(!strcmp(a,"stock")) { quitting=1;return; }
+  if(!strcmp(a,"stock")) { relay_editor_clear();quitting=1;return; }
+  if(relay_tap(a))return;
+  /* The Wi-Fi page's device lists step back to the list above them, not the menu. */
+  if(page==WIFI_PAGE&&wifi_view&&!strcmp(a,"back")) { wifi_view=wifi_view==2?1:0;wifi_offset=0;return; }
   if(!strcmp(a,"back")) { back();return; }
   static const struct { const char *id; int page; } links[]={
     {"wireguard",WG},{"overview",OVERVIEW},{"profiles",PROFILES},{"proxy",PROXY},
@@ -147,16 +164,52 @@ static void tap(int x,int y) {
     if(!strcmp(a,links[i].id)) { if(reachable(links[i].page)){group_offset=0;go(links[i].page);} return; }
   if(!strcmp(a,"devices")) { if(reachable(DEVICES))enter_devices();return; }
   if(!strcmp(a,"diag")) { if(reachable(DIAG)){diag_from=page;diag_offset=0;go(DIAG);} return; }
+  if(!strcmp(a,"tailscale")) { if(reachable(TAILSCALE)){ts_from=page;ts_offset=0;go(TAILSCALE);} return; }
   if(!strcmp(a,"uplink")) { if(reachable(UPLINK)){uplink_from=page;go(UPLINK);} return; }
   if(!strcmp(a,"active")&&page==PROXY) {
-    int to=data.backend.active==BK_WG?WG:data.backend.active==BK_CLASH?CLASH:-1;
-    if(to>=0&&reachable(to))go(to);
+    int to=data.backend.active==BK_WG?WG:data.backend.active==BK_CLASH?CLASH:data.backend.active==BK_TS?TAILSCALE:-1;
+    if(to>=0&&reachable(to)){if(to==TAILSCALE)ts_from=PROXY;go(to);}
     return;
   }
   int i;
+  if(page==OVERVIEW&&!strncmp(a,"ulan",4)) {
+    if(usb_lan_can()&&!strcmp(a,data.toolbox.usb_lan_on?"ulan0":"ulan1"))
+      send_job(data.toolbox.usb_lan_on?"tool usb_lan 0\n":"tool usb_lan 1\n",JOB_TOOL,0);
+    return;
+  }
+  if(page==OVERVIEW&&!strncmp(a,"admin",5)) {
+    i=digit_id(a+4,'n','3');
+    if(i>=0&&admin_can(i)) {
+      char req[96];int enabled=!admin_value(i);
+      snprintf(req,sizeof(req),"admin %llu %s %s %d\n",data.admin.rev,i<2?"adb":"ssh",(i&1)?"boot":"runtime",enabled);
+      ask(CF_ADMIN,i|(enabled<<2),JOB_ADMIN,data.admin.rev,req);
+    }
+    return;
+  }
+  if(page==TAILSCALE) {
+    const struct tailscale_info *t=&data.tailscale;
+    char req[96];
+    if(!strcmp(a,"tsprev")&&ts_offset>0)ts_offset-=3;
+    else if(!strcmp(a,"tsnext")&&ts_offset+3<t->n)ts_offset+=3;
+    else if(!ts_blocked()) {
+      if(!strcmp(a,"tstoggle")) {
+        snprintf(req,sizeof(req),"ts %llu %s\n",t->rev,t->enabled?"disconnect":"connect");
+        snprintf(chosen_name,sizeof(chosen_name),"%s",t->enabled?L("Disconnect","断开"):L("Connect","连接"));
+      } else if(!strcmp(a,"tsclear")&&strcmp(t->selected,"-")) {
+        snprintf(req,sizeof(req),"ts %llu clear\n",t->rev);
+        snprintf(chosen_name,sizeof(chosen_name),"%s",L("Clear exit","清除出口"));
+      } else if(!strncmp(a,"ts",2)&&(i=digit_id(a+1,'s','2'))>=0&&ts_offset+i<t->n&&!t->rows[ts_offset+i].selected) {
+        const struct tailscale_row *row=&t->rows[ts_offset+i];
+        snprintf(req,sizeof(req),"ts %llu exit %llu %d\n",t->rev,t->gen,row->index);
+        snprintf(chosen_name,sizeof(chosen_name),"%s",row->name);
+      } else return;
+      ask(CF_TS,0,JOB_TS,t->rev,req);
+    }
+    return;
+  }
   if(!strcmp(a,"toggle")&&page==WG&&!blocked()&&data.has) {
     if(data.enabled)dialog=1;
-    else if(data.backend.has&&data.backend.active==BK_CLASH)confirm_backend(BK_WG);
+    else if(data.backend.has&&(data.backend.active==BK_CLASH||data.backend.active==BK_TS))confirm_backend(BK_WG);
     else submit(1,1);
   } else if(page==PROFILES&&(i=digit_id(a,'p','4'))>=0&&!blocked()) {
     if(i<data.np&&!data.profiles[i].active) {
@@ -186,7 +239,7 @@ static void tap(int x,int y) {
     const struct backend_info *b=&data.backend;
     if(!strcmp(a,"ctoggle")&&!blocked()&&c->has&&b->has) {
       if(c->enabled){if(b->active==BK_CLASH)confirm_backend(BK_OFF);}
-      else if(b->ready[1]&&b->active==BK_WG)confirm_backend(BK_CLASH);
+      else if(b->ready[1]&&(b->active==BK_WG||b->active==BK_TS))confirm_backend(BK_CLASH);
       else if(b->ready[1]) {
         char req[64];snprintf(req,sizeof(req),"backend %llu clash\n",b->rev[1]);
         send_job(req,JOB_BACKEND,b->rev[1]);
@@ -248,16 +301,37 @@ static void tap(int x,int y) {
     if(!strcmp(a,"utoggle")&&uplink_switch_ok()) {
       char req[64];snprintf(req,sizeof(req),"uplink %llu %s\n",u->rev,u->enabled?"off":"on");
       ask(CF_UPLINK,!u->enabled,JOB_UPLINK,u->rev,req);
-    } else if(!strcmp(a,"ulogin")&&uplink_login_ok()) send_job("uplink login\n",JOB_UPLINK,0);
+    } else if(!strcmp(a,"ulogin")&&uplink_login_ok()) ask(CF_UPLINK,2,JOB_UPLINK,u->rev,"uplink login\n");
   } else if(page==DIAG) {
     if(!strcmp(a,"drun")&&!blocked()&&data.diag.has&&!data.diag.running)send_job("diag\n",JOB_DIAG,0);
     else if(!strcmp(a,"prev")&&diag_offset>0)diag_offset-=4;
     else if(!strcmp(a,"next")&&diag_offset+4<data.diag.n)diag_offset+=4;
+  } else if(page==WIFI_PAGE&&wifi_view) {
+    int n=wifi_view==1?data.nwsta:data.nwblk,i;
+    if(!strcmp(a,"wprev")&&wifi_offset>0)wifi_offset-=4;
+    else if(!strcmp(a,"wnext")&&wifi_offset+4<n)wifi_offset+=4;
+    else if(!strcmp(a,"wblocked")&&wifi_view==1){wifi_view=2;wifi_offset=0;}
+    else if(blocked()) return;
+    else if(wifi_view==1&&(i=digit_id(a+3,'k','3'))>=0&&!strncmp(a,"kic",3)&&wifi_offset+i<n) {
+      char req[64];kick_sta=data.wsta[wifi_offset+i];
+      snprintf(req,sizeof(req),"tool wifi_block %s\n",kick_sta.mac);
+      ask(CF_KICK,wifi_offset+i,JOB_TOOL,0,req);
+    } else if(wifi_view==2&&(i=digit_id(a+2,'b','3'))>=0&&!strncmp(a,"un",2)&&wifi_offset+i<n) {
+      char req[64];snprintf(req,sizeof(req),"tool wifi_unblock %s\n",data.wblk[wifi_offset+i].mac);
+      send_job(req,JOB_TOOL,0);
+    }
+  } else if(page==WIFI_PAGE&&!strcmp(a,"wclients")) {
+    wifi_view=1;wifi_offset=0;
   } else if(page==WIFI_PAGE&&!blocked()&&data.toolbox.has) {
     if(!strcmp(a,"w2on")&&!data.toolbox.wifi_2g_on)send_job("tool wifi_toggle 2g 1\n",JOB_TOOL,0);
     else if(!strcmp(a,"w2off")&&data.toolbox.wifi_2g_on)send_job("tool wifi_toggle 2g 0\n",JOB_TOOL,0);
     else if(!strcmp(a,"w5on")&&!data.toolbox.wifi_5g_on)send_job("tool wifi_toggle 5g 1\n",JOB_TOOL,0);
     else if(!strcmp(a,"w5off")&&data.toolbox.wifi_5g_on)send_job("tool wifi_toggle 5g 0\n",JOB_TOOL,0);
+    else if(!strncmp(a,"wpw",3)&&a[3]>='0'&&a[3]<='3'&&!a[4]&&data.toolbox.has_wifi_power) {
+      static const char *const pct[]={"100","80","50","20"};
+      char req[48];snprintf(req,sizeof(req),"tool wifi_power %s\n",pct[a[3]-'0']);
+      send_job(req,JOB_TOOL,0);
+    }
   } else if(page==SIGNAL_PAGE&&!blocked()&&data.toolbox.has) {
     /* The firmware's net_select values: auto, 5G SA only, 5G NSA, 4G only. */
     static const char *modes[]={"WL_AND_5G","Only_5G","LTE_AND_5G","Only_LTE"};
@@ -266,10 +340,12 @@ static void tap(int x,int y) {
       send_job(req,JOB_TOOL,0);
     }
   } else if(page==USB_PAGE&&!blocked()&&data.toolbox.has) {
-    static const char *umodes[]={"rndis","ncm","ecm"};
-    if(!strncmp(a,"usb",3)&&a[3]>='0'&&a[3]<='2'&&!a[4]) {
-      char req[64];snprintf(req,sizeof(req),"tool usb_mode %s\n",umodes[a[3]-'0']);
-      send_job(req,JOB_TOOL,0);
+    int cur=usb_mode_index(data.toolbox.usb_mode),pick=usb_draft>=0?usb_draft:cur;
+    if(!strncmp(a,"usb",3)&&a[3]>='0'&&a[3]<='1'&&!a[4]) {
+      usb_draft=a[3]-'0';need_draw=1;
+    } else if(!strcmp(a,"usbapply")&&pick>=0&&pick!=cur) {
+      char req[64];snprintf(req,sizeof(req),"tool usb_mode %s\n",usb_modes[pick]);
+      usb_draft=-1;send_job(req,JOB_TOOL,0);
     } else if(!strcmp(a,"ttl0"))send_job("tool ttl 0\n",JOB_TOOL,0);
     else if(!strcmp(a,"ttl64"))send_job("tool ttl 64\n",JOB_TOOL,0);
     else if(!strcmp(a,"ttl65"))send_job("tool ttl 65\n",JOB_TOOL,0);

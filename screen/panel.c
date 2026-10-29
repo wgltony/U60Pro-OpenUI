@@ -3,6 +3,7 @@
  */
 #define _GNU_SOURCE
 #include <assert.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -77,7 +78,13 @@ struct snapshot {
   struct diag_info diag;
   struct esim_info esim;
   struct uplink_info uplink;
+  struct relay_catalog relay;
+  struct tailscale_info tailscale;
   struct toolbox_info toolbox;
+  struct wifi_sta wsta[16];
+  struct wifi_blocked wblk[32];
+  int nwsta, nwblk;
+  struct admin_info admin;
   char failure[97]; /* the agent's message for failed_job */
   struct row rows[MAX_ROWS];
 };
@@ -88,11 +95,12 @@ static int screen_awake = 1;
 #endif
 /* Menu features first (their numbers are the settings record's page bits), then pages
  * reached from them. */
-enum { WG, DEVICES, MENU, PROFILES, OVERVIEW, PROXY, CLASH, ESIM, UPLINK, WIFI_PAGE, SIGNAL_PAGE, USB_PAGE, POWER_PAGE, BOOSTER_PAGE, NODES, GROUP, SUBS, CORE, DIAG };
+enum { WG, DEVICES, MENU, PROFILES, OVERVIEW, PROXY, CLASH, ESIM, UPLINK, WIFI_PAGE, SIGNAL_PAGE, USB_PAGE, POWER_PAGE, BOOSTER_PAGE, TAILSCALE, NODES, GROUP, SUBS, CORE, DIAG };
 #define LEGACY_PAGES 27  /* features of a C record: WireGuard, devices, profiles, overview */
 #define MENU_PAGES 123   /* features of a V record: the above plus proxy and Clash */
 #define ESIM_MENU_PAGES 251 /* features of a W record: the above plus eSIM */
 #define UPLINK_MENU_PAGES 507 /* features of a Y record: the above plus the Wi-Fi uplink */
+#define TAILSCALE_MENU_PAGES 32763
 #define TOOLBOX_MENU_PAGES 16379 /* features of a Z record: the above plus Pocket OS toolbox pages */
 static int page = MENU, offset, dialog, dirty, quitting, need_draw = 1,
                                                   return_after_save;
@@ -105,7 +113,7 @@ static int settings_zh = 1;
  * the stock UI (also with older agents, whose W records end at the language). */
 static int settings_sleep = 0;
 #define L(en, zh) (settings_zh ? (zh) : (en))
-static int visible_page(int p) { return p == MENU || (p <= BOOSTER_PAGE && (settings_menu & (1 << p))); }
+static int visible_page(int p) { return p == MENU || (p <= TAILSCALE && (settings_menu & (1 << p))); }
 /* Saved profiles and device routing belong to WireGuard; node, subscription and core
  * pages to Clash; diagnostics to Clash and Proxy; the Wi-Fi uplink also to Overview,
  * which shows it when the agent reports one. */
@@ -114,6 +122,7 @@ static int reachable(int p) {
   case PROFILES: case DEVICES: return visible_page(p) || visible_page(WG);
   case NODES: case GROUP: case SUBS: case CORE: return visible_page(CLASH);
   case DIAG: return visible_page(CLASH) || visible_page(PROXY);
+  case TAILSCALE: return visible_page(TAILSCALE) || visible_page(PROXY);
   case UPLINK: return visible_page(UPLINK) || (visible_page(OVERVIEW) && data.uplink.has);
   default: return visible_page(p);
   }
@@ -131,8 +140,14 @@ static unsigned long long pending, pending_revision, chosen_profile, chosen_revi
 static char chosen_name[193];
 static char notice[128], failure_text[97];
 /* What the pending job does, for its labels and its completion. */
-enum { JOB_WG = 1, JOB_BACKEND, JOB_MODE, JOB_SUB, JOB_REFRESH, JOB_SELECT, JOB_DELAY, JOB_CORE, JOB_DIAG, JOB_ESIM, JOB_UPLINK, JOB_TOOL };
+enum { JOB_WG = 1, JOB_BACKEND, JOB_MODE, JOB_SUB, JOB_REFRESH, JOB_SELECT, JOB_DELAY, JOB_CORE, JOB_DIAG, JOB_ESIM, JOB_UPLINK, JOB_TOOL, JOB_TS, JOB_ADMIN };
 static int pending_kind;
+/* USB page: the mode picked but not applied yet (-1: none). */
+static int usb_draft = -1;
+/* Wi-Fi page: 0 bands, 1 connected devices, 2 blocked devices; first row shown; the
+ * device a kick confirmation names. */
+static int wifi_view, wifi_offset;
+static struct wifi_sta kick_sta;
 /* When the panel stops waiting for the pending job's outcome. */
 static long long pending_deadline;
 static long long monotonic_ms(void) {
@@ -145,7 +160,7 @@ static long long monotonic_ms(void) {
  * the start of a diagnosis answers in seconds. Past it the job is taken as lost. */
 static long long job_wait_ms(int kind) {
   /* An eSIM action only starts the agent's own job, which its Q record then follows. */
-  return kind == JOB_SELECT || kind == JOB_DELAY || kind == JOB_DIAG || kind == JOB_ESIM || kind == JOB_UPLINK || kind == JOB_TOOL ? 60000 : 180000;
+  return kind == JOB_SELECT || kind == JOB_DELAY || kind == JOB_DIAG || kind == JOB_ESIM || kind == JOB_UPLINK || kind == JOB_TOOL || kind == JOB_ADMIN ? 60000 : 180000;
 }
 static void amount(char *out, size_t n, unsigned long long v) {
   if (v >= 1073741824)
@@ -159,6 +174,22 @@ static int stale(void) {
   return !data.stamp || (unsigned long long)time(NULL) > data.stamp + 10;
 }
 static int blocked(void) { return pending || data.busy || stale(); }
+/* Unlike the status head, A has its own observation time. Never control a service
+ * from a fresh global snapshot carrying an old (or future-dated) service record. */
+static int admin_fresh(void) {
+  unsigned long long now=(unsigned long long)time(NULL),stamp=data.admin.stamp;
+  return data.admin.has && stamp && stamp<=now && now-stamp<=10;
+}
+static int admin_value(int row) {
+  return row==0?data.admin.adb_running:row==1?data.admin.adb_boot:
+         row==2?data.admin.ssh_running:data.admin.ssh_boot;
+}
+static int admin_can(int row) {
+  if(row<0||row>3||blocked()||!admin_fresh()||data.admin.busy) return 0;
+  if(row<2?!data.admin.adb_available:!data.admin.ssh_available) return 0;
+  /* Starting adbd alone cannot create a USB function. Stopping remains possible. */
+  return row!=0 || data.admin.adb_running || data.admin.adb_exposed;
+}
 /* A change to WireGuard (clash 0) or to Clash (1) is in progress: a backend switch is
  * both, the WireGuard verbs only WireGuard, mode and subscription jobs only Clash; delay
  * tests, node choices, core jobs and diagnoses neither. A busy agent counts for both. */
@@ -170,20 +201,26 @@ static int applying(int clash) {
 /* Proxy groups and the open group's nodes, fetched while their pages are shown. */
 static struct groups_view groups;
 static struct nodes_view nodes;
-static int group_offset, node_offset, open_group, diag_offset, diag_from = MENU, esim_offset, uplink_from = MENU;
+static int group_offset, node_offset, open_group, diag_offset, diag_from = MENU, esim_offset, uplink_from = MENU, ts_offset, ts_from = MENU;
 static unsigned long long open_gen;
 static long long page_fetch_at;
 /* The confirmation dialog (5) and the subscription dialog (6). */
-enum { CF_BACKEND = 1, CF_UPDATE, CF_ROLLBACK, CF_GEO, CF_ESIM, CF_REBOOT, CF_UPLINK };
+enum { CF_BACKEND = 1, CF_UPDATE, CF_ROLLBACK, CF_GEO, CF_ESIM, CF_REBOOT, CF_UPLINK, CF_TS, CF_RELAY, CF_ADMIN, CF_KICK };
 /* The long-press power menu (dialog 7), its confirmation (8) and the wait after it (9):
  * what was chosen (1 restart, 2 shut down), until when to wait, and why it failed. */
 enum { DLG_POWER = 7, DLG_POWER_CONFIRM, DLG_POWERING };
 static int power_choice;
 static long long power_deadline;
 static char power_error[96];
-static char confirm_req[96];
+static char confirm_req[384];
 static int confirm_what, confirm_target, confirm_job;
 static unsigned long long confirm_rev, chosen_sub, chosen_sub_rev;
+/* Low two bits name one of the four controls; bit 2 is the confirmed target. */
+static int admin_confirm_valid(void) {
+  int row=confirm_target&3,enabled=(confirm_target>>2)&1;
+  return admin_can(row) && data.admin.rev==confirm_rev && admin_value(row)!=enabled;
+}
+#include "devui/relay_editor.h"
 #include "devui/render.h"
 // The LCD and raw touch axes are mounted upside down relative to the case.
 // Keep layout coordinates upright; transform only at the hardware boundary.
@@ -208,7 +245,7 @@ static int parse_snapshot(char *buf, struct snapshot *out) {
   int valid = 0, v_ok = 0, v_idle = 0, v_level = 0, v_home = 0, v_mask = 0;
   int w_ok = 0, w_idle = 0, w_level = 0, w_home = 0, w_mask = 0, w_sleep = 0;
   int y_ok = 0, y_idle = 0, y_level = 0, y_home = 0, y_mask = 0, y_sleep = 0;
-  int z_ok = 0, z_idle = 0, z_level = 0, z_home = 0, z_mask = 0, z_sleep = 0;
+  int f_ok = 0, z_ok = 0, z_idle = 0, z_level = 0, z_home = 0, z_mask = 0, z_sleep = 0;
   unsigned long long v_rev = 0, w_rev = 0, y_rev = 0, z_rev = 0;
   char v_lang[4] = "zh", w_lang[4] = "zh", y_lang[4] = "zh", z_lang[4] = "zh";
   while (line) {
@@ -267,25 +304,29 @@ static int parse_snapshot(char *buf, struct snapshot *out) {
         snprintf(y_lang, sizeof(y_lang), "%s", lang);
       }
     }
-    /* Z: the same with Pocket OS toolbox pages; preferred over Y. */
-    else if (line[0] == 'Z') {
+    /* F adds Tailscale. Validate into locals; bad extensions cannot poison Z. */
+    else if (line[0] == 'Z' || line[0] == 'F') {
       char lang[4] = "";
-      if (sscanf(line, "Z %llu %d %d %d %d %3s %d", &z_rev, &z_idle, &z_level, &z_home, &z_mask, lang, &z_sleep) == 7 &&
-          (z_sleep == 0 || z_sleep == 1) && (!strcmp(lang, "zh") || !strcmp(lang, "en")) &&
-          z_idle >= 30 && z_idle <= 600 && z_level >= 20 && z_level <= 255 &&
-          z_home >= 0 && z_home <= BOOSTER_PAGE && z_mask > 0 && !(z_mask & ~TOOLBOX_MENU_PAGES) &&
-          (z_home == MENU || (z_mask & (1 << z_home)))) {
-        z_ok = 1;
+      unsigned long long rev;int idle,level,home,mask,sleep;
+      if (sscanf(line + 1, " %llu %d %d %d %d %3s %d", &rev, &idle, &level, &home, &mask, lang, &sleep) == 7 &&
+          (sleep == 0 || sleep == 1) && (!strcmp(lang, "zh") || !strcmp(lang, "en")) &&
+          idle >= 30 && idle <= 600 && level >= 20 && level <= 255 &&
+          home >= 0 && home <= (line[0] == 'F' ? TAILSCALE : BOOSTER_PAGE) && mask > 0 &&
+          !(mask & ~(line[0] == 'F' ? TAILSCALE_MENU_PAGES : TOOLBOX_MENU_PAGES)) &&
+          (home == MENU || (mask & (1 << home))) && (line[0] == 'F' || !f_ok)) {
+        z_ok = 1; f_ok |= line[0] == 'F';
+        z_rev=rev;z_idle=idle;z_level=level;z_home=home;z_mask=mask;z_sleep=sleep;
         snprintf(z_lang, sizeof(z_lang), "%s", lang);
       }
     }
     else if (line[0] == 'J')
       /* fresh, the newest job the records already show, is absent from older agents. */
       s.has_fresh = sscanf(line, "J %d %llu %llu %d %llu", &s.busy, &s.job, &s.done, &s.result, &s.fresh) == 5;
-    else if (line[0] && strchr("BKUMXxEQqRH", line[0]) && line[1] == '\t') {
-      char *f[36];
-      int n = split_tabs(line, f, 36);
+    else if (line[0] && strchr("ABKUMXxEQqRHTtLlwIi", line[0]) && line[1] == '\t') {
+      char *f[48]; /* H has 39 fields */
+      int n = split_tabs(line, f, 48);
       switch (f[0][0]) {
+      case 'A': parse_admin(f, n, &s.admin); break;
       case 'B': parse_backend(f, n, &s.backend); break;
       case 'K': parse_clash(f, n, &s.clash); break;
       case 'U': if (s.nsubs < 5 && parse_sub(f, n, &s.subs[s.nsubs])) s.nsubs++; break;
@@ -295,8 +336,15 @@ static int parse_snapshot(char *buf, struct snapshot *out) {
       case 'E': if (n >= 3) { s.failed_job = u64_field(f[1]); COPY(s.failure, f[2]); } break;
       case 'Q': parse_esim(f, n, &s.esim); break;
       case 'q': parse_esim_row(f, n, &s.esim); break;
+      case 'T': parse_tailscale(f, n, &s.tailscale); break;
+      case 't': parse_tailscale_row(f, n, &s.tailscale); break;
       case 'R': parse_uplink(f, n, &s.uplink); break;
+      case 'L': parse_relay(f,n,&s.relay);break;
+      case 'l': parse_relay_saved(f,n,&s.relay);break;
+      case 'w': parse_relay_scan(f,n,&s.relay);break;
       case 'H': parse_toolbox(f, n, &s.toolbox); break;
+      case 'I': if (s.nwsta < 16 && parse_wifi_sta(f, n, &s.wsta[s.nwsta])) s.nwsta++; break;
+      case 'i': if (s.nwblk < 32 && parse_wifi_blocked(f, n, &s.wblk[s.nwblk])) s.nwblk++; break;
       }
     }
     else if (line[0] == 'O')
@@ -347,6 +395,7 @@ static int parse_snapshot(char *buf, struct snapshot *out) {
     s.settings_rev = v_rev; s.idle_seconds = v_idle; s.brightness = v_level;
     s.home_page = v_home; s.menu_mask = v_mask; s.zh = strcmp(v_lang, "en") != 0;
   }
+  if(s.relay.has&&(!s.uplink.has||s.relay.rev!=s.uplink.rev||s.relay.ns!=s.relay.saved_count||s.relay.nw!=s.relay.scan_count))s.relay.has=0;
   if (valid || s.settings_rev)
     *out = s;
   return valid || s.settings_rev;
@@ -379,12 +428,12 @@ static int exchange(const char *request, char *reply, size_t cap) {
 #else
 /* Preview: the last request, all requests since the log was cleared, canned replies. */
 static char test_request[4096], test_log[8192];
-static const char *stub_groups, *stub_nodes, *stub_job = "OK 1\n";
+static const char *stub_groups, *stub_nodes, *stub_status, *stub_job = "OK 1\n";
 static int exchange(const char *r, char *out, size_t cap) {
   snprintf(test_request, sizeof(test_request), "%s", r);
   size_t used = strlen(test_log);
   snprintf(test_log + used, sizeof(test_log) - used, "%s", r);
-  const char *reply = !strncmp(r, "groups ", 7) ? stub_groups : !strncmp(r, "nodes ", 6) ? stub_nodes : stub_job;
+  const char *reply = !strcmp(r,"status\n")?stub_status:!strncmp(r, "groups ", 7) ? stub_groups : !strncmp(r, "nodes ", 6) ? stub_nodes : stub_job;
   if (!reply) return -1;
   snprintf(out, cap, "%s", reply);
   return 0;
@@ -410,7 +459,10 @@ static int send_job(const char *req, int kind, unsigned long long revision) {
   pending = 0;
   pending_kind = 0;
   failure_text[0] = 0;
-  if (!strncmp(reply, "ERR Stale", 9) && kind == JOB_ESIM) {
+  if(kind==JOB_UPLINK){relay_editor_clear();relay_view=RV_STATUS;}
+  if (!strncmp(reply, "ERR Stale", 9) && kind == JOB_UPLINK) {
+    snprintf(notice,sizeof(notice),"%s",L("Relay list changed. Refresh and choose again.","中继列表已变化，请刷新后重新选择。"));dialog=3;
+  } else if (!strncmp(reply, "ERR Stale", 9) && kind == JOB_ESIM) {
     /* The card was read again meanwhile: the page shows the new list. */
     snprintf(notice, sizeof(notice), "%s", L("The profile list changed. Check it again.", "配置文件列表已变化，请重新确认。"));
     dialog = 0;
@@ -474,7 +526,8 @@ static const char *job_failure(int kind, int result) {
   case JOB_CORE: return L("The core request was refused.", "内核请求被拒绝。");
   case JOB_DIAG: return L("Diagnostics could not start.", "无法启动诊断。");
   case JOB_ESIM: return L("The eSIM request was refused.", "eSIM 请求被拒绝。");
-  case JOB_UPLINK: return L("The Wi-Fi relay could not be switched.", "无法切换 Wi-Fi 中继。");
+  case JOB_UPLINK: return L("Wi-Fi relay request failed. Check its status.", "无线中继请求失败，请检查状态。");
+  case JOB_ADMIN: return L("Service change failed. Reload status; do not retry blindly.", "服务更改失败。请刷新状态，勿盲目重试。");
   default: return L("Apply failed. Check OpenUI.", "应用失败，请在 OpenUI 中检查。");
   }
 }
@@ -493,7 +546,8 @@ static void settle_jobs(void) {
   int kind = pending_kind;
   int finished = data.done >= pending && (!data.has_fresh || data.fresh >= pending);
   if (finished && data.result) {
-    snprintf(failure_text, sizeof(failure_text), "%s", data.failed_job == pending ? data.failure : "");
+    snprintf(failure_text, sizeof(failure_text), "%s", kind!=JOB_UPLINK&&kind!=JOB_ADMIN&&data.failed_job == pending ? data.failure : "");
+    if(kind==JOB_UPLINK){relay_editor_clear();relay_view=RV_STATUS;}
     snprintf(notice, sizeof(notice), "%s", job_failure(kind, data.result));
     pending = 0;
     pending_kind = 0;
@@ -531,6 +585,10 @@ static void settle_jobs(void) {
 }
 /* After each status: settings, the device draft, pages that are no longer shown, jobs. */
 static void track_status(int changed) {
+  if(relay_edit.active&&(page!=UPLINK||!data.relay.has||stale()||relay_edit.rev!=data.uplink.rev||
+      (relay_edit.from_scan&&(!relay_scan_fresh()||relay_edit.gen!=data.relay.gen))))relay_invalidate();
+  int relay_total=relay_view==RV_SCAN?data.relay.nw:data.relay.ns;
+  if(relay_offset>=relay_total)relay_offset=relay_total?(relay_total-1)/4*4:0;
   if (changed == 2) {
     page = settings_home;
     if (page == DEVICES) enter_devices();
@@ -549,6 +607,56 @@ static void track_status(int changed) {
   if (!reachable(page) && !dirty && !pending && !dialog) page = MENU;
   settle_jobs();
   need_draw = 1;
+}
+/* Offline synthetic keyboard timing: no display/input device, agent IPC,
+ * saved configuration or network is opened. Only aggregate timings are printed. */
+static long long keyboard_ns(void) {
+  struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);
+  return (long long)t.tv_sec*1000000000LL+t.tv_nsec;
+}
+static int keyboard_compare_ns(const void *a,const void *b) {
+  long long x=*(const long long *)a,y=*(const long long *)b;
+  return (x>y)-(x<y);
+}
+static int keyboard_benchmark(void) {
+  struct drm_buf frame={.pitch=W*2,.map=calloc(W*H,2)};
+  if(!frame.map)return 1;
+  memset(&data,0,sizeof(data));data.stamp=(unsigned long long)time(NULL);
+  data.uplink.has=1;data.uplink.rev=7;data.relay.has=1;data.relay.rev=7;
+  settings_menu=0x3fff;settings_zh=1;page=UPLINK;dialog=0;pending=0;
+  relay_begin();relay_edit.security=1;relay_key_open(RK_PASSWORD);
+  for(int policy=0;policy<2;policy++) {
+    relay_wipe(relay_edit.password,sizeof(relay_edit.password));
+    for(const char *s="mockkey8";*s;s++)relay_key_char((unsigned char)*s);
+    assert(render_changed(&frame,1));
+    int ax,ay,aw,ah,bx,by,bw,bh;
+    assert(html_view_rect("#rk61",&ax,&ay,&aw,&ah));
+    assert(html_view_rect("#rbs",&bx,&by,&bw,&bh));
+    int count=policy?128:16;long long total[128],hit[128],draw[128],sum=0;
+    unsigned long long full_before=relay_keyboard_scaffold_draws,dynamic_before=relay_keyboard_dynamic_draws;
+    for(int i=0;i<count;i++) {
+      long long start=keyboard_ns();
+      tap(i%2?bx+bw/2:ax+aw/2,i%2?by+bh/2:ay+ah/2);
+      long long clicked=keyboard_ns();
+      assert(strlen(relay_edit.password)==(size_t)(i%2?8:9));
+      assert(render_changed(&frame,!policy));
+      long long done=keyboard_ns();
+      hit[i]=clicked-start;draw[i]=done-clicked;total[i]=done-start;sum+=total[i];
+    }
+    unsigned long long full_count=relay_keyboard_scaffold_draws-full_before;
+    unsigned long long dynamic_count=relay_keyboard_dynamic_draws-dynamic_before;
+    assert(full_count==(unsigned long long)(policy?0:count)&&dynamic_count==(unsigned long long)(policy?count:0));
+    qsort(total,count,sizeof(total[0]),keyboard_compare_ns);
+    qsort(hit,count,sizeof(hit[0]),keyboard_compare_ns);
+    qsort(draw,count,sizeof(draw[0]),keyboard_compare_ns);
+    printf("{\"synthetic_keyboard\":\"%s\",\"samples\":%d,\"mean_ms\":%.3f,\"p50_ms\":%.3f,\"p95_ms\":%.3f,\"max_ms\":%.3f,\"hit_p95_ms\":%.3f,\"draw_p95_ms\":%.3f,\"scaffold_layouts\":%llu,\"input_repaints\":%llu}\n",
+      policy?"cached-scaffold":"forced-full",count,(double)sum/count/1e6,
+      total[count/2]/1e6,total[(count*95-1)/100]/1e6,total[count-1]/1e6,
+      hit[(count*95-1)/100]/1e6,draw[(count*95-1)/100]/1e6,full_count,dynamic_count);
+  }
+  relay_editor_clear();relay_view=RV_STATUS;relay_wipe(pixels,sizeof(pixels));
+  relay_wipe(html,sizeof(html));relay_wipe(drawn_html,sizeof(drawn_html));
+  drawn_valid=0;relay_wipe(frame.map,W*H*2);free(frame.map);return 0;
 }
 #ifndef SCREEN_PREVIEW
 static void putfile(const char *path, const char *s) {
@@ -753,8 +861,27 @@ static int restore(void) {
 struct input_touch {
   int fd, slot, id[2], x, y, xok, yok;
   struct input_absinfo ax, ay;
-  int down, sx, sy, moved, multi, dropped, suppress;
+  int down, sx, sy, moved, multi, dropped, suppress, wait_clean, resync_failed;
 };
+/* MT-B axes are state, not per-contact fields: the input core can omit an
+ * unchanged X or Y even after a new tracking ID. Query slot zero on open/resync
+ * and retain its known axes between contacts; never invent missing positions. */
+static void input_resync_apply(struct input_touch *t,int valid,int slot,int x,int y,int id0,int id1) {
+  t->down=0;t->xok=t->yok=0;t->wait_clean=1;t->resync_failed=1;
+  if(!valid||slot<0||slot>1||id0< -1||id1< -1||
+     x<t->ax.minimum||x>t->ax.maximum||y<t->ay.minimum||y>t->ay.maximum)return;
+  t->slot=slot;t->x=x;t->y=y;t->xok=t->yok=1;
+  t->id[0]=id0;t->id[1]=id1;t->wait_clean=id0>=0||id1>=0;t->resync_failed=0;
+}
+static void input_resync(struct input_touch *t) {
+  int xs[3]={ABS_MT_POSITION_X,0,0},ys[3]={ABS_MT_POSITION_Y,0,0};
+  int ids[3]={ABS_MT_TRACKING_ID,-1,-1};struct input_absinfo slot={0};
+  int ok=t->fd>=0&&ioctl(t->fd,EVIOCGABS(ABS_MT_SLOT),&slot)==0&&
+    ioctl(t->fd,EVIOCGMTSLOTS(sizeof(xs)),xs)==0&&
+    ioctl(t->fd,EVIOCGMTSLOTS(sizeof(ys)),ys)==0&&
+    ioctl(t->fd,EVIOCGMTSLOTS(sizeof(ids)),ids)==0;
+  input_resync_apply(t,ok,slot.value,xs[1],ys[1],ids[1],ids[2]);
+}
 static int input_open(struct input_touch *t) {
   memset(t, 0, sizeof(*t));
   t->fd = -1;
@@ -774,28 +901,31 @@ static int input_open(struct input_touch *t) {
     }
     close(fd);
   }
-  return t->fd >= 0 && t->ax.maximum > t->ax.minimum &&
-                 t->ay.maximum > t->ay.minimum
-             ? 0
-             : -1;
+  if (t->fd < 0 || t->ax.maximum <= t->ax.minimum ||
+      t->ay.maximum <= t->ay.minimum) return -1;
+  input_resync(t);
+  if(t->resync_failed){close(t->fd);t->fd=-1;return -1;}
+  return 0;
 }
 static int axis(int v, struct input_absinfo *a, int size) {
   long n = (long)(v - a->minimum) * (size - 1) / (a->maximum - a->minimum);
   return n < 0 ? 0 : n >= size ? size - 1 : (int)n;
 }
 static int input_event(struct input_touch *t, struct input_event *e) {
+  if(t->resync_failed)return -1;
   if (e->type == EV_SYN && e->code == SYN_DROPPED) {
     t->dropped = 1;
     t->down = 0;
+    t->wait_clean = 1;
     t->id[0] = t->id[1] = -1;
     return 0;
   }
   if (t->dropped) {
     if (e->type == EV_SYN && e->code == SYN_REPORT) {
       t->dropped = 0;
-      t->xok = t->yok = 0;
+      input_resync(t);
     }
-    return 0;
+    return t->resync_failed?-1:0;
   }
   if (e->type == EV_ABS) {
     if (e->code == ABS_MT_SLOT)
@@ -803,8 +933,7 @@ static int input_event(struct input_touch *t, struct input_event *e) {
     else if (t->slot >= 0 && t->slot < 2) {
       if (e->code == ABS_MT_TRACKING_ID) {
         t->id[t->slot] = e->value;
-        if (e->value >= 0 && t->slot == 0)
-          t->xok = t->yok = 0;
+        /* A new contact does not invalidate unchanged, known slot coordinates. */
       } else if (t->slot == 0 && e->code == ABS_MT_POSITION_X) {
         t->x = e->value;
         t->xok = 1;
@@ -818,6 +947,12 @@ static int input_event(struct input_touch *t, struct input_event *e) {
     t->id[0] = t->id[1] = -1;
   if (e->type != EV_SYN || e->code != SYN_REPORT)
     return 0;
+  /* Contacts held across opening or a lost-event resync cannot become a tap. */
+  if (t->wait_clean) {
+    if (t->id[0] < 0 && t->id[1] < 0) t->wait_clean = 0;
+    t->down = 0;
+    return 0;
+  }
   int x = axis(t->x, &t->ax, W), y = axis(t->y, &t->ay, H);
   rotate_point(&x, &y);
   if (t->id[1] >= 0)
@@ -840,6 +975,9 @@ static int input_event(struct input_touch *t, struct input_event *e) {
     return 1;
   }
   return t->id[0] >= 0;
+}
+static int input_draw_boundary(int was_dirty) {
+  return !was_dirty&&need_draw&&screen_awake;
 }
 static int input_self_test(void) {
   power_self_test();
@@ -869,7 +1007,43 @@ static int input_self_test(void) {
     input_event(&t, &e);
   }
   assert(quitting == 1);
-  quitting = 0;
+  /* Linux MT-B can omit both axes on repeated taps, or only the unchanged one.
+   * Repeated backspace must not require a finger-coordinate change to work. */
+  const struct input_event repeated[] = {
+      {.type=EV_ABS,.code=ABS_MT_TRACKING_ID,.value=2},
+      {.type=EV_SYN,.code=SYN_REPORT},
+      {.type=EV_ABS,.code=ABS_MT_TRACKING_ID,.value=-1},
+      {.type=EV_SYN,.code=SYN_REPORT}};
+  for (int repeat = 0; repeat < 8; repeat++) {
+    quitting = 0;
+    for (size_t i=0;i<sizeof(repeated)/sizeof(repeated[0]);i++) {
+      struct input_event e=repeated[i]; input_event(&t,&e);
+    }
+    assert(quitting == 1);
+  }
+  for (int axis_only = 0; axis_only < 2; axis_only++) {
+    quitting=0;
+    struct input_event e=repeated[0]; input_event(&t,&e);
+    e=(struct input_event){.type=EV_ABS,
+      .code=axis_only?ABS_MT_POSITION_Y:ABS_MT_POSITION_X,
+      .value=axis_only?458:70}; input_event(&t,&e);
+    for (size_t i=1;i<sizeof(repeated)/sizeof(repeated[0]);i++) {
+      e=repeated[i]; input_event(&t,&e);
+    }
+    assert(quitting == 1);
+  }
+  /* Unknown initial positions and contacts held over resync remain rejected. */
+  quitting=0;
+  struct input_touch unknown={.fd=-1,.id={-1,-1},.ax=t.ax,.ay=t.ay};
+  for (size_t i=0;i<sizeof(repeated)/sizeof(repeated[0]);i++) {
+    struct input_event e=repeated[i]; input_event(&unknown,&e);
+  }
+  assert(!quitting&&!unknown.xok&&!unknown.yok);
+  t.wait_clean=1;
+  for (size_t i=0;i<sizeof(events)/sizeof(events[0]);i++) {
+    struct input_event e=events[i];input_event(&t,&e);
+  }
+  assert(!quitting&&!t.wait_clean);
   screen_awake = 0;
   for (size_t i = 0; i < 5; i++) {
     struct input_event e = events[i]; input_event(&t, &e);
@@ -880,10 +1054,16 @@ static int input_self_test(void) {
   }
   assert(!quitting);
   t.suppress = 1; /* Entire dark tap queued before the wake key was drained. */
+  need_draw=1; /* Wake already requested a draw: must drain the WHOLE suppressed tap. */
   for (size_t i = 0; i < 7; i++) {
+    int was_dirty=need_draw;
     struct input_event e = events[i]; input_event(&t, &e);
+    assert(!input_draw_boundary(was_dirty));
   }
   assert(!quitting);
+  need_draw=0;
+  assert(!input_draw_boundary(0));need_draw=1;
+  assert(input_draw_boundary(0)&&!input_draw_boundary(1));need_draw=0;
   t.suppress = 0;
   for (size_t i = 0; i < 5; i++) {
     struct input_event e = events[i];
@@ -899,6 +1079,17 @@ static int input_self_test(void) {
     input_event(&t, &e);
   }
   assert(!quitting);
+  /* A second contact still suppresses a tap, including with cached axes. */
+  struct input_event second={.type=EV_ABS,.code=ABS_MT_SLOT,.value=1};input_event(&t,&second);
+  second=(struct input_event){.type=EV_ABS,.code=ABS_MT_TRACKING_ID,.value=3};input_event(&t,&second);
+  for(size_t i=0;i<sizeof(events)/sizeof(events[0]);i++){
+    struct input_event e=events[i];input_event(&t,&e);
+  }
+  assert(!quitting);
+  second=(struct input_event){.type=EV_ABS,.code=ABS_MT_SLOT,.value=1};input_event(&t,&second);
+  second=(struct input_event){.type=EV_ABS,.code=ABS_MT_TRACKING_ID,.value=-1};input_event(&t,&second);
+  second=(struct input_event){.type=EV_ABS,.code=ABS_MT_SLOT,.value=0};input_event(&t,&second);
+  input_event(&t,&syn);
   for (size_t i = 0; i < 5; i++) {
     struct input_event e = events[i];
     input_event(&t, &e);
@@ -910,9 +1101,25 @@ static int input_self_test(void) {
     struct input_event e = events[i];
     input_event(&t, &e);
   }
-  assert(!quitting);
+  assert(!quitting&&!t.xok&&!t.yok&&t.wait_clean&&t.resync_failed);
+  assert(input_event(&t,&syn)==-1&&t.wait_clean&&t.resync_failed);
+  /* Failed/missing ioctl state never becomes idle just because SYN arrived. */
+  input_resync_apply(&t,0,0,69,459,-1,-1);
+  assert(input_event(&t,&syn)==-1);
+  input_resync_apply(&t,1,2,69,459,-1,-1);
+  assert(input_event(&t,&syn)==-1);
+  input_resync_apply(&t,1,0,69,459,4,-1);
+  assert(!t.resync_failed&&t.wait_clean);
+  input_event(&t,&syn);assert(!t.down&&t.wait_clean);
+  input_resync_apply(&t,1,0,69,459,-1,-1);
+  assert(!t.wait_clean&&!t.resync_failed);
+  /* Only a known clean state after a lost stream can act again. */
+  for (size_t i=0;i<sizeof(events)/sizeof(events[0]);i++) {
+    struct input_event e=events[i];input_event(&t,&e);
+  }
+  assert(quitting);quitting=0;
   free(frame.map);
-  puts("Power press/repeat/long/drop, dark-touch rejection and rotated MT-B tests passed");
+  puts("Power, dark/multitouch rejection, MT-B cached/one-axis/repeated taps and loss-resync tests passed");
   return 0;
 }
 static int panel(int heartbeat, int idle_seconds) {
@@ -1049,8 +1256,13 @@ static int panel(int heartbeat, int idle_seconds) {
     }
     power_tick();
     while (read(input.fd, &ev, sizeof(ev)) == sizeof(ev)) {
-      if (input_event(&input, &ev) && screen_awake)
-        last = monotonic_ms();
+      int draw_before_event=need_draw;
+      int activity=input_event(&input,&ev);
+      if(activity<0)goto end;
+      if(activity&&screen_awake)last=monotonic_ms();
+      /* Only a NEW action-triggered draw breaks draining. A pending wake redraw
+       * must not split a suppressed dark tap across iterations. */
+      if (input_draw_boundary(draw_before_event)) break;
     }
   }
   result = power_check && check_step != 3 ? 1 : 0;
@@ -1191,6 +1403,7 @@ done:;
   return rc;
 }
 int main(int argc, char **argv) {
+  if (argc == 2 && !strcmp(argv[1], "--keyboard-bench"))return keyboard_benchmark();
   if (argc == 2 && !strcmp(argv[1], "--self-test"))
     return input_self_test();
   if (argc == 2 && !strcmp(argv[1], "--version")) {
@@ -1271,7 +1484,11 @@ static void press_id(struct drm_buf *b,const char *id) {
   render(b);
   char selector[48];snprintf(selector,sizeof(selector),"#%s",id);
   int x,y,w,h;
-  assert(html_view_rect(selector,&x,&y,&w,&h));
+  int found=html_view_rect(selector,&x,&y,&w,&h);
+  if(!found)fprintf(stderr,"press_id missing: selector=%s page=%d dialog=%d settings_menu=%d language=%s\n",selector,page,dialog,settings_menu,settings_zh?"zh":"en");
+  assert(found);
+  if(!strcmp(id,"tsnext")||!(w>=48&&h>=48&&x>=0&&y>=0&&x+w<=W&&y+h<=H))
+    fprintf(stderr,"press_id geometry: %s x=%d y=%d w=%d h=%d canvas=%dx%d\n",id,x,y,w,h,W,H);
   assert(w>=48&&h>=48&&x>=0&&y>=0&&x+w<=W&&y+h<=H);
   tap(x+w/2,y+h/2);
 }
@@ -1680,6 +1897,47 @@ static void esim_tests(struct drm_buf *b,const char *dir) {
   puts("PASS eSIM page (zh/en): W settings record, profile records, switch and restart confirmations, paging, stale generations, running jobs and card states");
 }
 /* The Wi-Fi relay page: Y settings, the R record, Overview's row, switching and states. */
+static void tailscale_tests(struct drm_buf *b,const char *dir) {
+  unsigned long long now=(unsigned long long)time(NULL);
+  char fixture[2048];
+  snprintf(fixture,sizeof(fixture),
+      "S 7 1 0 0 0 0 0 0 1 %llu\n"
+      "B\ttailscale\t0\t7\t1\t-\t0\t12\t1\t-\t0\t9\t1\t-\t0\n"
+      "T\t9\t42\t1\tRunning\t0\tus-oracle-a1\t%llu\n"
+      "t\t0\t1\tus-oracle-a1\nt\t1\t0\thk-exit\nt\t2\t0\tjp-exit\nt\t3\t0\tsg-exit\n"
+      "C 200 120 128 2 27 en\nY 200 120 128 2 113 en 1\n"
+      "F 200 120 128 14 16497 en 1\nJ 0 0 0 0 0\n.\n",now,now);
+  struct snapshot s;assert(parse_snapshot(fixture,&s));
+  assert(s.backend.active==BK_TS&&s.backend.rev[2]==9&&s.backend.ready[2]);
+  assert(s.tailscale.has&&s.tailscale.n==4&&s.tailscale.gen==42&&!strcmp(s.tailscale.rows[1].name,"hk-exit"));
+  data=s;settings_revision=0;assert(update_settings(&s)==2&&settings_home==TAILSCALE);
+  reset_job();stub_job="OK 1\n";page=MENU;dialog=0;dirty=0;capture_both(b,dir,"menu-tailscale");
+  assert(strstr(html,"act:tailscale")&&strstr(html,"Tailscale"));
+  press_id(b,"tailscale");assert(page==TAILSCALE);capture_both(b,dir,"tailscale");
+  assert(strstr(html,"Status != forwarding")&&strstr(html,"us-oracle-a1"));
+  press_id(b,"ts1");assert(dialog==5&&confirm_what==CF_TS);
+  capture_both(b,dir,"tailscale-confirm");press_id(b,"confirm");expect_request("ts 9 exit 42 1\n");reset_job();
+  press_id(b,"tsnext");assert(ts_offset==3);press_id(b,"ts0");press_id(b,"confirm");expect_request("ts 9 exit 42 3\n");reset_job();
+  press_id(b,"tsclear");press_id(b,"confirm");expect_request("ts 9 clear\n");reset_job();
+  press_id(b,"tstoggle");press_id(b,"confirm");expect_request("ts 9 disconnect\n");reset_job();
+  data.tailscale.enabled=0;press_id(b,"tstoggle");press_id(b,"confirm");expect_request("ts 9 connect\n");reset_job();data.tailscale.enabled=1;
+  data.tailscale.stamp=now-20;test_request[0]=0;press_id(b,"tstoggle");assert(!dialog&&!test_request[0]);data.tailscale.stamp=now;
+  /* A dialog opened fresh must not outlive its own T snapshot, even with S fresh.
+   * Check both rendered disabled state and dispatch, not only hit testing. */
+  press_id(b,"tstoggle");assert(dialog==5&&confirm_what==CF_TS);
+  data.stamp=now;data.tailscale.stamp=now-20;
+  render(b);assert(strstr(html,"id=\"confirm\" href=\"act:none\""));
+  press_id(b,"confirm");dialog_tap("confirm");assert(dialog==5&&!pending&&!test_request[0]);
+  data.tailscale.stamp=now;data.tailscale.has=0;
+  render(b);assert(strstr(html,"id=\"confirm\" href=\"act:none\""));
+  press_id(b,"confirm");dialog_tap("confirm");assert(dialog==5&&!pending&&!test_request[0]);
+  data.tailscale.has=1;press_id(b,"dismiss");assert(!dialog);
+  page=PROXY;capture_both(b,dir,"proxy-tailscale");assert(strstr(html,"Tailscale")&&!strstr(html,"Devices use the normal network"));
+  press_id(b,"bk0");press_id(b,"confirm");expect_request("backend 9 off tailscale\n");reset_job();
+  press_id(b,"tailscale");assert(page==TAILSCALE);press_id(b,"back");assert(page==PROXY);
+  settings_menu=16;assert(!reachable(TAILSCALE));page=MENU;render(b);assert(!strstr(html,"act:tailscale"));
+  puts("PASS Tailscale redacted records, explicit third mode, indexed choices, paging, stale controls and backend-off revision");
+}
 static void uplink_tests(struct drm_buf *b,const char *dir) {
   char text[4096];
   struct snapshot s,prefs;
@@ -1704,10 +1962,15 @@ static void uplink_tests(struct drm_buf *b,const char *dir) {
   /* A malformed R record is ignored. */
   char bad_r[]="V 55 90 200 2 112 zh\nR\t6\t1\tz\t-\tX\t-\t-\t-\t0\t0\t0\t1\nR\t6\t1\tn\n.\n";
   assert(parse_snapshot(bad_r,&prefs)&&!prefs.uplink.has);
-  settings_zh=1;settings_menu=464;
+  settings_zh=1;settings_menu=(1<<OVERVIEW)|(1<<UPLINK)|(1<<PROXY);
+  page=MENU;render(b);
+  const char *overview_link=strstr(html,"id=\"overview\""),*uplink_link=strstr(html,"id=\"uplink\""),*proxy_link=strstr(html,"id=\"proxy\"");
+  assert(overview_link&&uplink_link&&proxy_link&&overview_link<uplink_link&&uplink_link<proxy_link);
+  settings_menu=464;
   page=MENU;capture_both(b,dir,"menu-uplink");assert(strstr(html,"act:uplink")&&strstr(html,"Hotel"));
   press_id(b,"uplink");assert(page==UPLINK);capture_both(b,dir,"uplink");
-  assert(strstr(html,"192.168.50.23")&&strstr(html,"Traffic: Wi-Fi")&&strstr(html,"-58 dBm"));
+  assert(strstr(html,"192.168.50.23")&&strstr(html,"Wi-Fi upstream connected.")&&strstr(html,"Routing policy: see OpenUI")&&strstr(html,"-58 dBm"));
+  assert(!strstr(html,"All traffic")&&!strstr(html,"Traffic: Wi-Fi"));
   /* Turning off asks first and names the revision shown. */
   press_id(b,"utoggle");assert(dialog==5&&confirm_what==CF_UPLINK&&!confirm_target&&confirm_rev==6);
   capture_both(b,dir,"uplink-confirm-off");
@@ -1724,18 +1987,34 @@ static void uplink_tests(struct drm_buf *b,const char *dir) {
   data.uplink.state='i';snprintf(data.uplink.reason,sizeof(data.uplink.reason),"internet");
   snprintf(data.uplink.ssid,sizeof(data.uplink.ssid),"Cafe");snprintf(data.uplink.ip,sizeof(data.uplink.ip),"10.0.0.8");
   capture_both(b,dir,"uplink-nointernet");assert(strstr(html,"no internet")&&strstr(html,"id=\"ulogin\" href=\"act:ulogin\""));
-  /* A web login: login mode starts at once (no confirmation), then traffic is on Wi-Fi. */
+  /* Login changes routing, so opening or cancelling its confirmation sends nothing. */
   data.uplink.state='p';snprintf(data.uplink.reason,sizeof(data.uplink.reason),"portal");
   capture_both(b,dir,"uplink-portal");assert(strstr(html,"web login")&&strstr(html,"Start login"));
-  press_id(b,"ulogin");expect_request("uplink login\n");assert(pending_kind==JOB_UPLINK&&!dialog);reset_job();
+  test_request[0]=0;press_id(b,"ulogin");
+  assert(dialog==5&&confirm_what==CF_UPLINK&&confirm_target==2&&confirm_rev==6&&!test_request[0]);
+  assert(!strcmp(confirm_req,"uplink login\n"));
+  capture_both(b,dir,"uplink-confirm-login");assert(strstr(html,"Changes routing"));
+  press_id(b,"dismiss");assert(!dialog&&!test_request[0]);
+  press_id(b,"ulogin");data.uplink.ip[0]=0;render(b);
+  assert(strstr(html,"id=\"confirm\" href=\"act:none\""));
+  dialog_tap("confirm");assert(dialog==5&&!pending&&!test_request[0]);
+  snprintf(data.uplink.ip,sizeof(data.uplink.ip),"10.0.0.8");
+  press_id(b,"confirm");expect_request("uplink login\n");assert(pending_kind==JOB_UPLINK&&!dialog&&pending_revision==0);reset_job();
   data.uplink.state='g';data.uplink.reason[0]=0;
-  capture_both(b,dir,"uplink-login");assert(strstr(html,"Traffic: Wi-Fi")&&strstr(html,"id=\"ulogin\" href=\"act:none\""));
+  capture_both(b,dir,"uplink-login");assert(strstr(html,"Routing policy: see OpenUI")&&strstr(html,"id=\"ulogin\" href=\"act:none\""));
   data.uplink.state='i';snprintf(data.uplink.reason,sizeof(data.uplink.reason),"internet");
   data.uplink.state='u';snprintf(data.uplink.reason,sizeof(data.uplink.reason),"supplicant");data.uplink.ssid[0]=0;data.uplink.ip[0]=0;
   capture(b,dir,"uplink-unavailable");assert(strstr(html,"wpa_supplicant"));
   data.uplink.state='o';data.uplink.enabled=0;data.uplink.reason[0]=0;data.uplink.rx=data.uplink.tx=0;
   capture_both(b,dir,"uplink-off");
   press_id(b,"utoggle");assert(dialog==5&&confirm_target==1);capture_both(b,dir,"uplink-confirm-on");
+  assert(strstr(html,"Shared radio")&&strstr(html,"hotspot coexistence unverified")&&!strstr(html,"all traffic"));
+  test_request[0]=0;data.stamp=now-20;render(b);assert(strstr(html,"id=\"confirm\" href=\"act:none\""));
+  dialog_tap("confirm");assert(dialog==5&&!pending&&!test_request[0]);
+  data.stamp=now;data.uplink.rev=7;render(b);assert(strstr(html,"id=\"confirm\" href=\"act:none\""));
+  dialog_tap("confirm");assert(dialog==5&&!pending&&!test_request[0]);
+  data.uplink.rev=6;data.uplink.saved=0;render(b);assert(strstr(html,"id=\"confirm\" href=\"act:none\""));
+  dialog_tap("confirm");assert(dialog==5&&!pending&&!test_request[0]);data.uplink.saved=2;
   press_id(b,"confirm");expect_request("uplink 6 on\n");reset_job();
   /* Nothing saved: turning on is refused here, networks are added on the webpage. */
   data.uplink.saved=0;render(b);assert(strstr(html,"id=\"utoggle\" href=\"act:none\""));capture(b,dir,"uplink-empty");
@@ -1744,17 +2023,22 @@ static void uplink_tests(struct drm_buf *b,const char *dir) {
   /* Stale status disables the switch. */
   data.stamp=now-20;render(b);assert(strstr(html,"id=\"utoggle\" href=\"act:none\""));data.stamp=now;
   press_id(b,"back");assert(page==MENU);
-  /* Overview shows the relay without the menu item and goes back to Overview. */
+  /* Overview no longer duplicates relay navigation; the independent menu remains. */
   settings_menu=240;data.uplink.state='n';data.uplink.enabled=1;snprintf(data.uplink.ssid,sizeof(data.uplink.ssid),"Hotel 酒店 5G");
   assert(!visible_page(UPLINK)&&reachable(UPLINK));
   page=MENU;render(b);assert(!strstr(html,"act:uplink"));
   settings_menu=240;page=OVERVIEW;capture_both(b,dir,"overview-uplink");
-  press_id(b,"uplink");assert(page==UPLINK&&uplink_from==OVERVIEW);press_id(b,"back");assert(page==OVERVIEW);
+  assert(!strstr(html,"act:uplink"));
+  settings_menu=496;page=MENU;press_id(b,"uplink");assert(page==UPLINK&&uplink_from==MENU);press_id(b,"back");assert(page==MENU);
   /* An agent without the relay: no row, and the page is not reachable. */
-  data.uplink.has=0;assert(!reachable(UPLINK));render(b);assert(!strstr(html,"act:uplink"));
+  settings_menu=240;data.uplink.has=0;assert(!reachable(UPLINK));render(b);assert(!strstr(html,"act:uplink"));
   page=UPLINK;track_status(0);assert(page==MENU);
-  puts("PASS Wi-Fi relay page (zh/en): Y settings record, R record, menu and Overview rows, on/off confirmations, conflicts and states");
+  puts("PASS Wi-Fi relay page (zh/en): Y settings record, R record, menu-only navigation, on/off confirmations, conflicts and states");
 }
+#include "devui/relay_tests.h"
+#include "devui/admin_tests.h"
+#include "devui/usblan_tests.h"
+#include "devui/wifi_tests.h"
 static void toolbox_tests(struct drm_buf *b, const char *dir) {
   char text[4096];
   struct snapshot s;
@@ -1776,7 +2060,11 @@ static void toolbox_tests(struct drm_buf *b, const char *dir) {
   press_id(b,"back");assert(page==MENU);
   press_id(b,"usb");assert(page==USB_PAGE);capture_both(b,dir,"toolbox-usb");
   press_id(b,"ttl65");expect_request("tool ttl 65\n");reset_job();
-  press_id(b,"usb1");expect_request("tool usb_mode ncm\n");reset_job();
+  /* Picking only marks a mode; Apply sends it, and re-picking the active one disables Apply. */
+  press_id(b,"usb1");assert(usb_draft==1&&!test_request[0]);capture_both(b,dir,"toolbox-usb-picked");
+  press_id(b,"usbapply");expect_request("tool usb_mode ecm\n");assert(usb_draft==-1);reset_job();
+  press_id(b,"usb0");press_id(b,"usbapply");assert(!test_request[0]);
+  press_id_absent(b,"usb2");
   assert(!strstr(html,"usbadb"));
   press_id(b,"back");assert(page==MENU);
   press_id(b,"power");assert(page==POWER_PAGE);capture_both(b,dir,"toolbox-power");
@@ -1873,6 +2161,7 @@ static int replay(int argc, char **argv) {
   return 0;
 }
 int main(int argc, char **argv) {
+  if (argc == 2 && !strcmp(argv[1], "--keyboard-bench"))return keyboard_benchmark();
   if (argc >= 3 && !strcmp(argv[1], "--replay")) return replay(argc, argv);
   power_self_test();
   if(argc<2)return 2;
@@ -1928,7 +2217,8 @@ int main(int argc, char **argv) {
   assert(!update_settings(&prefs));
   page=MENU;capture(&b,argv[1],"menu-custom");
   assert(strstr(html,"act:overview") && !strstr(html,"act:wireguard"));
-  press_id(&b,"overview");assert(page==OVERVIEW);press_id(&b,"wireguard");assert(page==OVERVIEW);
+  press_id(&b,"overview");assert(page==OVERVIEW);
+  press_id_absent(&b,"wireguard");assert(!reachable(WG)&&page==OVERVIEW);
   data.battery=12;capture(&b,argv[1],"battery-low");assert(strstr(html,"12%") && strstr(html,"#f06a6a"));
   data.battery=-1;capture(&b,argv[1],"battery-unknown");assert(strstr(html,"--%"));
   char bad_settings[]="C 4 0 0 4 99\n.\n";assert(!parse_snapshot(bad_settings,&prefs));
@@ -1950,7 +2240,12 @@ int main(int argc, char **argv) {
   proxy_tests(&b,argv[1]);
   esim_tests(&b,argv[1]);
   uplink_tests(&b,argv[1]);
+  relay_full_tests(&b,argv[1]);
   toolbox_tests(&b,argv[1]);
+  tailscale_tests(&b,argv[1]);
+  admin_tests(&b,argv[1]);
+  usblan_tests(&b,argv[1]);
+  wifi_tests(&b,argv[1]);
   free(b.map);
   return 0;
 }

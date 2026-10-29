@@ -3,14 +3,14 @@
  * list generation, so no name has to be parsed by the agent.
  * Copyright (c) 2026 ZweiChen. GPL-3.0-or-later. */
 #include <limits.h>
-enum { BK_OFF, BK_WG, BK_CLASH };
+enum { BK_OFF, BK_WG, BK_CLASH, BK_TS };
 /* A diagnosis figure the agent did not report. */
 #define NO_FIGURE LLONG_MIN
 struct backend_info {
   int has, active, conflict;
-  unsigned long long rev[2]; /* WireGuard, Clash */
-  int ready[2], error[2];
-  char reason[2][12];
+  unsigned long long rev[3]; /* WireGuard, Clash */
+  int ready[3], error[3];
+  char reason[3][12];
 };
 struct clash_info {
   int has, enabled, running, connected, installed;
@@ -51,6 +51,27 @@ struct uplink_info {
   unsigned long long rev, rx, tx, since;
   char state, reason[12], ssid[65], band[4], ip[16];
 };
+/* L/l/w are credential-free relay catalogues, tied to R revision. */
+struct relay_saved { unsigned long long id; int preferred,security,hidden,has_password; char ssid[33]; };
+struct relay_scan { int index,security,signal,frequency; char ssid[33]; };
+struct relay_catalog {
+  int has, state, saved_count,scan_count,ns,nw;
+  unsigned long long rev,gen,stamp;
+  struct relay_saved saved[8];struct relay_scan scan[60];
+};
+struct tailscale_row { int index, selected; char name[49]; };
+struct tailscale_info {
+  int has, enabled, error, n;
+  unsigned long long rev, gen, stamp;
+  char state[20], selected[49];
+  struct tailscale_row rows[32];
+};
+/* A version 1: privileged access, never credentials. Absent/invalid is unknown. */
+struct admin_info {
+  int has, busy, adb_running, adb_exposed, adb_boot, ssh_running, ssh_boot;
+  int adb_available, ssh_available;
+  unsigned long long rev, stamp;
+};
 struct toolbox_info {
   int has;
   long long rssi, rsrp, rsrq, sinr;
@@ -67,6 +88,13 @@ struct toolbox_info {
   unsigned long long chg_max, chg_stop, chg_start, batt_mv;
   long long batt_ma;
   char batt_health[24];
+  /* Appended fields; an older agent sends 32 and has_usb_lan stays 0 (unknown). */
+  /* usb_lan_state: 0 not shared, 1 bridged and waiting for a USB host, 2 host linked. */
+  int has_usb_lan, usb_lan_on, usb_lan_state;
+  char usb_lan_iface[16];
+  /* Further appended: transmit power percent and dBm per band (0 = unknown). */
+  int has_wifi_power;
+  unsigned long long wifi_pct_2g, wifi_pct_5g, wifi_dbm_2g, wifi_dbm_5g;
 };
 struct group_row { int index, selectable, members, now; char type[16], name[193], now_name[193]; };
 /* state: -1 no answer, 0 loading, 1 ready, 2 Clash not running. */
@@ -133,9 +161,9 @@ static long long figure_field(const char *s) { return strcmp(s, "-") ? strtoll(s
 /* B active conflict, then per backend: revision ready reason error. */
 static void parse_backend(char **f, int n, struct backend_info *b) {
   if (n < 11) return;
-  b->active = !strcmp(f[1], "wireguard") ? BK_WG : !strcmp(f[1], "clash") ? BK_CLASH : BK_OFF;
+  b->active = !strcmp(f[1], "wireguard") ? BK_WG : !strcmp(f[1], "clash") ? BK_CLASH : !strcmp(f[1], "tailscale") ? BK_TS : BK_OFF;
   b->conflict = atoi(f[2]) != 0;
-  for (int i = 0; i < 2; i++) {
+  for (int i = 0; i < (n >= 15 ? 3 : 2); i++) {
     b->rev[i] = u64_field(f[3 + 4 * i]);
     b->ready[i] = atoi(f[4 + 4 * i]) != 0;
     COPY(b->reason[i], f[5 + 4 * i]);
@@ -255,10 +283,30 @@ static void parse_uplink(char **f, int n, struct uplink_info *u) {
   u->saved = atoi(f[12]);
   u->has = 1;
 }
+/* I mac band signal secs ip name: a Wi-Fi station. i mac name: a blocked MAC. */
+struct wifi_sta { char mac[18], ip[16], name[49]; int band; long long signal; unsigned long long secs; };
+struct wifi_blocked { char mac[18], name[49]; };
+static int valid_mac(const char *m) {
+  if(strlen(m)!=17)return 0;
+  for(int i=0;i<17;i++)if(i%3==2?m[i]!=':':!m[i]||!strchr("0123456789abcdefABCDEF",m[i]))return 0;
+  return 1;
+}
+static int parse_wifi_sta(char **f, int n, struct wifi_sta *w) {
+  if(n<7||!valid_mac(f[1]))return 0;
+  COPY(w->mac,f[1]);w->band=atoi(f[2])==5?5:2;w->signal=strtoll(f[3],NULL,10);w->secs=u64_field(f[4]);
+  COPY(w->ip,f[5]);copy_name(w->name,sizeof(w->name),f[6]);
+  return 1;
+}
+static int parse_wifi_blocked(char **f, int n, struct wifi_blocked *b) {
+  if(n<3||!valid_mac(f[1]))return 0;
+  COPY(b->mac,f[1]);copy_name(b->name,sizeof(b->name),f[2]);
+  return 1;
+}
 /* H rssi rsrp rsrq sinr radio band net_select lte_bands nr_bands pci kbps_down kbps_up
  * cpu_pct mem_pct temp_mc bloat_cnt wifi_2g_on wifi_5g_on wifi_clients wifi_ssid
  * usb_mode usb_adb ttl_val chg_enabled chg_limit_on chg_max chg_stop chg_start
- * batt_mv batt_ma batt_health */
+ * batt_mv batt_ma batt_health [usb_lan_on usb_lan_state usb_lan_iface]
+ * [wifi_pct_2g wifi_pct_5g wifi_dbm_2g wifi_dbm_5g] */
 static void parse_toolbox(char **f, int n, struct toolbox_info *h) {
   if (n < 32) return;
   h->has = 1;
@@ -293,6 +341,19 @@ static void parse_toolbox(char **f, int n, struct toolbox_info *h) {
   h->batt_mv = u64_field(f[29]);
   h->batt_ma = strtoll(f[30], NULL, 10);
   COPY(h->batt_health, f[31]);
+  h->has_usb_lan = n >= 35;
+  if (h->has_usb_lan) {
+    h->usb_lan_on = atoi(f[32]) != 0;
+    h->usb_lan_state = atoi(f[33]);
+    COPY(h->usb_lan_iface, f[34]);
+  }
+  h->has_wifi_power = n >= 39;
+  if (h->has_wifi_power) {
+    h->wifi_pct_2g = u64_field(f[35]);
+    h->wifi_pct_5g = u64_field(f[36]);
+    h->wifi_dbm_2g = u64_field(f[37]);
+    h->wifi_dbm_5g = u64_field(f[38]);
+  }
 }
 /* Reply to "groups <offset>": G state generation total offset, g rows. */
 static int parse_groups(char *buf, struct groups_view *out) {
@@ -350,4 +411,98 @@ static int parse_nodes(char *buf, struct nodes_view *out) {
   if (!v.ok) return 0;
   *out = v;
   return 1;
+}
+
+static int relay_security(const char *s) {
+  const char *const names[]={"open","wpa2","wpa3","wpa2_wpa3","unsupported"};
+  for(int i=0;i<5;i++)if(!strcmp(s,names[i]))return i;
+  return -1;
+}
+static int relay_number(const char *s,unsigned long long *v) {
+  if(!*s)return 0;
+  for(const char *p=s;*p;p++)if(*p<'0'||*p>'9')return 0;
+  char *end;errno=0;*v=strtoull(s,&end,10);return !errno&&!*end;
+}
+static int relay_bool(const char *s) { return !strcmp(s,"0")||!strcmp(s,"1"); }
+/* Exact A12 schema. Validate everything before publishing, including overflow and
+ * boolean spelling: neither missing nor malformed fields may masquerade as OFF. */
+static void parse_admin(char **f, int n, struct admin_info *a) {
+  struct admin_info next = {0};
+  memset(a, 0, sizeof(*a));
+  if(n!=12 || strcmp(f[0],"A") || strcmp(f[1],"1") ||
+     !relay_number(f[2],&next.rev) ||
+     !relay_number(f[3],&next.stamp) || !next.stamp) return;
+  for(int i=4;i<12;i++) if(!relay_bool(f[i])) return;
+  next.has=1;next.busy=f[4][0]-'0';next.adb_running=f[5][0]-'0';
+  next.adb_exposed=f[6][0]-'0';next.adb_boot=f[7][0]-'0';
+  next.ssh_running=f[8][0]-'0';next.ssh_boot=f[9][0]-'0';
+  next.adb_available=f[10][0]-'0';next.ssh_available=f[11][0]-'0';
+  *a=next;
+}
+/* SSID bytes must stay exact: validate, never sanitize or trim them. */
+static int relay_ssid_utf8(const unsigned char *s,size_t n) {
+  if(!n||n>32)return 0;
+  for(size_t i=0;i<n;) {
+    unsigned c=s[i++],cp,min=0;size_t more;
+    if(c<0x80){cp=c;more=0;}
+    else if(c>=0xc2&&c<=0xdf){cp=c&0x1f;more=1;min=0x80;}
+    else if(c>=0xe0&&c<=0xef){cp=c&0x0f;more=2;min=0x800;}
+    else if(c>=0xf0&&c<=0xf4){cp=c&7;more=3;min=0x10000;}
+    else return 0;
+    if(i+more>n)return 0;
+    while(more){more--;c=s[i++];if(c<0x80||c>0xbf)return 0;cp=(cp<<6)|(c&0x3f);}
+    if(cp<min||cp>0x10ffff||(cp>=0xd800&&cp<=0xdfff)||cp<0x20||(cp>=0x7f&&cp<=0x9f))return 0;
+  }
+  return 1;
+}
+static int relay_unhex(char *dst,const char *s) {
+  size_t n=strlen(s);if(n<2||n>64||n%2)return 0;
+  for(size_t i=0;i<n;i+=2) {
+    unsigned v=0;
+    for(size_t j=i;j<i+2;j++) {
+      char c=s[j];int x=c>='0'&&c<='9'?c-'0':c>='a'&&c<='f'?c-'a'+10:c>='A'&&c<='F'?c-'A'+10:-1;
+      if(x<0)return 0;v=v*16+(unsigned)x;
+    }
+    if(!v)return 0;dst[i/2]=(char)v;
+  }
+  dst[n/2]=0;return relay_ssid_utf8((const unsigned char*)dst,n/2);
+}
+static void parse_relay(char **f,int n,struct relay_catalog *r) {
+  unsigned long long rev,gen,stamp,ns,nw;
+  if(n!=7||!relay_number(f[1],&rev)||!relay_number(f[2],&gen)||!relay_number(f[4],&stamp)||
+     !relay_number(f[5],&ns)||!relay_number(f[6],&nw)||ns>8||nw>60)return;
+  int state=!strcmp(f[3],"idle")?0:!strcmp(f[3],"running")?1:!strcmp(f[3],"ready")?2:!strcmp(f[3],"failed")?3:-1;
+  if(state<0||(state!=2&&nw))return;
+  r->has=1;r->rev=rev;r->gen=gen;r->stamp=stamp;r->state=state;r->saved_count=(int)ns;r->scan_count=(int)nw;
+}
+static void parse_relay_saved(char **f,int n,struct relay_catalog *r) {
+  struct relay_saved s={0};
+  if(!r->has||n!=7||r->ns>=r->saved_count||!relay_number(f[1],&s.id)||!s.id||
+     !relay_bool(f[2])||!relay_bool(f[4])||!relay_bool(f[5])||
+     (s.security=relay_security(f[3]))<0||s.security>3||!relay_unhex(s.ssid,f[6]))return;
+  for(int i=0;i<r->ns;i++)if(r->saved[i].id==s.id)return;
+  s.preferred=atoi(f[2]);s.hidden=atoi(f[4]);s.has_password=atoi(f[5]);r->saved[r->ns++]=s;
+}
+static void parse_relay_scan(char **f,int n,struct relay_catalog *r) {
+  struct relay_scan s={0};unsigned long long index,freq;char *end;
+  if(!r->has||r->state!=2||n!=6||r->nw>=r->scan_count||!relay_number(f[1],&index)||index!=(unsigned)r->nw||
+     (s.security=relay_security(f[2]))<0||!relay_number(f[4],&freq)||freq>100000||!relay_unhex(s.ssid,f[5]))return;
+  long signal=strtol(f[3],&end,10);if(!*f[3]||*end||signal < -150||signal>0)return;
+  s.index=(int)index;s.signal=(int)signal;s.frequency=(int)freq;r->scan[r->nw++]=s;
+}
+/* T/t contain only redacted status and bounded index/name choices. */
+static void parse_tailscale(char **f, int n, struct tailscale_info *t) {
+  if(n != 8 || (strcmp(f[3],"0") && strcmp(f[3],"1")) ||
+     (strcmp(f[5],"0") && strcmp(f[5],"1"))) return;
+  if(strcmp(f[4],"Running") && strcmp(f[4],"Stopped") && strcmp(f[4],"Starting") &&
+     strcmp(f[4],"NeedsLogin") && strcmp(f[4],"NeedsMachineAuth") && strcmp(f[4],"Unavailable")) return;
+  t->has=1;t->rev=u64_field(f[1]);t->gen=u64_field(f[2]);
+  t->stamp=u64_field(f[7]);t->enabled=atoi(f[3]);t->error=atoi(f[5]);COPY(t->state,f[4]);
+  copy_name(t->selected,sizeof(t->selected),f[6]);
+}
+static void parse_tailscale_row(char **f,int n,struct tailscale_info *t) {
+  if(!t->has || n!=4 || t->n>=32 || u64_field(f[1])!=(unsigned)t->n ||
+     (strcmp(f[2],"0") && strcmp(f[2],"1"))) return;
+  struct tailscale_row *r=&t->rows[t->n];r->index=t->n++;r->selected=atoi(f[2]);
+  copy_name(r->name,sizeof(r->name),f[3]);
 }

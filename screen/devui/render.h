@@ -43,7 +43,7 @@ static void shortened(const char *text, int width, int size) {
     while(n>0&&((unsigned char)label[n]&0xc0)==0x80)n--;
     strcpy(label+n,"...");
   }
-  escaped(label);
+  escaped(label);relay_wipe(label,sizeof(label));
 }
 static void box(int x, int y, int w, int h, const char *cls, const char *label) {
   add("<div class=\"box %s\" style=\"left:%dpx;top:%dpx;width:%dpx;height:%dpx\">", cls, x,y,w,h);
@@ -146,6 +146,52 @@ static void switch_row(int x, int y, int w, int h, const char *id, const char *a
   add("<div class=\"box track%s\" style=\"left:%dpx;top:%dpx;width:44px;height:24px\"></div>",on?" on":"",w-58,(h-24)/2);
   add("<div class=\"box knob\" style=\"left:%dpx;top:%dpx;width:18px;height:18px\"></div></a>",w-58+(on?23:3),(h-24)/2+3);
 }
+/* Four 48px targets on Overview; unknown is a label, never an OFF switch. */
+static void admin_row(int row, int y) {
+  const struct admin_info *a=&data.admin;
+  const char *title=row==0?L("ADB now","ADB 即时开关"):row==1?L("ADB at boot","ADB 开机自启"):
+                    row==2?L("SSH now","SSH 即时开关"):L("SSH at boot","SSH 开机自启");
+  char id[16];snprintf(id,sizeof(id),"admin%d",row);
+  int available=row<2?a->adb_available:a->ssh_available;
+  if(!admin_fresh()||!available) {
+    add("<a id=\"%s\" href=\"act:none\" class=\"box row off\" style=\"left:12px;top:%dpx;width:296px;height:48px\">",id,y);
+    add("<div class=\"name\" style=\"top:3px;right:12px\">");escaped(title);add("</div>");
+    add("<div class=\"sub\" style=\"top:25px;right:12px\">");escaped(!admin_fresh()?L("Unknown / stale","未知 / 已过期"):L("Unavailable","不可用"));add("</div></a>");
+    return;
+  }
+  const char *detail=(row&1)?(admin_value(row)?L("On · next boot only","开 · 仅影响下次启动"):L("Off · next boot only","关 · 仅影响下次启动")):
+                           (admin_value(row)?L("On · runtime only","开 · 仅本次运行"):L("Off · runtime only","关 · 仅本次运行"));
+  if(row==0&&!a->adb_exposed)detail=a->adb_running?L("Daemon on · USB hidden","进程已开 · USB 未暴露"):L("No ADB USB function","无 ADB USB 功能");
+  switch_row(12,y,296,48,id,id,title,detail,admin_value(row),admin_can(row));
+}
+/* USB modes in the USB page's order; -1 when the active one is none of them. The B31
+ * firmware switches only these two (its composition script has no NCM). */
+static const char *const usb_modes[]={"rndis","ecm"};
+static int usb_mode_index(const char *mode) {
+  for(int i=0;i<2;i++)if(!strncmp(mode,usb_modes[i],strlen(usb_modes[i])))return i;
+  return -1;
+}
+/* Overview's USB LAN switch; no record (older agent) or a stale one is a label, not OFF. */
+static int usb_lan_can(void) { return !blocked()&&data.toolbox.has&&data.toolbox.has_usb_lan; }
+static void usb_lan_row(int y) {
+  const struct toolbox_info *h=&data.toolbox;
+  const char *title=L("USB LAN","USB 网络共享");
+  if(!h->has||!h->has_usb_lan||stale()) {
+    add("<a id=\"ulan\" href=\"act:none\" class=\"box row off\" style=\"left:12px;top:%dpx;width:296px;height:48px\">",y);
+    add("<div class=\"name\" style=\"top:3px;right:12px\">");escaped(title);add("</div>");
+    add("<div class=\"sub\" style=\"top:25px;right:12px\">");escaped(L("Unknown / stale","未知 / 已过期"));add("</div></a>");
+    return;
+  }
+  char detail[96];
+  int has_if=h->usb_lan_iface[0]&&strcmp(h->usb_lan_iface,"-");
+  if(pending&&pending_kind==JOB_TOOL)snprintf(detail,sizeof(detail),"%s",L("Applying…","正在应用…"));
+  else if(!h->usb_lan_on)snprintf(detail,sizeof(detail),"%s",L("Off · not shared over USB","关 · 不向 USB 设备共享网络"));
+  else if(!has_if)snprintf(detail,sizeof(detail),"%s",L("On · no USB adapter","开 · 未检测到 USB 网卡"));
+  else if(h->usb_lan_state==2)snprintf(detail,sizeof(detail),L("On · %s connected","开 · %s 已连接"),h->usb_lan_iface);
+  else if(h->usb_lan_state==1)snprintf(detail,sizeof(detail),L("On · waiting for USB host","开 · 等待 USB 设备连接"));
+  else snprintf(detail,sizeof(detail),L("On · %s not up yet","开 · %s 尚未生效"),h->usb_lan_iface);
+  switch_row(12,y,296,48,"ulan",h->usb_lan_on?"ulan0":"ulan1",title,detail,h->usb_lan_on,usb_lan_can());
+}
 static void dialog_card(int y, int h) {
   rect(0,61,W,H-61,"shade",NULL);
   add("<div class=\"box card\" style=\"left:12px;top:%dpx;width:296px;height:%dpx\"></div>",y,h);
@@ -159,8 +205,9 @@ static const char *menu_title(int p, int tile) {
   case PROXY: return L("Proxy","代理");
   case WG: return "WireGuard";
   case CLASH: return "Clash";
+  case TAILSCALE: return "Tailscale";
   case ESIM: return "eSIM";
-  case UPLINK: return L("Wi-Fi relay","Wi-Fi 中继");
+  case UPLINK: return L("Wi-Fi relay","无线中继");
   case WIFI_PAGE: return "Wi-Fi";
   case SIGNAL_PAGE: return L("Signal","信号");
   case USB_PAGE: return tile?L("USB & TTL","USB/TTL"):L("USB & TTL","USB 与 TTL");
@@ -176,6 +223,7 @@ static const char *menu_icon(int p) {
   case PROXY: return "&#8644;";         /* ⇄ */
   case WG: return "&#9919;";            /* ⚿ */
   case CLASH: return "&#10022;";        /* ✦ */
+  case TAILSCALE: return "&#8644;";
   case ESIM: return "&#9635;";          /* ▣ */
   case UPLINK: return "&#8673;";        /* ⇡ */
   case WIFI_PAGE: return "&#8779;";     /* ≋ */
@@ -191,10 +239,11 @@ static const char *menu_detail(int p) {
   const struct backend_info *bk=&data.backend;
   switch(p) {
   case OVERVIEW: return L("Battery, uptime and load","电池、运行时间与系统负载");
-  case PROXY: return !bk->has||bk->active==BK_OFF?L("Off / WireGuard / Clash","关闭 / WireGuard / Clash"):
-    bk->active==BK_WG?L("Active: WireGuard","当前：WireGuard"):L("Active: Clash","当前：Clash");
+  case PROXY: return !bk->has||bk->active==BK_OFF?L("Proxy modes & Tailscale","代理模式与 Tailscale"):
+    bk->active==BK_WG?L("Active: WireGuard","当前：WireGuard"):bk->active==BK_TS?L("Active: Tailscale","当前：Tailscale"):L("Active: Clash","当前：Clash");
   case WG: return L("Tunnel status and on / off","隧道状态与开关");
   case CLASH: return L("Nodes, subscriptions and core","节点、订阅与内核");
+  case TAILSCALE: return ts_summary();
   case ESIM: return esim_summary();
   case UPLINK: return uplink_summary();
   case WIFI_PAGE: return L("Bands and connected clients","频段开关与在线终端");
@@ -214,9 +263,10 @@ static void tile_state(int p, char *buf, size_t n, const char **cls) {
   case OVERVIEW: snprintf(buf,n,"CPU %.0f%%",data.cpu); return;
   case PROXY:
     *cls=bk->has?proxy_class():"muted";
-    snprintf(buf,n,"%s",!bk->has||bk->active==BK_OFF?L("Off","关闭"):bk->active==BK_WG?"WireGuard":"Clash"); return;
+    snprintf(buf,n,"%s",!bk->has||bk->active==BK_OFF?L("Off","关闭"):bk->active==BK_WG?"WireGuard":bk->active==BK_TS?"Tailscale":"Clash"); return;
   case WG: *cls=summary_class(); snprintf(buf,n,"%s",summary()); return;
   case CLASH: *cls=data.clash.has?clash_class():"muted"; snprintf(buf,n,"%s",data.clash.has?clash_summary():"--"); return;
+  case TAILSCALE: snprintf(buf,n,"%s",ts_summary()); return;
   case ESIM:
     if(data.esim.has&&!strcmp(data.esim.card,"euicc"))snprintf(buf,n,"%s",esim_summary());
     else snprintf(buf,n,"%s",data.esim.has&&!strcmp(data.esim.card,"sim")?L("SIM card","普通 SIM"):"--");
@@ -247,7 +297,7 @@ static void tile_state(int p, char *buf, size_t n, const char **cls) {
 static uint16_t pixels[W * H];
 /* The current page as HTML. Cheap next to laying it out and drawing it. */
 static void build_html(void) {
-  html_used=0;html[0]=0;
+  html_used=0;relay_wipe(html,sizeof(html));
   add("<!DOCTYPE html><html lang=\"%s\"><head><meta charset=\"UTF-8\"><style>%s</style></head><body>",L("en","zh"),style_asset);
   char tmp[256],rx[32],tx[32];
   if (dialog>=DLG_POWER) render_power_dialog();
@@ -305,8 +355,8 @@ static void build_html(void) {
     int room=tb->has?148:254;
     if(bk->has&&bk->active==BK_OFF)snprintf(tmp,sizeof(tmp),"%s",proxy_summary());
     else {
-      snprintf(tmp,sizeof(tmp),"%s · %s",bk->has&&bk->active==BK_CLASH?"Clash":"WireGuard",bk->has?proxy_summary():summary());
-      if(html_view_text_width_px(tmp,16)>room)snprintf(tmp,sizeof(tmp),"%s",bk->has?proxy_summary():summary());
+      snprintf(tmp,sizeof(tmp),"%s · %s",bk->has&&bk->active==BK_CLASH?"Clash":bk->has&&bk->active==BK_TS?"Tailscale":"WireGuard",bk->has?proxy_summary():summary());
+      if(html_view_text_width_px(tmp,16)>room)snprintf(tmp,sizeof(tmp),"%s",bk->has&&bk->active==BK_TS?"Tailscale":bk->has?proxy_summary():summary());
     }
     snprintf(rx,sizeof(rx),"head %s",strcmp(cls,"muted")?cls:"");
     if(tb->has) {
@@ -316,10 +366,10 @@ static void build_html(void) {
       snprintf(rates,sizeof(rates),"↓%s ↑%s",d_rate,u_rate);
       sbox(190,116,106,20,"muted right",rates);
     } else sbox(42,116,room,20,rx,tmp);
-    const int pages[] = {OVERVIEW,PROXY,WG,CLASH,ESIM,UPLINK,WIFI_PAGE,SIGNAL_PAGE,USB_PAGE,POWER_PAGE,BOOSTER_PAGE,PROFILES,DEVICES};
-    const char *ids[] = {"overview","proxy","wireguard","clash","esim","uplink","wifi","signal","usb","power","booster","profiles","devices"};
-    int vis_idx[13], vis_cnt=0;
-    for(int i=0;i<13;i++) if(visible_page(pages[i])) vis_idx[vis_cnt++]=i;
+    const int pages[] = {OVERVIEW,UPLINK,PROXY,WG,CLASH,ESIM,WIFI_PAGE,SIGNAL_PAGE,USB_PAGE,POWER_PAGE,BOOSTER_PAGE,TAILSCALE,PROFILES,DEVICES};
+    const char *ids[] = {"overview","uplink","proxy","wireguard","clash","esim","wifi","signal","usb","power","booster","tailscale","profiles","devices"};
+    int vis_idx[14], vis_cnt=0;
+    for(int i=0;i<14;i++) if(visible_page(pages[i])) vis_idx[vis_cnt++]=i;
     if(vis_cnt<=4) {
       for(int r=0;r<vis_cnt;r++) {
         int i=vis_idx[r];
@@ -410,24 +460,27 @@ static void build_html(void) {
     linkbox(166,420,142,52,"save",pending?L("Applying","正在应用"):L("Save","保存"),dirty&&!blocked(),PRIMARY);
   } else if(page==OVERVIEW) {
     header(L("Overview","概览"));
-    add("<div class=\"box card\" style=\"left:12px;top:76px;width:296px;height:96px\"></div>");
-    box(28,86,120,20,"muted",L("Battery","电池"));
-    if(data.temperature!=-999)snprintf(tmp,sizeof(tmp),"%.1f °C",data.temperature/10.0);else strcpy(tmp,"-- °C");
-    box(176,86,118,20,"muted right",tmp);
-    battery_badge(28,124,1);
-    add("<div class=\"box card\" style=\"left:12px;top:184px;width:296px;height:138px\"></div>");
+    /* Compact cards leave y=214..262 for USB LAN; the four admin rows keep their places. */
+    add("<div class=\"box card\" style=\"left:12px;top:68px;width:296px;height:48px\"></div>");
+    battery_badge(28,77,1);
+    if(data.temperature!=-999)snprintf(tmp,sizeof(tmp),"%s · %.1f °C",L("Battery","电池"),data.temperature/10.0);
+    else snprintf(tmp,sizeof(tmp),"%s · -- °C",L("Battery","电池"));
+    box(160,82,134,20,"muted right",tmp);
+    add("<div class=\"box card\" style=\"left:12px;top:122px;width:296px;height:86px\"></div>");
     if(data.uptime>=86400)snprintf(tmp,sizeof(tmp),L("%llud %lluh %llum","%llu 天 %llu 时 %llu 分"),data.uptime/86400,data.uptime/3600%24,data.uptime/60%60);
     else snprintf(tmp,sizeof(tmp),L("%lluh %llum","%llu 时 %llu 分"),data.uptime/3600,data.uptime/60%60);
-    stat_row(198,L("Uptime","运行时间"),tmp,-1);
-    snprintf(tmp,sizeof(tmp),"%.1f%%",data.cpu);stat_row(230,"CPU",tmp,data.cpu);
+    stat_row(130,L("Uptime","运行时间"),tmp,-1);
+    snprintf(tmp,sizeof(tmp),"%.1f%%",data.cpu);stat_row(156,"CPU",tmp,-1);
     if(data.memory>=0)snprintf(tmp,sizeof(tmp),"%.1f%%",data.memory);else strcpy(tmp,"--");
-    stat_row(274,L("Memory","内存"),tmp,data.memory);
-    /* With a Wi-Fi uplink reported, its row joins and the note shrinks to one line. */
-    int relay=data.uplink.has,rh=relay?56:60;
-    if(data.backend.has&&visible_page(PROXY))nav_row(12,334,296,rh,"proxy",L("Proxy","代理"),proxy_summary(),proxy_class(),1);
-    else nav_row(12,334,296,rh,"wireguard","WireGuard",summary(),summary_class(),visible_page(WG));
-    if(relay)nav_row(12,398,296,56,"uplink",L("Wi-Fi relay","Wi-Fi 中继"),uplink_summary(),uplink_class(),1);
-    box(16,relay?458:412,292,relay?20:40,stale()?"wrap bad":"wrap muted",stale()?L("Status unavailable / stale","状态不可用或已过期"):L("Live status from the OpenUI agent","实时状态来自 OpenUI Agent"));
+    stat_row(182,L("Memory","内存"),tmp,-1);
+    usb_lan_row(214);
+    /* Proxy and relay remain independent menu pages, not duplicate Overview links. */
+    for(int row=0;row<4;row++)admin_row(row,264+row*48);
+    const char *status=!admin_fresh()||stale()?L("Service status unavailable / stale","服务状态不可用或已过期"):
+      pending||data.admin.busy?L("Applying service change…","正在应用服务更改…"):
+      !data.admin.adb_exposed?L("ADB USB not exposed · no USB switch","ADB USB 未暴露 · 不切换 USB"):
+      L("Boot toggles affect next boot only","自启开关仅影响下次启动");
+    sbox(16,460,292,18,!admin_fresh()||stale()?"bad":"faint",status);
   }
   else if(page==PROXY) render_proxy();
   else if(page==CLASH) render_clash();
@@ -436,6 +489,7 @@ static void build_html(void) {
   else if(page==SUBS) render_subs();
   else if(page==CORE) render_core();
   else if(page==DIAG) render_diag();
+  else if(page==TAILSCALE) render_tailscale();
   else if(page==ESIM) render_esim();
   else if(page==UPLINK) render_uplink();
   else if(page==WIFI_PAGE) render_wifi();
@@ -445,30 +499,67 @@ static void build_html(void) {
   else if(page==BOOSTER_PAGE) render_booster();
   add("</body></html>");
 }
+/* The last HTML draw, plus a keyboard-only structural cache. No credential is cached:
+ * the scaffold contains anchors/labels, while value/count live only in editor + pixels. */
+static char drawn_html[sizeof html];
+static int drawn_valid;
+static struct {
+  int valid,key,mode,show,zh;
+  unsigned long long epoch,revision;
+} relay_keyboard_cache;
+/* Non-secret work counters for preview tests and the native synthetic benchmark. */
+static unsigned long long relay_keyboard_scaffold_draws,relay_keyboard_dynamic_draws;
+static int relay_keyboard_active(void) {
+  return page==UPLINK&&relay_view==RV_KEYBOARD&&relay_edit.active&&!dialog;
+}
+static int relay_keyboard_same_scaffold(void) {
+  return relay_keyboard_cache.valid&&relay_keyboard_cache.epoch==relay_key_epoch&&
+    relay_keyboard_cache.key==relay_edit.key&&relay_keyboard_cache.mode==relay_edit.keymode&&
+    relay_keyboard_cache.show==relay_edit.show&&relay_keyboard_cache.zh==settings_zh;
+}
+static void copy_pixels(struct drm_buf *b) {
+  for(int y=0;y<H;y++)memcpy((uint8_t*)b->map+y*b->pitch,pixels+y*W,W*2);
+}
 static void draw_html(struct drm_buf *b) {
   static int initialized;
   if (!initialized) {
     html_view_init(pixels,W,H,W,0,NULL);
     initialized=1;
   }
-  html_view_render_to(pixels,html);
-  for(int y=0;y<H;y++)memcpy((uint8_t*)b->map+y*b->pitch,pixels+y*W,W*2);
+  /* Any full render replaces the hit document and clears the logical pixels. */
+  relay_keyboard_cache.valid=0;drawn_valid=0;
+  int ok=html_view_render_to(pixels,html)>=0;
+  if(relay_keyboard_active()) {
+    relay_keyboard_paint(pixels);relay_keyboard_scaffold_draws++;
+    relay_keyboard_cache.valid=ok;relay_keyboard_cache.epoch=relay_key_epoch;
+    relay_keyboard_cache.key=relay_edit.key;relay_keyboard_cache.mode=relay_edit.keymode;
+    relay_keyboard_cache.show=relay_edit.show;relay_keyboard_cache.zh=settings_zh;
+    relay_keyboard_cache.revision=relay_key_revision;
+  }
+  copy_pixels(b);
 }
 static void render(struct drm_buf *b) {
   build_html();
   draw_html(b);
 }
-/* The page last drawn into a frame. Equal HTML draws equal pixels (the rotation is fixed
- * and the backlight keeps the panel's image), so a status poll that changes nothing on
- * the page costs no layout, drawing or flip. */
-static char drawn_html[sizeof html];
-static int drawn_valid;
-/* Draws the page into `b` unless it is the page last drawn; returns whether it drew. */
+/* -1: needs a full scaffold; 0: unchanged; 1: text repainted. This runs BEFORE
+ * build_html, avoiding repeated CSS/HTML parsing, layout and static glyph work. */
+static int relay_keyboard_render_cached(struct drm_buf *b,int force) {
+  if(!relay_keyboard_active()||force||!relay_keyboard_same_scaffold())return -1;
+  if(relay_keyboard_cache.revision==relay_key_revision)return 0;
+  relay_keyboard_paint(pixels);copy_pixels(b);
+  relay_keyboard_cache.revision=relay_key_revision;relay_keyboard_dynamic_draws++;
+  return 1;
+}
+/* Equal HTML skips ordinary pages. Keyboard edit revision, not its static HTML,
+ * controls text repaint; structural changes, forced frames and dialogs rebuild. */
 static int render_changed(struct drm_buf *b, int force) {
+  int keyboard=relay_keyboard_render_cached(b,force);
+  if(keyboard>=0)return keyboard;
   build_html();
-  if (!force && drawn_valid && !strcmp(html,drawn_html)) return 0;
+  if (!force && !relay_keyboard_active() && drawn_valid && !strcmp(html,drawn_html)) return 0;
   draw_html(b);
-  memcpy(drawn_html,html,html_used+1);
+  relay_wipe(drawn_html,sizeof(drawn_html));memcpy(drawn_html,html,html_used+1);
   drawn_valid=1;
   return 1;
 }
