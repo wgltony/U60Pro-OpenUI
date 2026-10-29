@@ -12,6 +12,8 @@ jobs:
     uses: ./.github/workflows/checks.yml
   lpac:
     uses: ./.github/workflows/lpac.yml
+  mihomo:
+    uses: ./.github/workflows/mihomo.yml
   agent:
     runs-on: ubuntu-latest
     steps:
@@ -103,7 +105,7 @@ jobs:
           path: build/screen/openui-screen
 
   publish:
-    needs: [agent, dashboard, screen, checks, lpac]
+    needs: [agent, dashboard, screen, checks, lpac, mihomo]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -121,8 +123,9 @@ jobs:
           cp artifacts/dashboard-dist/dashboard-dist.tar.gz assets/
           cp artifacts/lpac-linux-arm64/lpac assets/lpac
           cp artifacts/openui-screen/openui-screen assets/openui-screen
+          cp artifacts/mihomo-linux-arm64/mihomo assets/mihomo
           cd assets
-          sha256sum zte-agent dashboard-dist.tar.gz openui-screen lpac > sha256sums.txt
+          sha256sum zte-agent dashboard-dist.tar.gz openui-screen lpac mihomo > sha256sums.txt
           cat sha256sums.txt
 
       - name: Release notes
@@ -146,6 +149,8 @@ jobs:
           - `lpac` — eSIM LPA (aarch64, built from lpac v2.3.0 with the patches in
             `scripts/lpac-patches/`; AGPL-3.0/LGPL-2.1, see `licenses/lpac/`).
             Deploy with `scripts/deploy-components.py --lpac`.
+          - `mihomo` — Clash core (aarch64, the pinned FlClash commit built by
+            `scripts/prepare-mihomo.py`; GPL-3.0, source at github.com/chen08209/Clash.Meta).
           - `sha256sums.txt` — SHA-256 checksums.
 
           **Verify**

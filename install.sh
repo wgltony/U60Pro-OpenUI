@@ -1,8 +1,8 @@
 #!/bin/bash
 # One-command install for the ZTE U60 Pro (MU5250, CN B31): unlocks ADB when the
 # device is still locked, then installs the agent, web dashboard, touchscreen UI,
-# WireGuard tool and (optionally) Tailscale in one verified deployment that rolls
-# back on failure. Guide: docs/INSTALL.md (中文: docs/INSTALL.zh.md).
+# Clash core with its geo data, eSIM tool (lpac), WireGuard tool and (optionally)
+# Tailscale in one verified deployment that rolls back on failure. Guide: docs/INSTALL.md (中文: docs/INSTALL.zh.md).
 set -euo pipefail
 umask 077
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -22,8 +22,9 @@ Usage: bash install.sh [options]
                        skip unchanged parts, no unlock and no SSH hardening
   --with-tailscale     Also install Tailscale (official static build, ~60 MB)
   --skip-screen        Leave the touchscreen program as it is
-  --from-source        Build agent, dashboard and screen here (Rust, Zig, Node)
-                       instead of downloading this repository's release
+  --from-source        Build agent, dashboard, screen, lpac and the Clash core here
+                       (Rust, Zig, Node; Go or Docker for the core) instead of
+                       downloading this repository's release
   --release TAG        Release to download (default: the latest)
   --repo OWNER/NAME    GitHub repository with the releases (default: origin)
   --gateway ADDRESS    Router address (default: 192.168.0.1)
@@ -105,6 +106,14 @@ if [ "$SOURCE" = 1 ]; then
 		ZIG=${ZIG:-zig} sh screen/build.sh
 		cp build/screen/openui-screen "$WORK/openui-screen"
 	fi
+	info 'Building the eSIM tool (lpac)…'
+	ZIG=${ZIG:-zig} python3 scripts/prepare-lpac.py --output "$WORK/lpac"
+	if command -v go >/dev/null || command -v docker >/dev/null; then
+		info 'Building the Clash core…'
+		python3 scripts/prepare-mihomo.py --output "$WORK/mihomo"
+	else
+		warn 'No Go or Docker: the Clash core is not built, so Clash stays unavailable.'
+	fi
 else
 	if [ -z "$REPO" ]; then
 		url=$(git config --get remote.origin.url 2>/dev/null || true)
@@ -118,9 +127,13 @@ else
 	[ -n "$TAG" ] || TAG=$(python3 scripts/download-release.py --repo "$REPO" --latest) \
 		|| fail "No release found in $REPO. Use --from-source to build instead."
 	info "Downloading $REPO $TAG…"
-	FILES=(zte-agent dashboard-dist.tar.gz)
+	FILES=(zte-agent dashboard-dist.tar.gz lpac mihomo)
 	[ "$SCREEN" = 1 ] && FILES+=(openui-screen)
 	python3 scripts/download-release.py --repo "$REPO" --tag "$TAG" --output "$WORK" "${FILES[@]}"
+fi
+if [ -f "$WORK/mihomo" ]; then
+	info 'Downloading the Clash geo data…'
+	python3 scripts/prepare-geodata.py --output "$WORK/geo"
 fi
 info 'Preparing the WireGuard tool…'
 python3 scripts/prepare-wireguard.py --output "$WORK/wg"
@@ -167,7 +180,8 @@ fi
 
 # ── 5. Install (one transaction; a failure restores the previous state) ────────
 ARGS=(--gateway "$GATEWAY" --agent "$WORK/zte-agent" --dashboard "$WORK/dashboard-dist.tar.gz"
-	--wireguard-tools "$WORK/wg")
+	--lpac "$WORK/lpac" --wireguard-tools "$WORK/wg")
+[ -f "$WORK/mihomo" ] && ARGS+=(--mihomo "$WORK/mihomo" --mihomo-geodata "$WORK/geo")
 [ "$SCREEN" = 1 ] && ARGS+=(--screen "$WORK/openui-screen")
 [ "$TAILSCALE" = 1 ] && ARGS+=(--tailscale "$WORK/tailscale")
 if [ "$UPDATE" = 1 ]; then

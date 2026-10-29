@@ -3,7 +3,7 @@
 简体中文 | [English](INSTALL.md)
 
 本教程把一台原厂固件的中兴 U60 Pro 装成完整的 OpenUI：网页控制台、触摸屏界面（DevUI）、
-Clash / WireGuard / Tailscale、无线中继、USB 网络共享和路由器日志。实际工作由 `install.sh`
+Clash / WireGuard / Tailscale、无线中继、eSIM、USB 网络共享和路由器日志。实际工作由 `install.sh`
 完成，这里说明每一步在做什么，以及装好之后怎么用。
 
 ## 开始之前
@@ -84,6 +84,8 @@ bash install.sh                    # 需要 Tailscale 时加 --with-tailscale（
 | Agent（API、代理、中继、USB、Wi-Fi、日志） | `/data/zte-agent`，端口 9090 |
 | 网页控制台及其服务 | `http://192.168.0.1:8080` |
 | 触摸屏界面 | `/data/bin/openui-screen` |
+| Clash 内核（固定版本）和地理数据 | `/data/bin/mihomo`、`/data/share/mihomo/` |
+| eSIM 工具（lpac） | `/data/bin/lpac` |
 | WireGuard 工具 | `/data/bin/wg` |
 | 中继频段守护 | `/data/bin/relay-band-guard.sh` |
 | Tailscale（加 `--with-tailscale` 时） | `/data/bin/tailscale*`，服务 `openui-tailscale` |
@@ -92,7 +94,7 @@ bash install.sh                    # 需要 Tailscale 时加 --with-tailscale（
 路由器自带的 80 端口网页不受影响。重启后所有服务都会自动启动。
 
 想全部自己编译？加 `--from-source`（需要带 `aarch64-unknown-linux-musl` 目标的 Rust、
-Zig 0.14.1 和 Node.js 22）。
+Zig 0.14.1 和 Node.js 22；Clash 内核还需要 Go 或 Docker，没有就不装 Clash 内核）。
 
 ## 5. 触摸屏检查
 
@@ -115,7 +117,7 @@ python3 scripts/verify-screen.py --gateway 192.168.0.1 --ssh-key ~/.ssh/id_ed255
 
 - **代理**：在 WireGuard、Clash、Tailscale 中选一个，同一时间只有一个转发流量。
   每个标签页顶部都有设置向导：
-  - *Clash*：在 **高级 → 内核** 安装内核，添加服务商的 Clash / mihomo 订阅链接，选设备，开启。
+  - *Clash*：内核和地理数据已经装好（以后可在 **高级 → 内核** 更新）。添加服务商的 Clash / mihomo 订阅链接，选设备，开启。
   - *WireGuard*：导入 VPN 服务商给的 `.conf` 文件，选设备，开启。
   - *Tailscale*（安装时加了 `--with-tailscale`）：用页面上的登录链接（在手机或电脑上打开）
     或认证密钥登录。然后二选一：开启 **远程管理**，让你的 tailnet 访问本路由器及其局域网，

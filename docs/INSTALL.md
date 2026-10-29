@@ -3,8 +3,8 @@
 [简体中文](INSTALL.zh.md) | English
 
 This guide takes a ZTE U60 Pro from stock firmware to the full OpenUI stack: web
-dashboard, touchscreen UI (DevUI), Clash / WireGuard / Tailscale, Wi-Fi relay, USB LAN
-and the router log. `install.sh` does the work; this page explains each step and what
+dashboard, touchscreen UI (DevUI), Clash / WireGuard / Tailscale, Wi-Fi relay, eSIM,
+USB LAN and the router log. `install.sh` does the work; this page explains each step and what
 to do afterwards.
 
 ## Before you start
@@ -93,6 +93,8 @@ Then, in one deployment:
 | Agent (API, proxy, relay, USB, Wi-Fi, logs) | `/data/zte-agent`, port 9090 |
 | Web dashboard and its server | `http://192.168.0.1:8080` |
 | Touchscreen UI | `/data/bin/openui-screen` |
+| Clash core (pinned build) and geo data | `/data/bin/mihomo`, `/data/share/mihomo/` |
+| eSIM tool (lpac) | `/data/bin/lpac` |
 | WireGuard tool | `/data/bin/wg` |
 | Relay band guard | `/data/bin/relay-band-guard.sh` |
 | Tailscale (with `--with-tailscale`) | `/data/bin/tailscale*`, service `openui-tailscale` |
@@ -102,7 +104,8 @@ The router's own web UI on port 80 is not touched. Everything starts again after
 reboot.
 
 Prefer to build everything yourself? Add `--from-source` (needs Rust with the
-`aarch64-unknown-linux-musl` target, Zig 0.14.1 and Node.js 22).
+`aarch64-unknown-linux-musl` target, Zig 0.14.1 and Node.js 22; the Clash core also needs
+Go or Docker, and is left out without them).
 
 ## 5. Touchscreen check
 
@@ -126,8 +129,9 @@ Open `http://192.168.0.1:8080` and sign in with the password you chose.
 
 - **Proxy** — choose WireGuard, Clash or Tailscale; only one carries traffic at a
   time. Each has a setup guide at the top of its tab:
-  - *Clash*: install the core under **Advanced → Core**, add your provider's Clash /
-    mihomo subscription URL, choose devices, turn it on.
+  - *Clash*: the core and geo data are already installed (**Advanced → Core** updates
+    them later). Add your provider's Clash / mihomo subscription URL, choose devices,
+    turn it on.
   - *WireGuard*: import the `.conf` file from your VPN provider, choose devices, turn
     it on.
   - *Tailscale* (installed with `--with-tailscale`): sign in with the link shown on

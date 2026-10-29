@@ -24,6 +24,8 @@ on:
       - agent/src/egress.rs
       - .github/workflows/mihomo.yml
   workflow_dispatch:
+  # The release ships the core this workflow builds and tests.
+  workflow_call:
 permissions:
   contents: read
 jobs:
