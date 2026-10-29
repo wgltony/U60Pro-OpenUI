@@ -100,6 +100,9 @@ python3 scripts/zunlock.py --dry-run --keep-work ./unlock-work
 
 这条路把「改哪一行」和「什么时候写回设备」分开，便于你先检查补丁、再亲手恢复。
 
+还有一个**完全不碰设备**的变体：备份也由你自己从网页导出，再在本机离线打补丁，
+见 [scripts/offline-adb/](../scripts/offline-adb/README.md)。
+
 ## 验证
 
 用支持数据传输的 USB 线连接，电脑装好 Android platform-tools，然后：

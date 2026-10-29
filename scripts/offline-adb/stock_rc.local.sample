@@ -1,0 +1,6 @@
+# Put your custom commands here that should be executed once
+# the system init finished. Synthetic sample for tests; NOT ZTE firmware.
+if [ x`cat /sys/class/android_usb/android0/usb_op` != x"1" ]; then
+	echo "[sample] user mode" > /dev/kmsg
+fi
+exit 0

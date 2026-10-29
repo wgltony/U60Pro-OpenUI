@@ -127,6 +127,10 @@ Then restore it yourself:
 This path separates "which line changes" from "when it is written back," so you
 can inspect the patch and perform the restore by hand.
 
+For a variant that never contacts the device at all — you export the backup
+yourself and patch that local file offline — see
+[scripts/offline-adb/](../scripts/offline-adb/README.md).
+
 ## Verify
 
 Connect a data-capable USB cable, install Android platform-tools, then:
