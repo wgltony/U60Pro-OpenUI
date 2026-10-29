@@ -358,18 +358,29 @@ impl Drop for ProcessGroup {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    fn run(script: &str, input: Option<&[u8]>, limit: usize) -> io::Result<Output> {
+    fn run(
+        script: &str,
+        input: Option<&[u8]>,
+        limit: usize,
+        timeout: Duration,
+    ) -> io::Result<Output> {
         output(
             Command::new("sh").args(["-c", script]),
             input,
-            Duration::from_millis(150),
+            timeout,
             limit,
         )
     }
     #[test]
     fn blocked_stdin_is_inside_deadline() {
         let start = Instant::now();
-        let error = run("sleep 5", Some(&vec![0; 4 * 1024 * 1024]), 1024).unwrap_err();
+        let error = run(
+            "sleep 5",
+            Some(&vec![0; 4 * 1024 * 1024]),
+            1024,
+            Duration::from_millis(150),
+        )
+        .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(start.elapsed() < Duration::from_secs(2));
     }
@@ -377,24 +388,34 @@ mod tests {
     fn inherited_output_pipe_is_inside_deadline() {
         let start = Instant::now();
         assert_eq!(
-            run("sleep 5 & exit 0", None, 1024).unwrap_err().kind(),
+            run("sleep 5 & exit 0", None, 1024, Duration::from_millis(150))
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::TimedOut
         );
         assert!(start.elapsed() < Duration::from_secs(2));
     }
     #[test]
     fn collects_both_pipes_and_delivers_eof() {
-        let result = run("cat; printf error >&2", Some(b"hello"), 1024).unwrap();
+        // These I/O semantics are not a test of the short deadline. Allow a
+        // loaded runner to spawn its shell without racing the timeout tests.
+        let result = run(
+            "cat; printf error >&2",
+            Some(b"hello"),
+            1024,
+            Duration::from_secs(5),
+        )
+        .unwrap();
         assert!(result.status.success());
         assert_eq!(result.stdout, b"hello");
         assert_eq!(result.stderr, b"error");
     }
     #[test]
     fn terminates_excess_output() {
-        assert!(run("yes", None, 1024)
-            .unwrap_err()
-            .to_string()
-            .contains("output limit"));
+        // An output-cap test must distinguish its failure from a deadline:
+        // cold shell/process startup can legitimately exceed 150ms on CI.
+        let error = run("yes", None, 1024, Duration::from_secs(5)).unwrap_err();
+        assert!(error.to_string().contains("output limit"), "{error}");
     }
 }
 
