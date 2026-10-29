@@ -79,8 +79,31 @@ jobs:
           name: dashboard-dist
           path: dashboard-dist.tar.gz
 
+  screen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install zig 0.14.1
+        run: |
+          # The version the screen is tested with, from the official checksummed tarball.
+          curl -fsSL -o zig.tar.xz https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
+          echo '24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c  zig.tar.xz' | sha256sum -c -
+          mkdir "$RUNNER_TEMP/zig" && tar xJf zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+
+      - name: Build openui-screen
+        run: |
+          ZIG=zig sh screen/build.sh
+          file build/screen/openui-screen
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openui-screen
+          path: build/screen/openui-screen
+
   publish:
-    needs: [agent, dashboard, checks, lpac]
+    needs: [agent, dashboard, screen, checks, lpac]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -97,19 +120,9 @@ jobs:
           cp artifacts/zte-agent/zte-agent assets/zte-agent
           cp artifacts/dashboard-dist/dashboard-dist.tar.gz assets/
           cp artifacts/lpac-linux-arm64/lpac assets/lpac
-          python3 - <<'PYTHON'
-          import os
-          import zipfile
-          from pathlib import Path
-          # Named after the major.minor release (installer/wireframes/capture.mjs); a patch release reuses them.
-          release = 'v' + '.'.join(os.environ['GITHUB_REF_NAME'].removeprefix('v').split('.')[:2])
-          images = sorted((Path('docs/images') / ('installer-' + release)).glob('*.png'))
-          assert len(images) == 5, 'Installer wireframes are incomplete'
-          with zipfile.ZipFile('assets/installer-wireframes.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
-              for image in images: archive.write(image, image.name)
-          PYTHON
+          cp artifacts/openui-screen/openui-screen assets/openui-screen
           cd assets
-          sha256sum zte-agent dashboard-dist.tar.gz lpac installer-wireframes.zip > sha256sums.txt
+          sha256sum zte-agent dashboard-dist.tar.gz openui-screen lpac > sha256sums.txt
           cat sha256sums.txt
 
       - name: Release notes
@@ -123,12 +136,13 @@ jobs:
 
           **Assets**
 
-          - `zte-agent` — agent binary (aarch64 musl). Deploy to `/data/zte-agent`,
-            or run `bash setup.sh` and choose the pre-built download.
-          - `dashboard-dist.tar.gz` — dashboard static build consumed by the
-            native installer. For terminal deployment, run `scripts/zharden.sh`
-            once to install the isolated dashboard server, then use
-            `deploy-dashboard.sh`; do not add a second ZTE uhttpd UCI instance.
+          Install or update everything with `bash install.sh` (see docs/INSTALL.md);
+          it downloads these files and checks them against `sha256sums.txt`.
+
+          - `zte-agent` — agent binary (aarch64 musl).
+          - `dashboard-dist.tar.gz` — web dashboard build.
+          - `openui-screen` — touchscreen UI (aarch64, GPL-3.0-or-later; source in
+            `screen/`, licenses in `screen/LICENSE`, `screen/NOTICE`).
           - `lpac` — eSIM LPA (aarch64, built from lpac v2.3.0 with the patches in
             `scripts/lpac-patches/`; AGPL-3.0/LGPL-2.1, see `licenses/lpac/`).
             Deploy with `scripts/deploy-components.py --lpac`.
