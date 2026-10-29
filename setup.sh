@@ -13,8 +13,27 @@ ok()    { echo -e "${GREEN}[+]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 fail()  { echo -e "${RED}[-]${NC} $1" >&2; exit 1; }
 
+# Legacy agent-only entry point. Prefer install.sh for the complete installation.
+ACK_USB=0 SERIAL='' RELEASE_REPO=''
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --acknowledge-usb) ACK_USB=1 ;;
+        --adb-serial) SERIAL=${2:?--adb-serial needs a serial}; shift ;;
+        --repo) RELEASE_REPO=${2:?--repo needs OWNER/NAME}; shift ;;
+        -h|--help)
+            echo 'Usage: bash setup.sh [--repo OWNER/NAME] [--adb-serial SERIAL] [--acknowledge-usb] [router-password agent-password]'
+            echo 'Legacy agent-only installer; prefer bash install.sh. Locked fresh installs require a USB data cable.'
+            exit 0 ;;
+        --*) fail "Unknown option: $1" ;;
+        *) POSITIONAL+=("$1") ;;
+    esac
+    shift
+done
+set -- "${POSITIONAL[@]}"
+
 # ── Password input ──────────────────────────────────────────────────
-if [ $# -ge 2 ]; then
+if [ $# -eq 2 ]; then
     ROUTER_PASSWORD="$1"
     AGENT_PASSWORD="$2"
 elif [ $# -eq 0 ]; then
@@ -34,11 +53,10 @@ GATEWAY="${ZTE_GATEWAY:-192.168.0.1}"
 AGENT_PORT=9090
 SSH_PORT=2222
 TARGET=aarch64-unknown-linux-musl
-BINARY=target/$TARGET/release/zte-agent
+BINARY=${CARGO_TARGET_DIR:-target}/$TARGET/release/zte-agent
 REMOTE_BIN=/data/zte-agent
 STARTUP_SCRIPT=/data/local/tmp/start_zte_agent.sh
 BINARY_CHANGED=false
-DOWNLOAD_URL="https://github.com/dklasens/MU5250-OpenUI/releases/latest/download/zte-agent"
 
 # ── Binary source menu ──────────────────────────────────────────────
 # Both options install this repo's agent. Option 1 downloads the pre-built
@@ -68,13 +86,6 @@ HAS_APT=false
 command -v brew >/dev/null 2>&1 && HAS_BREW=true
 command -v apt-get >/dev/null 2>&1 && HAS_APT=true
 
-# Cross-compiler tool varies by platform
-if [ "$OS" = "Darwin" ]; then
-    CROSS_CC="aarch64-linux-musl-gcc"
-else
-    CROSS_CC="aarch64-linux-gnu-gcc"
-fi
-
 # Dependency table: cmd | brew_pkg | apt_pkg | custom_install
 # Build path needs all deps; download path only needs curl, python3, adb
 if [ "$BUILD_CHOICE" = "1" ]; then
@@ -91,7 +102,8 @@ else
         "adb|android-platform-tools|android-tools-adb|"
         "openssl|openssl|openssl|"
         "cargo|||curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
-        "$CROSS_CC|filosottile/musl-cross/musl-cross|gcc-aarch64-linux-gnu musl-tools|"
+        "rustup|||"
+        "zig|||"
     )
 fi
 
@@ -206,12 +218,11 @@ if [ "$ALL_OK" = false ]; then
     done
 fi
 
-# Ensure Rust cross-compilation target is installed (build path only)
+# Check the documented musl cross-build toolchain before building or contacting a modem.
 if [ "$BUILD_CHOICE" = "2" ]; then
-    if ! rustup target list --installed 2>/dev/null | grep -q aarch64-unknown-linux-musl; then
-        info "Adding Rust cross-compilation target..."
-        rustup target add aarch64-unknown-linux-musl
-    fi
+    cargo zigbuild --version >/dev/null 2>&1 || fail 'Install cargo-zigbuild first: cargo install --locked cargo-zigbuild'
+    rustup target list --installed | grep -qx "$TARGET" || fail "Run: rustup target add $TARGET"
+    [ "$(zig version)" = 0.14.1 ] || fail 'Source builds require Zig 0.14.1 on PATH.'
 fi
 ok "All prerequisites found."
 
@@ -221,22 +232,33 @@ PREPARE=(python3 scripts/deploy-components.py --prepare-only --bundle-output "$W
 if [ -n "${ZTE_BUNDLE_PATH:-}" ]; then PREPARE+=(--bundle "$ZTE_BUNDLE_PATH"); fi
 if [ "$BUILD_CHOICE" = 1 ]; then
     PREPARE+=(--release-agent "$BINARY")
+    [ -z "$RELEASE_REPO" ] || PREPARE+=(--release-repo "$RELEASE_REPO")
 else
-    cargo build --locked --release --target "$TARGET" -p zte-agent
+    cargo zigbuild --locked --release --target "$TARGET" -p zte-agent
 fi
 "${PREPARE[@]}"
 
 # Probe transports without accepting an arbitrary TCP listener as a modem.
 # deploy-components verifies model, firmware, architecture, uid and fingerprint.
 EXTRA=()
+[ -z "$SERIAL" ] || EXTRA+=(--adb-serial "$SERIAL")
 SSH=(ssh -p "$SSH_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new
      -o "UserKnownHostsFile=$HOME/.ssh/known_hosts.d/zte" -o ConnectTimeout=5 "root@$GATEWAY")
 mkdir -p "$HOME/.ssh/known_hosts.d"
 if "${SSH[@]}" true >/dev/null 2>&1; then
     ok "SSH is reachable. Device identity will be verified before writes."
-elif adb devices 2>/dev/null | grep -q 'device$'; then
-    EXTRA+=(--auto-adb)
+elif { [ -n "$SERIAL" ] && adb -s "$SERIAL" get-state 2>/dev/null | grep -qx device; } ||
+     { [ -z "$SERIAL" ] && adb devices 2>/dev/null | grep -q 'device$'; }; then
+    [ -n "$SERIAL" ] || EXTRA+=(--auto-adb)
 else
+    warn 'Unlocking restores settings and reboots the router. A physical USB DATA cable must connect THIS router to THIS computer.'
+    echo 'Wi-Fi, charging-only cables and an empty ADB device list do not prove this prerequisite.'
+    echo 'Locked firmware may expose no ADB USB descriptor; physical confirmation is required.'
+    if [ "$ACK_USB" != 1 ]; then
+        [ -t 0 ] || fail 'Locked fresh install requires USB confirmation before restore; connect the USB data cable and pass --acknowledge-usb.'
+        read -rp 'Confirm the USB data cable stays connected through reboot; type YES: ' usb_answer
+        [ "$usb_answer" = YES ] || fail 'USB prerequisite not confirmed; no restore was attempted.'
+    fi
     SUFFIX="${ZTE_BACKUP_SUFFIX:-}"
     if [ -z "$SUFFIX" ]; then read -rsp 'Backup-key suffix: ' SUFFIX; echo; fi
     [ -n "$SUFFIX" ] || fail 'Backup-key suffix cannot be empty.'
@@ -249,8 +271,9 @@ else
     ROUTER_PW="$ROUTER_PASSWORD" ZTE_BACKUP_SUFFIX="$SUFFIX" \
         python3 scripts/zunlock.py --gw "$GATEWAY" --keep-work "$WORK/unlock"
     info 'Waiting up to three minutes for ADB…'
-    python3 -c 'import subprocess; subprocess.run(["adb", "wait-for-device"], timeout=180, check=True)'
-    EXTRA+=(--auto-adb --identity-file "$WORK/unlock/identity.json")
+    python3 -c 'import subprocess,sys; subprocess.run(["adb", *(["-s",sys.argv[1]] if sys.argv[1] else []), "wait-for-device"], timeout=180, check=True)' "$SERIAL"
+    [ -n "$SERIAL" ] || EXTRA+=(--auto-adb)
+    EXTRA+=(--identity-file "$WORK/unlock/identity.json")
 fi
 if [ "${ZTE_DRY_RUN:-0}" = 1 ]; then EXTRA+=(--dry-run); fi
 ZTE_AGENT_PASSWORD="$AGENT_PASSWORD" python3 scripts/deploy-components.py \

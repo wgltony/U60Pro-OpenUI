@@ -241,14 +241,99 @@ def check_startup(script, transport):
 
 
 def current_credentials(transport):
-    # The installed startup script holds the agent's password and PIN (root-only).
-    password, pin = None, ''
-    for line in transport.shell('cat /data/local/tmp/start_zte_agent.sh 2>/dev/null || true').splitlines():
-        if line.startswith(('export ZTE_AGENT_PASSWORD=', 'export ZTE_AGENT_PIN=')):
-            name, value = shlex.split(line)[1].split('=', 1)
-            if name == 'ZTE_AGENT_PASSWORD': password = value
-            else: pin = value
-    if not password: raise RuntimeError('No installed agent password to keep; deploy with a password instead')
+    # Hex transport keeps CR/CRLF inside literals intact despite legacy ADB line normalization.
+    # Read data only: never source/eval the saved startup script or expand its values.
+    try:
+        script = bytes.fromhex(transport.shell('od -An -tx1 -v /data/local/tmp/start_zte_agent.sh')).decode('utf-8')
+    except (RuntimeError, ValueError):
+        raise RuntimeError('Cannot safely read installed credentials: od is required and the startup script must be readable UTF-8') from None
+    invalid = 'Installed credentials are missing, ambiguous or dynamic; explicitly replace them instead'
+    if '\0' in script: raise RuntimeError(invalid)
+    # Split complete shell records, not physical lines: quoted credentials may contain
+    # newlines and even text that looks like another export. Track unrelated quotes too.
+    records, start, quote, escaped, comment = [], 0, None, False, False
+    for index, char in enumerate(script):
+        if comment:
+            if char != '\n': continue
+            comment = False
+        elif escaped:
+            escaped = False
+            continue
+        elif quote == "'":
+            if char == "'": quote = None
+            continue
+        elif char == '\\':
+            escaped = True
+            continue
+        elif quote == '"':
+            if char == '"': quote = None
+            continue
+        elif char in "'\"":
+            quote = char
+            continue
+        elif char == '#':
+            comment = True
+            continue
+        if char == '\n':
+            records.append(script[start:index]); start = index + 1
+    if quote or escaped: raise RuntimeError(invalid)
+    records.append(script[start:])
+
+    def literal(raw):
+        value, index = [], 0
+        while index < len(raw):
+            char = raw[index]
+            if char in ' \t':
+                tail = raw[index:].lstrip(' \t')
+                if tail and not tail.startswith('#'): raise RuntimeError(invalid)
+                break
+            if char == "'":
+                end = raw.find("'", index + 1)
+                if end < 0: raise RuntimeError(invalid)
+                value.append(raw[index + 1:end]); index = end + 1
+            elif char == '"':
+                index += 1
+                while index < len(raw) and raw[index] != '"':
+                    char = raw[index]
+                    if char in '$`': raise RuntimeError(invalid)
+                    if char == '\\':
+                        index += 1
+                        if index == len(raw): raise RuntimeError(invalid)
+                        char = raw[index]
+                        if char not in '$`"\\\n': value.append('\\')
+                        if char == '\n': index += 1; continue
+                    value.append(char); index += 1
+                if index == len(raw): raise RuntimeError(invalid)
+                index += 1
+            elif char == '\\':
+                index += 1
+                if index == len(raw): raise RuntimeError(invalid)
+                if raw[index] != '\n': value.append(raw[index])
+                index += 1
+            elif re.fullmatch(r'[A-Za-z0-9_@%+=:,./!-]', char):
+                value.append(char); index += 1
+            else:
+                raise RuntimeError(invalid)
+        return ''.join(value)
+
+    values = {}
+    for record in records:
+        record = record.lstrip(' \t')
+        if not record or record.startswith('#'): continue
+        match = re.fullmatch(r'export[ \t]+(ZTE_AGENT_PASSWORD|ZTE_AGENT_PIN)=(.*)', record, re.S)
+        if match:
+            name, raw = match.groups()
+            if name in values: raise RuntimeError(invalid)
+            values[name] = literal(raw)
+        elif re.fullmatch(r'unset[ \t]+ZTE_AGENT_PIN[ \t]*(?:#.*)?', record):
+            if 'ZTE_AGENT_PIN' in values: raise RuntimeError(invalid)
+            values['ZTE_AGENT_PIN'] = ''
+        elif re.search(r'\bZTE_AGENT_(?:PASSWORD|PIN)\b', record):
+            # Unsupported reassignment/export forms must not silently change meaning.
+            raise RuntimeError(invalid)
+    password, pin = values.get('ZTE_AGENT_PASSWORD'), values.get('ZTE_AGENT_PIN', '')
+    if not password: raise RuntimeError('No installed agent password to keep; ' + invalid)
+    if pin and not re.fullmatch(r'[0-9]{6}', pin): raise RuntimeError(invalid)
     return password, pin
 
 
@@ -387,6 +472,18 @@ def harden(transport, programs, identity):
 
 def prepare_only(args):
     if not args.bundle_output: raise ValueError('--bundle-output is required for preparation')
+    repo = getattr(args, 'release_repo', None)
+    if args.release_agent and not args.bundle:
+        if not repo:
+            status, origin, _ = run(['git', '-C', str(ROOT), 'config', '--get', 'remote.origin.url'], raw=True)
+            origin = origin.strip().rstrip('/')
+            if origin.endswith('.git'): origin = origin[:-4]
+            match = re.fullmatch(r'(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9-]+/[A-Za-z0-9._-]+)', origin)
+            if status or not match: raise ValueError('Cannot identify an exact GitHub origin; pass --release-repo OWNER/NAME')
+            repo = match[1]
+            if repo != 'wgltony/U60Pro-OpenUI':
+                raise ValueError('Origin is not this fork (wgltony/U60Pro-OpenUI); pass --release-repo explicitly only if intentional')
+        if not re.fullmatch(r'[A-Za-z0-9-]+/[A-Za-z0-9._-]+', repo): raise ValueError('Invalid --release-repo; expected OWNER/NAME')
     prepare_hardening(args.bundle, args.bundle_output)
     if args.release_agent:
         with tempfile.TemporaryDirectory() as work:
@@ -395,10 +492,15 @@ def prepare_only(args):
                 sums = (Path(args.bundle) / 'sha256sums.txt').read_text()
                 binary = read_limited(Path(args.bundle) / 'zte-agent')
             else:
-                release = json.loads(fetch('https://api.github.com/repos/dklasens/MU5250-OpenUI/releases/latest', root / 'release.json'))
-                urls = {item['name']: item['browser_download_url'] for item in release['assets']}
-                sums = fetch(urls['sha256sums.txt'], root / 'sha256sums.txt').decode()
-                binary = fetch(urls['zte-agent'], root / 'zte-agent')
+                # Construct exact-origin URLs; never trust arbitrary asset URLs from release metadata.
+                downloader = load_script('download-release')
+                release = json.loads(downloader.get(f'https://api.github.com/repos/{repo}/releases/latest', 1024 * 1024))
+                tag = release['tag_name']
+                if not isinstance(tag, str) or not re.fullmatch(r'v[0-9][0-9A-Za-z.-]*', tag): raise ValueError('Invalid release tag')
+                print(f'Preparing agent from {repo} {tag} (no upstream fallback).')
+                downloader.download(repo, tag, root, ['zte-agent'])
+                sums = (root / 'sha256sums.txt').read_text()
+                binary = read_limited(root / 'zte-agent')
             checksums = {parts[1].lstrip('*'): parts[0] for line in sums.splitlines() if len(parts := line.split()) == 2}
             if hashlib.sha256(binary).hexdigest() != checksums.get('zte-agent'): raise ValueError('Agent release checksum mismatch')
             destination = Path(args.release_agent); destination.parent.mkdir(parents=True, exist_ok=True)
@@ -529,12 +631,13 @@ def deploy(args):
     if 'openui-screen' in programs and transport.shell('test -e /tmp/openui-screen/owner && echo active || true') == 'active':
         raise RuntimeError('The touchscreen is running OpenUI; return it to the stock screen before replacing the screen program')
     # Count snapshot plus rollback-copy space, including legacy dashboard files.
-    preflight = transport.shell("set -e; for tool in sh sha256sum tar cp mv readlink awk df du sync ubus uci; do command -v \"$tool\" >/dev/null; done; "
+    preflight = transport.shell("set -e; for tool in sh sha256sum tar cp mv readlink awk df du sync ubus uci lua sed tr grep cut od stat; do command -v \"$tool\" >/dev/null; done; "
+                                "lua -e 'assert(require(\"luci.jsonc\"))'; test -r /proc/self/stat; test -r /proc/self/cmdline; "
                                 "test -x /usr/bin/curl; sh -n /etc/rc.local; test -w /data; test -w /etc; "
                                 "test ! -e /data/local/tmp/open-u60-transactions/active; test ! -d /data/local/tmp/open-u60-transactions/lock; "
                                 "df -Pk /data | awk 'END {print $4}'; "
                                 "df -Pk /tmp | awk 'END {print $4}'; df -Pk /etc | awk 'END {print $4}'; "
-                                "(du -sk /data/zte-agent /data/www /data/www.current /data/bin /data/share/mihomo /data/dropbear /data/local/tmp/start_*.sh /etc/dropbear /etc/rc.local /etc/config/uhttpd 2>/dev/null || true) | awk '{n+=$1} END {print n+0}'")
+                                "(du -sk /data/zte-agent /data/www /data/www.current /data/bin /data/share/mihomo /data/dropbear /data/local/tmp/start_*.sh /etc/dropbear /etc/rc.local /etc/config/uhttpd /etc/config/zwrt_zte_dm /etc/config/wireless /data/local/tmp/relay-band-guard.disabled 2>/dev/null || true) | awk '{n+=$1} END {print n+0}'")
     free, tmp_free, etc_free, backup = map(int, preflight.splitlines())
     payload = sum(map(len, prepared.values())) + sum(map(len, programs.values()))
     required = payload + expanded + 2 * backup * 1024 + 16 * 1024 * 1024
@@ -556,6 +659,8 @@ def deploy(args):
     recovery = action.format('restore')
     print(f'Recovery command for this device: {recovery}')
     try:
+        scope = 'all' if args.agent else ('tailscale' if {'tailscale', 'tailscaled'} & programs.keys() else 'none')
+        transport.shell(action.format('quiesce') + ' ' + scope)
         if args.harden: harden(transport, hardening, identity)
         if 'wg' in programs:
             transport.shell('mkdir -p /data/bin')
@@ -599,14 +704,15 @@ def deploy(args):
             transport.shell("pid=$(cat /data/local/tmp/openui-clash/mihomo.pid 2>/dev/null) || exit 0; "
                             "case \"$(readlink /proc/$pid/exe 2>/dev/null)\" in /data/bin/mihomo*) kill \"$pid\" 2>/dev/null || true;; esac")
         if args.agent:
-            # Complete and hash-check both staged files before stopping the process.
+            # The journal quiesced the owned agent and sidecars before replacement.
             transport.push(prepared['agent'], '/data/zte-agent.staged', True)
             transport.push(prepared['startup'], '/data/local/tmp/start_zte_agent.sh.staged', True)
             # The relay band guard ships with the agent (the Wi-Fi relay is an agent feature).
+            transport.shell('mkdir -p /data/bin')
             transport.push(device_script('relay-band-guard.sh'), '/data/bin/relay-band-guard.sh.staged', True)
             transport.shell('set -e; sh -n /data/bin/relay-band-guard.sh.staged; chmod 755 /data/bin/relay-band-guard.sh.staged; '
                             'mv /data/bin/relay-band-guard.sh.staged /data/bin/relay-band-guard.sh')
-            transport.shell('set -e; sh -n /data/local/tmp/start_zte_agent.sh.staged; killall zte-agent 2>/dev/null || true')
+            transport.shell('sh -n /data/local/tmp/start_zte_agent.sh.staged')
             transport.shell('set -e; mv /data/zte-agent.staged /data/zte-agent; mv /data/local/tmp/start_zte_agent.sh.staged /data/local/tmp/start_zte_agent.sh')
             transport.push(device_script('update-rc-local.sh'), '/data/local/tmp/open-u60-rc-update.sh', True)
             transport.shell("sh /data/local/tmp/open-u60-rc-update.sh 'sh /data/local/tmp/start_zte_agent.sh'")
@@ -667,6 +773,7 @@ def main():
     parser.add_argument('--prepare-only', action='store_true')
     parser.add_argument('--bundle-output')
     parser.add_argument('--release-agent')
+    parser.add_argument('--release-repo', help='Explicit release repository override for --release-agent; default: exact GitHub origin of this fork')
     parser.add_argument('--identity-file')
     parser.add_argument('--harden', action='store_true')
     parser.add_argument('--bundle', help='Directory containing the pinned Dropbear and uhttpd IPKs')

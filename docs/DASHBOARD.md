@@ -69,9 +69,14 @@ that network reaches the internet, falling back to the cellular connection other
   checking internet access, online with traffic on Wi-Fi, no internet with traffic on
   cellular, needs a web login, login mode), the agent's reason, and while joined the network, band and channel, signal,
   address, gateway, DNS and traffic. The switch saves `{expected_revision, enabled}`; a
-  409 reloads. Turning it on the first time in a browser explains what changes: the
-  hotspot may move to the upstream channel, IPv6 for LAN devices is held while on Wi-Fi,
-  and the upstream subnet must differ from the LAN.
+  409 reloads. The current relay guard **pauses the same-band hotspot throughout
+  association**, not merely during a channel move. Prepare opposite-band Wi-Fi or
+  USB backup management before enabling relay; client roaming is not guaranteed.
+  The guard commits wireless UCI and keeps a persistent
+  `/data/local/tmp/relay-band-guard.disabled` restore marker. Reboot alone without
+  a running guard does not undo it. IPv6 forwarding is held while on Wi-Fi and the
+  upstream subnet must differ from the LAN. See
+  [band-guard recovery](WIFI-UPLINK.md#band-guard-and-management-access).
 - **Web login:** a network with a captive portal shows **Start web login (10 min)**
   (`POST /api/wifi/uplink/login`); during login mode the card links to the portal's login
   page, counts down and offers **End login mode**. The same button is offered when the

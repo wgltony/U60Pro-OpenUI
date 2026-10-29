@@ -5,7 +5,8 @@
 A third-party interface for the **ZTE U60 Pro (MU5250) on CN B31 firmware**: a web
 dashboard and a touchscreen menu (DevUI) that add Clash / WireGuard / Tailscale proxies,
 Wi-Fi relay, eSIM management, Wi-Fi client control and more on top of the stock
-firmware. One command installs it on a stock device.
+firmware. The main installer requires the prerequisites below; this is not a
+claim of current clean-stock end-to-end qualification.
 
 This repository is a fork of [acloudpeng/U60Pro-OpenUI](https://github.com/acloudpeng/U60Pro-OpenUI)
 and continues [MU5250-OpenUI](https://github.com/dklasens/MU5250-OpenUI) and the work
@@ -26,20 +27,34 @@ listed under [Acknowledgements](#acknowledgements).
 
 ## One-command install
 
-You need a Mac or Linux computer connected to the router over USB-C or Wi-Fi.
+You need a Mac or Linux computer. **Locked B31 first install requires a USB DATA
+cable and network access to the router** (Wi-Fi is useful for the network path);
+Wi-Fi alone is insufficient. Existing root-SSH updates may use Wi-Fi only.
+
+**Before downloading installation payloads**, obtain the router admin password
+and the externally supplied backup-key suffix. This repository does not provide
+it. Ask the [support channel](https://github.com/wgltony/U60Pro-OpenUI/issues) for
+current acquisition guidance without posting suffixes or backups. Stop if unavailable.
+Simple `strings` extraction does not work for known B31; offline tools do not obtain it.
 
 ```bash
 git clone https://github.com/wgltony/U60Pro-OpenUI.git
 cd U60Pro-OpenUI
-bash install.sh --dry-run     # check everything, write nothing
+bash install.sh --dry-run     # no device writes; downloads and creates local material
 bash install.sh               # install; add --with-tailscale for Tailscale
 ```
 
 The script checks the tools on your computer, downloads and verifies this repository's
 release, enables ADB when the device is still locked (this needs the router admin
 password and the backup-key suffix), then installs everything below in one deployment
-that rolls back on failure. Step by step, with troubleshooting: the
+with snapshots and attempted failure recovery. Step by step, with troubleshooting: the
 [install guide](docs/INSTALL.md).
+
+Before a locked first-install restore, interactive runs require `YES` to confirm
+the USB DATA cable is attached to this computer; noninteractive runs require an
+explicit `--acknowledge-usb`. An empty `adb devices` list is not proof of a cable.
+Use `--adb-serial` when selecting among devices; waiting and deployment keep that
+selection.
 
 To update later: `bash install.sh --update` (keeps your password, skips unchanged parts).
 
@@ -84,8 +99,11 @@ the touchscreen preview build); none show a real device.
 - **Wi-Fi relay**: use an existing Wi-Fi network (home, hotel, office) as the internet
   connection and save mobile data; when it drops or has no internet, traffic returns to
   cellular. Up to eight saved networks, tried in order; captive-portal logins supported.
-  Limit: a band carries either the upstream or the hotspot, so while relaying the hotspot
-  on the upstream's band pauses and the other band keeps working.
+  To avoid observed AP/STA conflicts, this fork's guard pauses the hotspot on the
+  upstream's band while relaying and retains the other band. This is the current policy,
+  not an absolute claim about all firmware or hardware capabilities. The guard commits
+  UCI and keeps a persistent `/data` restore marker; prepare opposite-band Wi-Fi or
+  USB backup management before enabling relay.
   See [Wi-Fi relay](docs/WIFI-UPLINK.md).
 - **Wi-Fi and clients**: 2.4 / 5 GHz switches and transmit power; connected devices, with
   block / unblock on the web page and the touchscreen (random MACs matched by name).
@@ -104,7 +122,22 @@ the touchscreen preview build); none show a real device.
   language, with up to nine features (five or more as a 3×3 grid) chosen on the web page.
   See [screen documentation](docs/SCREEN.md).
 - **Checked deployment**: every deployment verifies the device and each file's checksum,
-  keeps a snapshot of the previous installation and restores it if any step fails.
+  keeps a snapshot and attempts recovery on observed deployment failures, not exact
+  recovery from every possible failure. New snapshots cover current UCI/owned-sidecar
+  lifecycle state; older snapshots retain legacy coverage only. See
+  [rollback limits](docs/DEPLOYMENT.md#rollback-scope-and-limits).
+
+Source review, offline/mock tests and CI do not qualify a current clean-stock B31
+install, cold boot or failure recovery. Physical eSIM, relay band recovery, DevUI
+supervision and Windows first install still need separate hardware evidence.
+
+Settings are not uploaded to project servers, but both router and computer hold
+private material: encrypted original recovery backups stay on the computer, and
+standalone dry runs / kept work can contain decrypted configuration. The main
+installer cleans temporary work on normal exit (abrupt termination may prevent it).
+Never publish these materials or assume
+a stock backup includes Tailscale identity. See
+[privacy notes](docs/DEPLOYMENT.md#privacy-and-recovery-material).
 
 The dashboard is in Simplified Chinese by default, with an English switch. See the
 [dashboard documentation](docs/DASHBOARD.md).
@@ -152,7 +185,8 @@ compatibility with other models, hardware revisions or firmware.
   untested.
 
 Do not use upstream's desktop installer (Open U60 Pro Installer): it installs the
-upstream release and overwrites this fork's additions.
+upstream release and overwrites this fork's additions. This fork has no qualified
+desktop distribution; old GUI / `setup.sh` tutorials are superseded by `install.sh`.
 
 Each [release](https://github.com/wgltony/U60Pro-OpenUI/releases) lists its files and
 their SHA-256 checksums.
@@ -164,7 +198,8 @@ their SHA-256 checksums.
 It needs:
 
 - Rust with the `aarch64-unknown-linux-musl` target, and `cargo-zigbuild`;
-- Zig 0.14.1;
+- Zig 0.14.1; both the installer and manual build use `cargo zigbuild`, not an
+  additional musl cross-GCC linker;
 - Python 3;
 - Node.js `^20.19.0 || >=22.12.0` with npm;
 - Go or Docker for the Clash core.

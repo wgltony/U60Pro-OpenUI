@@ -4,7 +4,7 @@
 
 **中興 U60 Pro（MU5250，CN B31 韌體）** 的第三方介面：一個網頁控制台和一個觸控螢幕選單（DevUI），
 在原廠韌體之上加入 Clash / WireGuard / Tailscale 代理、無線中繼、eSIM 管理、Wi-Fi 用戶端管理等功能。
-一條指令即可從原廠裝置裝好。
+滿足下列前提後，可用主安裝腳本安裝；不等於已完成目前版本的乾淨原廠機驗收。
 
 本倉庫是 [acloudpeng/U60Pro-OpenUI](https://github.com/acloudpeng/U60Pro-OpenUI) 的分支，
 延續 [MU5250-OpenUI](https://github.com/dklasens/MU5250-OpenUI) 以及[致謝](#致謝)中列出的工作。
@@ -23,17 +23,21 @@
 
 ## 一條指令安裝
 
-需要一台 Mac 或 Linux 電腦，用 USB-C 線或 Wi-Fi 連上路由器。
+需要一台 Mac 或 Linux 電腦。**鎖定 B31 首次安裝必須連接 USB 資料傳輸線，並能透過網路存取路由器**（Wi-Fi 有助於維持網路連線）；只連 Wi-Fi 不夠。已有 root SSH 的更新可以只走 Wi-Fi。
+
+**下載安裝檔案前**，先取得路由器管理員密碼和外部提供的備份金鑰後綴。倉庫不提供後綴；可向[支援管道](https://github.com/wgltony/U60Pro-OpenUI/issues)詢問目前取得指引，不要公開後綴或備份。無法取得就先停止；已知 B31 不能用簡單 `strings` 提取，離線工具也不能代為取得。
 
 ```bash
 git clone https://github.com/wgltony/U60Pro-OpenUI.git
 cd U60Pro-OpenUI
-bash install.sh --dry-run     # 先試執行，不寫入任何東西
+bash install.sh --dry-run     # 先試執行，不寫入裝置；會下載並產生本機材料
 bash install.sh               # 安裝；加 --with-tailscale 同時安裝 Tailscale
 ```
 
 腳本會檢查電腦上的工具，下載本倉庫的發行檔案並校驗，裝置仍鎖定時先開啟 ADB（需要路由器管理員密碼和備份金鑰後綴），
-然後在一次可回滾的部署裡裝好下面所有功能。逐步說明和常見問題見[安裝教學](docs/INSTALL.zh.md)（簡體中文）。
+然後透過帶快照及失敗復原嘗試的部署裝好下面所有功能。逐步說明和常見問題見[安裝教學](docs/INSTALL.zh.md)（簡體中文）。
+
+鎖定首次安裝復原前，互動執行必須輸入 `YES` 確認 USB 資料傳輸線已接到本機；非互動執行須明確加 `--acknowledge-usb`。空的 `adb devices` 清單不是接線證明；若有多台裝置，用 `--adb-serial` 指定，等待及部署都沿用該選擇。
 
 之後更新：`bash install.sh --update`（保留密碼，略過沒有變更的部分）。
 
@@ -72,7 +76,7 @@ bash install.sh               # 安裝；加 --with-tailscale 同時安裝 Tails
     **遠端管理**（子網路由，在任何地方透過 tailnet 存取路由器和區域網路，可與 Clash / WireGuard 同時使用）。
 - **無線中繼**：連上既有的 Wi-Fi（家裡、飯店、辦公室）當作上網通道，省下行動數據；上游斷線或無法上網時自動回到行動網路。
   最多儲存 8 個網路依序連線，支援需要網頁驗證的熱點。
-  限制：同一頻段只能作為上游或熱點之一，中繼時與上游同頻段的熱點會自動暫停，另一個頻段照常運作。
+  本分支為規避已觀察到的 AP/STA 衝突，中繼時由守護暫停與上游同頻段的熱點，保留另一頻段；這是目前策略，不是對所有韌體或硬體能力的絕對結論。守護會提交 UCI，並在 `/data` 留持久復原標記；開啟前準備另一頻段或 USB 備用管理通道。
   見 [Wi-Fi 中繼文件](docs/WIFI-UPLINK.md)。
 - **Wi-Fi 與用戶端**：2.4G / 5G 開關、發射功率；檢視已連線裝置，在網頁或觸控螢幕上封鎖 / 解除封鎖（依裝置名稱識別隨機 MAC）。
 - **訊號與行動網路**：載波和基地台詳情、網路模式、頻段與基地台鎖定、APN、簡訊、流量統計、TTL。
@@ -83,7 +87,11 @@ bash install.sh               # 安裝；加 --with-tailscale 同時安裝 Tails
 - **日誌與診斷**：路由器輪替日誌（中繼、Tailscale、封鎖事件），訊號記錄與連線事件記錄（CSV 下載），AT 主控台。
 - **觸控選單（DevUI）**：裝置 320×480 螢幕上的選單，語言跟隨網頁。最多顯示九個功能（五個以上排成九宮格），
   在網頁上選擇要顯示哪些。見[螢幕文件](docs/SCREEN.md)。
-- **有校驗的部署**：每次部署都核對裝置身分和每個檔案的校驗碼，保留先前的快照，任何一步失敗都還原。
+- **有校驗的部署**：核對裝置身分和檔案校驗碼，保留快照並在觀測到部署失敗時嘗試復原；不是任何失敗都精確還原的保證。新快照包含目前 UCI / 自有 sidecar 生命週期覆蓋，舊快照只有舊覆蓋範圍，見[回退邊界](docs/DEPLOYMENT.md#rollback-scope-and-limits)。
+
+原始碼、離線 / mock 測試與 CI 不等於目前乾淨原廠 B31 的首次安裝、冷啟動、故障復原驗收；實體 eSIM、無線頻段復原、DevUI 監督和 Windows 首次安裝仍需各自的實機證據。
+
+設定不會上傳專案伺服器，但路由器與電腦都含私密材料：電腦保留加密原始復原備份，獨立 dry-run / 保留工作目錄可能留下解密設定；主安裝程式正常結束時清理暫存目錄（異常終止可能來不及清理）。不要公開這些材料，也不要假設原廠備份含 Tailscale 身分。詳見[隱私說明](docs/DEPLOYMENT.md#privacy-and-recovery-material)。
 
 網頁預設為簡體中文，可切換為英文。見[控制台文件](docs/DASHBOARD.md)。
 
@@ -119,7 +127,7 @@ bash install.sh               # 安裝；加 --with-tailscale 同時安裝 Tails
   （agent、網頁、觸控螢幕、lpac 和 Clash 核心），保留原本的密碼。選項見 `Get-Help .\scripts\windows\deploy.ps1 -Detailed`。
   用 Windows 首次安裝未經測試。
 
-請勿使用上游的桌面安裝程式（Open U60 Pro Installer）：它安裝的是上游版本，會覆蓋本分支新增的功能。
+請勿使用上游的桌面安裝程式（Open U60 Pro Installer）：它安裝的是上游版本，會覆蓋本分支新增的功能。本分支沒有經過驗收的桌面分發；舊 GUI / `setup.sh` 教學均以目前 `install.sh` 為準。
 
 每個[發行版本](https://github.com/wgltony/U60Pro-OpenUI/releases)都列出檔案及其 SHA-256 校驗碼。
 
@@ -129,7 +137,7 @@ bash install.sh               # 安裝；加 --with-tailscale 同時安裝 Tails
 `bash install.sh --from-source` 會在本機建置所有元件再安裝。需要：
 
 - Rust，帶 `aarch64-unknown-linux-musl` 目標，以及 `cargo-zigbuild`；
-- Zig 0.14.1；
+- Zig 0.14.1；主安裝腳本與手動建置均使用 `cargo zigbuild`，不要求另裝 musl 交叉 GCC；
 - Python 3；
 - Node.js `^20.19.0 || >=22.12.0` 和 npm；
 - Clash 核心需要 Go 或 Docker。

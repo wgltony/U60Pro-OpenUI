@@ -5,7 +5,7 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   checks:
@@ -24,17 +24,14 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
 
-      - name: Install zig
+      - name: Install zig 0.14.1
         run: |
-          pipx install ziglang
-          PIPX_BIN="$(pipx environment --value PIPX_BIN_DIR)"
-          ls -l "$PIPX_BIN"
-          # ziglang >= 0.16 ships the binary as python-zig; cargo-zigbuild expects zig
-          if [ ! -e "$PIPX_BIN/zig" ] && [ -e "$PIPX_BIN/python-zig" ]; then
-            ln -s "$PIPX_BIN/python-zig" "$PIPX_BIN/zig"
-          fi
-          echo "$PIPX_BIN" >> "$GITHUB_PATH"
-          "$PIPX_BIN/zig" version
+          # Match the locally tested toolchain and screen/lpac builds, not PyPI latest.
+          curl -fsSL -o zig.tar.xz https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
+          echo '24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c  zig.tar.xz' | sha256sum -c -
+          mkdir "$RUNNER_TEMP/zig" && tar xJf zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
+          test "$("$RUNNER_TEMP/zig/zig" version)" = 0.14.1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
 
       - uses: taiki-e/install-action@v2
         with:
@@ -55,6 +52,7 @@ jobs:
         with:
           name: zte-agent
           path: target/aarch64-unknown-linux-musl/release/zte-agent
+          if-no-files-found: error
 
   dashboard:
     runs-on: ubuntu-latest
@@ -80,6 +78,7 @@ jobs:
         with:
           name: dashboard-dist
           path: dashboard-dist.tar.gz
+          if-no-files-found: error
 
   screen:
     runs-on: ubuntu-latest
@@ -92,6 +91,7 @@ jobs:
           curl -fsSL -o zig.tar.xz https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
           echo '24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c  zig.tar.xz' | sha256sum -c -
           mkdir "$RUNNER_TEMP/zig" && tar xJf zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
+          test "$("$RUNNER_TEMP/zig/zig" version)" = 0.14.1
           echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
 
       - name: Build openui-screen
@@ -103,10 +103,13 @@ jobs:
         with:
           name: openui-screen
           path: build/screen/openui-screen
+          if-no-files-found: error
 
   publish:
     needs: [agent, dashboard, screen, checks, lpac, mihomo]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -165,6 +168,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="$GITHUB_REF_NAME"
-          ARGS=(--draft --title "$TAG" --notes-file release-notes.md --generate-notes)
+          ARGS=(--draft --verify-tag --title "$TAG" --notes-file release-notes.md --generate-notes)
           case "$TAG" in *-rc*) ARGS+=(--prerelease) ;; esac
           gh release create "$TAG" "${ARGS[@]}" assets/*

@@ -1,5 +1,7 @@
 # 开发规划：OpenUI + WireGuard + Clash.Meta（FlClash 内核）
 
+> **历史规划与带日期的进展记录，不是当前安装教程。** 下文旧 setup / GUI 入口、Tailscale 取舍、中继“纯运行时”说明均可能已被后续实现取代。当前安装只看 [install.sh 教程](INSTALL.zh.md)，安全与持久化边界看 [SAFETY.md](SAFETY.md) / [WIFI-UPLINK.md](WIFI-UPLINK.md)；不要照抄历史命令。
+
 目标设备：ZTE U60 Pro（MU5250），固件 **CN B31**，全新未解锁。
 目标：设备自托管的网页管理（OpenUI）+ 两种互斥的代理后端（内核 WireGuard / mihomo）。
 

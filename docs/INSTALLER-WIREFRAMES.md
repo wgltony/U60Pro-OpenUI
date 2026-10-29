@@ -1,5 +1,9 @@
 # v1.1 installer wireframes
 
+> **Historical/sample UI reference, not an installation entrance.** This fork has
+> no qualified desktop distribution. Use [install.sh](INSTALL.md), not upstream
+> GUI packages or old setup tutorials. These images do not prove hardware recovery.
+
 These publishable wireframes show the actual installer interface with a grayscale
 presentation and **sample data**. No modem was connected during capture. They
 illustrate the workflow, not the outcome of a physical deployment.

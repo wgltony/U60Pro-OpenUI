@@ -1,309 +1,164 @@
-# Deployment — unlock, install, update
+# Deployment — current fork install, update and recovery
 
-Everything needed to go from a locked U60 Pro to the full stack (agent +
-dashboard + SSH), and to keep it there. Read [SAFETY.md](SAFETY.md) first.
+Use **`install.sh` from this repository root**. Start with the
+[install guide](INSTALL.md) / [中文教程](INSTALL.zh.md) and [safety notes](SAFETY.md).
+All host commands below assume the repository root; device-shell commands are
+explicitly labelled. Do not `source` device startup scripts to read credentials.
 
-For the shell flow, install Python 3, openssl and adb. Building the agent from
-source additionally needs the Rust cross-compilation toolchain described
-below. Building the dashboard requires Node.js `^20.19.0 || >=22.12.0` and
-npm; Node 18 is not supported by the locked Vite version. The native Tauri
-installer downloads prebuilt assets and end users need neither Rust nor Node.js.
-
-## Native Windows/macOS installer
-
-For a terminal-free installation, download **Open U60 Pro Installer** from the
-project's GitHub Releases. The Windows `.msi`/setup `.exe` and macOS `.dmg`
-builds bundle ADB and guide the user through detection, unlock, installation,
-repair, or update. The app filters unrelated ADB devices, prompts when multiple
-MU5250 modems are present, and invalidates its plan when the modem address
-changes. See [`../installer/README.md`](../installer/README.md) for the complete
-behavior, source-build instructions, diagnostics, and signing notes.
-
-## The whole flow at a glance
+## Supported entrance (not the inherited GUI/setup tutorial)
 
 ```sh
-bash setup.sh                  # prepare dependencies, unlock if needed, agent + SSH + FOTA off
-bash deploy-dashboard.sh       # build, stage, activate and verify the web UI
-# Optional repair of SSH/server configuration:
-bash scripts/zharden.sh
+bash install.sh --dry-run
+bash install.sh                 # optional: --with-tailscale
+# An already installed device:
+bash install.sh --update
 ```
 
-End state (persists across reboots):
+The old `setup.sh` and desktop-installer tutorials are superseded by this flow.
+Do not use upstream desktop packages: they install a different product and can
+overwrite this fork's additions. This fork has **no qualified desktop distribution**;
+installer source and CI/package checks do not establish a supported native GUI
+release. [Installer development notes](../installer/README.md) are not an end-user
+installation recommendation.
 
-| Service | Where | Notes |
-|---|---|---|
-| USB-C tethering | USB-C, ECM (stock composition) | survives reboots (no usb_op write) |
-| Stock web UI | `http://192.168.0.1:80` / `:443` | untouched |
-| Dashboard | `http://192.168.0.1:8080` | isolated `/data/bin/dashboard-uhttpd` → `/data/www.current` |
-| Agent API | `http://192.168.0.1:9090` | password = your choice at setup |
-| SSH | `ssh -p 2222 root@192.168.0.1` | key-only, `/data/bin/dropbear` |
-| ADB | on demand | sanctioned unlock / `rc.local` path + reboot; never write `usb_op` live |
+## Before downloading payloads
 
----
+- Target only `MU5250_HW1.0` with `CN_ZTE_MU5250V1.0.0B31`; other combinations
+  are unqualified. Prior individual-device observations are not a new clean-stock
+  installation qualification of every current release.
+- A locked B31 first installation requires a **USB DATA cable** attached to this
+  computer **and network access** to the stock web UI. Wi-Fi is useful for that
+  network connection; Wi-Fi alone cannot supply post-restore USB ADB. Keep stable
+  power and allow the restore/reboot to finish once. Confirm the USB requirement
+  before accepting the restore: interactive runs require `YES`, noninteractive
+  locked first install requires explicit `--acknowledge-usb`. This is owner
+  acknowledgement, not cable detection; an empty ADB list proves nothing.
+  `--adb-serial` is preserved through waiting and deployment. An update over working root SSH on port 2222 may
+  use Wi-Fi only; `--update` never unlocks a device.
+- For a locked device, obtain the admin password and **backup-key suffix before
+  downloading installation payloads**. The suffix is an external prerequisite,
+  not supplied by this repository. Ask via this fork's
+  [support/issues channel](https://github.com/wgltony/U60Pro-OpenUI/issues) for the
+  currently available acquisition guidance; do not post secrets or backups there.
+  Availability is not guaranteed. If it cannot be obtained, stop before install.
+- Simple `strings` extraction does **not** recover the known B31 suffix. Offline
+  patching tools also require an already obtained suffix; they do not discover it.
+  See [ADB details](ADB.md#the-backup-key-suffix) and the dated
+  [B31 investigation](reference/suffix-recovery-b31.md).
+- Host tools: Python 3, OpenSSL, Android platform-tools (`adb`), curl, OpenSSH,
+  ssh-keygen and tar. Git is needed to clone. Default installation downloads
+  verified release payloads; it does not require a Rust/Node build toolchain.
 
-## 1. Unlock (locked firmware: HK B04+, CN B28+)
+## What changes
 
-Newer MU5250 firmware removed the web-accessible USB-debug toggle
-(`zwrt_bsp.usb.set`) — on B04 the method is deleted from the daemon itself,
-so no web trick can re-enable ADB. (CN B27 and earlier still have it — if
-your device is that old, `setup.sh` can enable ADB directly and you can skip
-this section.)
+The locked-device bootstrap exports a fresh backup, patches only its ADB boot
+line, and restores it after confirmation. It changes device settings and reboots;
+a successful dry run validates preparation, **not** restore success or cold boot.
+For ADB-only/manual restore details use [ADB.md](ADB.md), not an old setup recipe.
 
-What still works is the **config backup/restore path**: the backup is an
-openssl-encrypted tar of the system config, and the restore process runs as
-root and extracts whatever you give it. `scripts/zunlock.py` uses that to
-plant one line in `etc/rc.local` that re-enables the USB debug composition
-(adbd) at boot.
+The main installation stages and verifies the agent, dashboard, screen, lpac,
+Clash core/geo data, WireGuard tool and relay guard; Tailscale is optional.
+Hardening installs key-only Dropbear on port 2222 and an isolated dashboard server
+on port 8080, removes the temporary ADB boot line, and disables FOTA auto-update.
+The stock UI on port 80 is kept separate. Verify SSH before a controlled reboot:
+USB should return to stock tethering (observed B31 RNDIS, `PID_1403`), not ADB.
 
-The script is fully self-contained (Python 3 stdlib + `openssl` CLI) and
-contains **no secrets**: the backup-key suffix is an input, the device IMEI
-is read from the device, and the USB-debug sysfs path is discovered from the
-device's own stock `rc.local` inside the backup.
+| Service | Location |
+| --- | --- |
+| Agent | `/data/zte-agent`, LAN port 9090 |
+| Dashboard | `/data/bin/dashboard-uhttpd`, `/data/www.current`, port 8080 |
+| SSH | `/data/bin/dropbear`, port 2222; `/data/dropbear/` key copy |
+| Startup | `/data/local/tmp/start_*.sh`, called from `/etc/rc.local` |
+| Relay guard | `/data/bin/relay-band-guard.sh` |
+| Optional Tailscale | `/etc/init.d/openui-tailscale`, `/data/bin/tailscale*` |
 
-### Requirements
+OpenUI's own optional Tailscale service is not a stock boot-critical service.
+Do not add firewall boot hooks or disable vendor sync-barrier daemons. The relay
+guard intentionally commits same-band hotspot changes to UCI and keeps a restore
+marker on `/data`; see [Wi-Fi relay](WIFI-UPLINK.md). Use opposite-band Wi-Fi or
+USB as a backup management path before enabling relay.
 
-- The router's **admin password** (you set it — it's your web UI login)
-- The **backup-key suffix** for this device family (see below)
-- A computer on the device's network (WiFi or USB), Python 3, openssl
-- `adb` installed for afterwards (`brew install android-platform-tools`)
+## Source builds and advanced deployment
 
-### The backup-key suffix
+`bash install.sh --from-source` uses **`cargo zigbuild`**, not a musl GCC cross
+linker. Install Rust with `aarch64-unknown-linux-musl`, **cargo-zigbuild**, Zig
+0.14.1, Python 3, Node.js `^20.19.0 || >=22.12.0` and npm. Go or Docker is needed
+to build the Clash core (without either, that core is omitted). See the
+[README source commands](../README.en.md#updating).
 
-The backup encryption password is `<device IMEI><suffix>` — the IMEI is
-per-device (the script reads it itself), the suffix is a fixed string shared
-across this ZTE platform generation. It is deliberately **not** published
-here, at the request of the researchers who shared it (publishing it gets it
-killed in the next firmware). To obtain it:
+Advanced component deployments use `python3 scripts/deploy-components.py` from
+the root. `--keep-credentials` preserves the installed password/PIN without
+executing the startup script; `--skip-unchanged` omits identical components.
+Use `--dry-run` first and explicit local artifacts. Legacy wrappers are not the
+recommended full-stack install entrance. Windows `deploy-windows.cmd` updates an
+already installed SSH-enabled device; **Windows clean-stock first install is
+unqualified**. Neither CI nor mock screenshots establish USB driver compatibility.
 
-- ask the community
-- extract it yourself from a rooted SDX75-era ZTE MBB unit: the web server
-  binary (`zte_web`) builds the backup password in memory; the suffix is
-  visible in its strings near the backup/restore code paths
+## Rollback scope and limits
 
-Pass it via `--suffix`, the `ZTE_BACKUP_SUFFIX` env var, or the interactive
-(hidden) prompt. It never touches this repo.
-
-### Usage
+A deployment checks space, locks the device and keeps a private snapshot under
+`/data/local/tmp/open-u60-transactions/<id>`. It attempts automatic recovery on
+observed deployment/verification failures and prints the exact same-device
+recovery command if the connection is lost:
 
 ```sh
-python3 scripts/zunlock.py --dry-run     # everything except the upload (safe)
-python3 scripts/zunlock.py               # full run, asks before restoring
+# On the same router, using the exact id/fingerprint printed by the deployer:
+sh /data/local/tmp/open-u60-transaction.sh restore <transaction-id> <identity-fingerprint>
 ```
 
-`setup.sh` runs both stages automatically when it detects a locked device
-(no SSH, no ADB) — it prompts for the suffix, does the dry run first, then
-the real unlock with `zunlock.py`'s own consent gate.
+Retain snapshots until checked. New snapshots capture FOTA/wireless UCI files, the band-guard restore marker
+and original running state of owned Tailscale/guard sidecars. Activation stops
+owned old sidecars; recovery stops new sidecars before restoring files/config,
+then restarts only those previously running. Ambiguous ownership refuses a kill.
+Old snapshots retain **legacy coverage only**, not retroactive capture of missing
+state. Driver/CSA state and immediate management-channel continuity are not
+guaranteed to return instantly.
+The lifecycle regression suite uses an explicit simulated proc/procd/UCI backend;
+this is not native B31 or power-loss acceptance. FOTA recovery currently accepts
+only an empty-object setter acknowledgement plus the saved UCI value. An unknown
+or error reply keeps recovery **pending**, while restoration of other verified
+management services is still attempted. Do not treat an unrecognized native
+response as successful recovery; its schema needs a separately authorized,
+read-only investigation before widening the accepted protocol.
+This is deployment recovery, not firmware/partition rollback, not an undo of the
+unlock restore, and not a guarantee of exact recovery after every future failure,
+power loss or storage damage. Pending/ambiguous records require inspection before
+another deployment. See [operations rollback](OPERATIONS.md#rollback).
 
-What happens on a full run:
+## Privacy and recovery material
 
-1. logs into the web UI, requests a fresh config backup, downloads it
-2. decrypts it (`openssl enc -d -des-ede3-cbc -md sha256`)
-3. inserts the USB-debug line into `etc/rc.local` (right after the shebang,
-   path discovered from the stock file), preserving file modes/ownership
-4. rebuilds the package exactly as the device does (inner tgz → md5 sidecar →
-   outer tgz → re-encrypt) — passes the device's own restore-time md5 check
-5. uploads it (`/cgi-bin/cgi-upload`, verifies the server's sha256 matches),
-   triggers `device_restore_proc` — the device restores and reboots
-6. ~60–90 s later: `adb devices` shows the unit (verify it matches your connected modem),
-   root shell via `adb shell`
+No project-server upload of router configuration is part of this flow. Router
+local settings contain your passwords, subscriptions and identities; configure
+your own accounts rather than copying an author's environment. The computer also
+retains **private encrypted original recovery backups** under
+`~/.local/share/open-u60-pro/recovery`, including an identity record. Encryption
+does not make these safe to publish. Do not assume a stock backup includes
+OpenUI/Tailscale state on `/data`.
 
-Your settings are preserved — the patched package is built from a backup
-taken seconds earlier.
+Standalone `zunlock.py --dry-run` and `--keep-work` can leave decrypted configuration
+archives and patched artifacts in their work directories. Protect them and remove
+unneeded material deliberately. The main `install.sh` cleans its temporary work
+directory on normal exit (success or failure); original encrypted recovery backups
+are retained separately. Abrupt termination can prevent cleanup. Never attach
+backups, work directories, SSH keys or suffixes to public issues. This precaution
+does not imply a confirmed leak.
 
-### Unlock safety notes
+## Firmware updates are not routine recovery
 
-- The restore reboots the device and briefly interrupts connectivity (~90 s).
-- The script verifies the upload hash before triggering anything; a mismatch
-  aborts before any state change.
-- Never write the USB composition node manually outside boot time (live
-  writes can kill the gadget until reboot), and never experiment with A/B
-  slot switching (`abctl --set_active`) — mixed-slot boots can brick the unit.
+FOTA can replace startup hooks, SSH configuration and the suffix; do not enable
+it as a troubleshooting shortcut. On the observed B31 preserve list,
+`/etc/rc.local` and `/etc/dropbear` were absent while `/data` persisted. Future
+firmware may differ: read its real `/sbin/backup_fota.list`, retain private recovery
+material and qualify the new build separately. If the suffix rotates, no working
+B31 plain-string extraction recipe is known. Stop and seek support rather than
+promising re-unlock. Historical evidence: [B31 status](B31-UNLOCK-STATUS.md).
 
----
+## Validation boundary
 
-## 2. Agent install — `setup.sh`
-
-```sh
-bash setup.sh
-```
-
-- Prompts for the router admin password and the agent API password.
-- **Choose "build from source"** (the default, fully auditable). The
-  pre-built download comes from this repo's GitHub releases and matches
-  the dashboard — use it when installing the Rust toolchain isn't
-  practical.
-- All packages and the built/downloaded agent are prepared before unlock. A
-  downloaded agent must match its release checksum. If the device is locked,
-  setup then runs the backup dry run and confirmed restore; otherwise it
-  verifies the selected ADB or SSH device directly.
-- Pushes the agent to `/data/zte-agent`, creates the startup script with
-  your password, adds the rc.local line, starts and verifies it.
-- Over both ADB and SSH, verification runs the firmware's
-  `/usr/bin/curl` on the device against `192.168.0.1:9090`. An ADB TCP forward
-  is not used because the agent intentionally does not listen on loopback.
-
-### Dry runs, offline preparation and rollback
-
-`deploy.sh`, `deploy-dashboard.sh` and `scripts/zharden.sh` accept `--dry-run`,
-`--gateway ADDRESS` and `--adb-serial SERIAL`. Agent/dashboard builds happen
-locally before the read-only device checks. For interactive setup, use
-`ZTE_DRY_RUN=1 bash setup.sh`. A locked-device dry run stops after backup
-preparation; storage and shell checks require an unlocked transport.
-
-The terminal wrappers use `scripts/deploy-components.py`. Credentials enter as
-data and are validated before writes; `ZTE_AGENT_PIN` may contain six digits or
-be empty to clear an existing PIN. Verification covers both password login and
-requested PIN state. An optional native-installer offline bundle can be passed
-to setup using `ZTE_BUNDLE_PATH=/path/to/bundle`; hardening accepts `--bundle`.
-
-Each deployment checks space for the new files and rollback copies, and creates
-a private snapshot under `/data/local/tmp/open-u60-transactions/<id>`. Failure
-attempts to restore the snapshot. The console prints the exact recovery command
-for use on the same modem if automatic recovery loses its connection. Successful
-snapshots remain available; save needed recovery data before removing old ones.
-A pending transaction blocks another deployment. Original encrypted unlock
-backups remain in `~/.local/share/open-u60-pro/recovery` for the terminal flow.
-
-Setup now includes SSH hardening and the dashboard server. Installing the web
-files remains a separate `deploy-dashboard.sh` step. Reboot manually when ready
-to return from the temporary ADB composition to normal tethering; the native
-installer can perform and verify this final reboot itself.
-
-## 3. Hardening — `scripts/zharden.sh`
-
-```sh
-bash scripts/zharden.sh
-```
-
-Idempotent — safe to re-run anytime. Installs dropbear to `/data/bin`
-(opkg is unusable on this firmware), generates host keys, wires SSH into
-rc.local, **removes the usb_op payload line** (so every boot returns to
-stock ECM tethering), installs an isolated dashboard server on :8080, and
-disables FOTA auto-update. Remote ADB operations are checked with an explicit
-status sentinel. The server is the pinned upstream OpenWrt uhttpd binary at
-`/data/bin/dashboard-uhttpd`; its package checksum is verified before
-installation. This avoids the ZTE-patched binary's singleton `zwrt_uhttpd`
-ubus object, which can make a second UCI instance exit even though the init
-script returned success. The script removes any legacy `uhttpd.dashboard`
-section, restarts the stock UI, then verifies the independent listener using a
-known health file.
-
-## 4. Dashboard — `deploy-dashboard.sh`
-
-```sh
-bash deploy-dashboard.sh
-```
-
-Checks the installed Node.js version, runs `npm ci`, builds `web-app` (Vite),
-and creates a validated archive. The shared deployment tool stages and hashes
-that archive, extracts it into a new `/data/open-u60-dashboards/<id>` directory,
-normalizes static-file read permissions, and switches `/data/www.current` only after extraction succeeds. It also copies `index.html` → `mobile.html`, restarts only the
-isolated dashboard server, and verifies the served SPA before reporting
-success. `setup.sh` installs that server; `scripts/zharden.sh` can repair it.
-
-If the script reports an unsupported Node.js version, install Node 20.19.x or
-22.12+ (Node 22 LTS is recommended), confirm with `node --version`, and rerun.
-If dashboard verification fails, inspect the service with:
-
-```sh
-ssh -p 2222 root@192.168.0.1 'sh /data/local/tmp/start_dashboard.sh; cat /tmp/dashboard-uhttpd.log; /usr/bin/curl -v http://127.0.0.1:8080/'
-```
-
-## Updating later
-
-```sh
-./deploy.sh              # agent (SSH; set ZTE_AGENT_PASSWORD / ZTE_AGENT_PIN)
-./deploy-dashboard.sh    # dashboard
-```
-
-Optional components go through `scripts/deploy-components.py` in the same snapshot
-and rollback flow: `--screen`, `--wireguard-tools`, `--mihomo` / `--mihomo-geodata`
-(Clash, [CLASH.md](CLASH.md)) and `--lpac` (eSIM, built by `scripts/prepare-lpac.py`
-or the release's `lpac` asset; [ESIM.md](ESIM.md)). Each is checked locally (aarch64,
-pinned checksum) before the device is contacted. `--keep-credentials` keeps the
-installed agent password and PIN instead of asking for them, and `--skip-unchanged`
-leaves out components the modem already has at the same checksum.
-
-On Windows, `deploy-windows.cmd` (`scripts/windows/deploy.ps1`) does a whole release
-update in one step. It downloads the release matching the checkout and checks it,
-prepares the geo data, runs a dry run and then the deployment with both options above,
-and finishes with the touchscreen check when the screen program changed (README,
-"Update from Windows in one step"). `deploy-components.py` and `verify-screen.py` run
-natively on Windows: no WSL or wrapper is needed.
-
----
-
-## Design rule: shell/ssh/adb only — no boot hooks outside rc.local
-
-`zharden.sh` deliberately installs **no** boot-time hooks outside
-`/etc/rc.local` and does not modify system services. An earlier approach
-hooked boot through a `config include` section in the firewall service
-(chosen because the UCI config dir survives FOTA) — that approach is
-**deprecated and removed**: a hook inside a boot-critical service is a brick
-risk. If it stalls or its target moves, the device can hang before any
-recovery interface (ssh/adb/failsafe) is up, and recovery then requires
-hardware access. See [SAFETY.md](SAFETY.md) for the incident history.
-
-Trade-off accepted: `/etc/rc.local` is **not** preserved by FOTA, so a
-firmware update wipes the service lines (the device itself still boots
-cleanly to stock). Recovery after an update is simply re-running the
-sequence above (~15 minutes). That is the right price for never risking the
-boot path.
-
-Notes:
-
-- ADB is a bootstrap channel, not a good permanent interface on this
-  firmware (its composition drops USB networking, and it only applies at
-  boot) — SSH is the durable management channel.
-- The rootfs is read-only except `/etc` and `/data`; `/data` survives FOTA,
-  so binaries and web assets persist — only the rc.local lines need
-  re-adding after an update.
-
-## Post-FOTA recovery playbook
-
-1. Verify the update landed and the device boots stock: ping, web UI up.
-2. Re-run the sequence: `zunlock.py` (if ADB is gone) → `setup.sh` →
-   `zharden.sh` → `deploy-dashboard.sh`.
-3. Confirm FOTA auto-update is off again:
-   `ssh -p 2222 root@192.168.0.1 'uci get zwrt_zte_dm.dm_update.dm_update_mode'` → `0`.
-4. If the backup-key suffix ever stops working (ZTE rotated it): extract the
-   new suffix from `strings /usr/sbin/zte_web` on any rooted unit.
-
-### Verified on CN B31 (2026-10-10)
-
-A full unlock → deploy → reboot-persistence run on `BD_CNMU5250V1.0.0B31`
-produced these corrections. Read them before relying on the notes above.
-
-- **Step 4 above does not work on B31.** The daemon is at
-  `/usr/bin/zte_web`, and the suffix is neither a contiguous string in it nor
-  single-byte-XOR obfuscated (all 255 keys tested). It is also absent from
-  `zte_topsw_mc` (which runs `device_backup_proc`) and from `libztemc.so`
-  (which holds the backup `openssl` template). Post-rotation recovery is an
-  open problem — treat a rotated suffix as potentially unrecoverable. The full
-  evidence, including a 1,524-binary sweep and 49 tested derivations, is in
-  [reference/suffix-recovery-b31.md](reference/suffix-recovery-b31.md).
-- **`/data/dropbear/` is the post-update lifeline.** `harden()` copies the
-  authorised keys and host keys there, and `/data` survives FOTA while
-  `/etc/dropbear` does not. Restoring SSH after an update is:
-  `cp -a /data/dropbear/. /etc/dropbear/`.
-- **`/sbin/backup_fota.list` is the authoritative preserve list** — read it on
-  the running firmware rather than assuming. On B31 it contains only
-  `/zteoverlay/etc-upper/{config/,manual_apn_v2.db,adbd.conf}`,
-  `config/zwrt_tr069`, `etc_rw/ztembb/dm/` and `wireless/mediatek/`;
-  `rc.local` and `dropbear` are absent.
-- **The stock USB composition on B31 is RNDIS (`PID_1403`), not ECM.** Windows
-  has an inbox RNDIS driver, so the post-reboot USB path works without a
-  third-party driver.
-- **Persistence must be proven before an update.** Reboot once and confirm the
-  hooks fire before considering FOTA; the update forces exactly that rebuild.
-- The machine-readable procedure, including host-side hazards (Windows pipe
-  `selectors`, `os.killpg`, CRLF doubling, host-side `sh -n`, and the
-  never-inline-quote rule), is in [OPERATIONS.md](OPERATIONS.md).
-
-
-## Credits
-
-Backup-crypto details and the original payload hint: the
-`amenekowo/mu5250_tweaking` community (with thanks — they asked that the key
-material itself not be republished, and this tool honors that). B04
-daemon/ACL analysis: community contributors on the issue tracker.
+Source review, synthetic/offline tests, mocks, hash checks and CI prove their
+specific contracts, not a fresh-stock end-to-end hardware qualification. A current
+clean-stock B31 restore → USB ADB → SSH/Web → cold-boot → update/failure-recovery
+run still needs a separately authorized spare-device acceptance test. Physical
+eSIM/card/carrier flows, relay band/DFS recovery, DevUI supervision and Windows
+first installation/USB drivers need their own hardware evidence. Do not reset or
+flash a working router just to fill these gaps.

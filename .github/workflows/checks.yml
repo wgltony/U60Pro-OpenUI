@@ -39,9 +39,11 @@ jobs:
       - run: npm ci && npm run build && npm run lint && npm test
         working-directory: web-app
       - run: |
-          for script in setup.sh deploy.sh deploy-dashboard.sh scripts/zharden.sh scripts/build-offline-bundle.sh scripts/device/*.sh; do
+          for script in install.sh setup.sh deploy.sh deploy-dashboard.sh scripts/zharden.sh scripts/build-offline-bundle.sh scripts/device/*.sh; do
             bash -n "$script"
           done
+          # rc.common service definitions are shell too, despite lacking .sh.
+          sh -n scripts/device/openui-tailscale.init
   # The one-click update (deploy-windows.cmd) on Windows: real pipes, ssh.exe and PowerShell 5.1.
   windows-deploy:
     runs-on: windows-latest

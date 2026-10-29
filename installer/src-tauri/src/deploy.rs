@@ -19,8 +19,11 @@ use crate::model::{InstallMode, InstallOutcome, InstallRequest, InstallerError, 
 use crate::process::{find_on_path, output_text, run};
 use crate::unlock;
 
-const REPOSITORY: &str = "dklasens/MU5250-OpenUI";
-const RELEASE_API: &str = "https://api.github.com/repos/dklasens/MU5250-OpenUI/releases/latest";
+const REPOSITORY: &str = "wgltony/U60Pro-OpenUI";
+const RELEASE_API: &str = "https://api.github.com/repos/wgltony/U60Pro-OpenUI/releases/latest";
+// Legacy GUI bundles/caches do not prove fork provenance or compatibility. Do not
+// enable deployment until a fork desktop release and bundle migration are verified.
+const DESKTOP_RELEASES_SUPPORTED: bool = false;
 const DROPBEAR_URL: &str = "https://downloads.openwrt.org/releases/23.05.4/targets/armsr/armv8/packages/dropbear_2022.82-6_aarch64_generic.ipk";
 const DROPBEAR_SHA256: &str = "4fadd1b8529f22fb5d64ee27159d11f4feb68224657953d298a1acf85a83a5c0";
 const DASHBOARD_HTTPD_URL: &str = "https://downloads.openwrt.org/releases/23.05.4/packages/aarch64_generic/base/uhttpd_2023-06-25-34a8a74d-2_aarch64_generic.ipk";
@@ -1167,6 +1170,13 @@ pub fn perform_install(
     reporter: Reporter,
     pinned_release: Option<String>,
 ) -> Result<InstallOutcome, InstallerError> {
+    if !DESKTOP_RELEASES_SUPPORTED {
+        return Err(InstallerError::new(
+            "Legacy desktop deployment is not supported for this fork",
+            "Use bash install.sh from wgltony/U60Pro-OpenUI. No compatible downloadable desktop distribution is promised.",
+            "Deployment writes are disabled before restore/upload/activation; earlier detection may read device status. Legacy online, cached and offline bundles do not establish fork provenance and compatibility.",
+        ));
+    }
     let mode = snapshot
         .mode
         .ok_or_else(|| InstallerError::internal("reading deployment plan", "mode missing"))?;

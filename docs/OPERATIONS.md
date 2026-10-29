@@ -5,12 +5,22 @@
 > ④ 验证 ⑤ 固件更新与事后重建。**所有密钥都是运行时输入，仓库内不含任何密钥。**
 > 关键红线在第 8 节，执行前必读。
 
-Step by step, for an operator who must execute without guessing.
-Every command is copy-pasteable. Every step states its expected output and its
-abort condition.
+Advanced runbook, not a replacement for the supported [install.sh flow](INSTALL.md).
+**All host commands run from the repository root** in Bash; do not change into
+`scripts/`, and do not `source` any device startup script for credentials. Blocks
+labelled “on the device” run in an established root device shell, not the host.
+Replace placeholders deliberately and inspect output before proceeding. Locked
+B31 first install needs a **USB DATA cable plus network access**; Wi-Fi is useful
+for web access, not a replacement for post-restore USB ADB. Existing root-SSH
+updates may use Wi-Fi only. Main `install.sh` asks for interactive `YES` before
+locked restore; noninteractive use must explicitly pass `--acknowledge-usb`.
+An empty ADB list is not cable evidence. `--adb-serial` selection is retained
+through waiting and deployment. This fork has no qualified native GUI distribution.
 
-Target: ZTE U60 Pro **MU5250** (SDX75 / SDXPINN), firmware family `CN_ZTE_MU5250V1.0.0B*`.
-Validated on `BD_CNMU5250V1.0.0B31` (2026-10).
+Target: ZTE U60 Pro **MU5250**, `MU5250_HW1.0` with CN B31. Individual-device
+observations from 2026-10 are historical evidence, not qualification of every
+current build or other firmware. Source/mocks/CI do not replace clean-stock
+restore, cold-boot, physical eSIM or Windows first-install acceptance.
 
 ---
 
@@ -19,8 +29,8 @@ Validated on `BD_CNMU5250V1.0.0B31` (2026-10).
 | Rule | Detail |
 |---|---|
 | **Never guess secrets** | Router admin password and `ZTE_BACKUP_SUFFIX` are runtime inputs. If absent, **stop and ask**. |
-| **Never invent a suffix** | A wrong suffix fails harmlessly at decrypt; a *guessed* one wastes a device reboot cycle. |
-| **Always dry-run first** | `zunlock.py --dry-run` is read-only. It must pass before any write. |
+| **Never invent a suffix** | An incorrect suffix should fail preparation/decryption before restore; do not proceed or guess if unavailable. |
+| **Always dry-run first** | `python3 scripts/zunlock.py --dry-run` does not restore device settings, but exports a backup and creates local private material. It must pass before any write. |
 | **Never construct device shell commands inline through a host shell** | See §7.1 — this is the single most dangerous host mistake. |
 | **One writer at a time** | Do not run two deployment tools concurrently. The transaction lock will refuse, or worse, interleave. |
 | **Report state, not narrative** | After each phase, print the state token from §1 plus the evidence lines. |
@@ -34,7 +44,7 @@ PHASE: <name>
 STATE_BEFORE: <token>
 COMMANDS: <exact argv used>
 STATE_AFTER: <token>
-EVIDENCE: <raw command output, unedited>
+EVIDENCE: <private raw evidence; redact secrets/identities before sharing>
 GATE: PASS | FAIL
 ```
 
@@ -147,24 +157,35 @@ openssl version                              # must support des-ede3-cbc + sha25
 > PY
 > ```
 
-### 2.2 Secrets (all runtime, never committed)
+### 2.2 Secrets and private local material
 
 | Name | Where it comes from | Notes |
 |---|---|---|
 | Router admin password | device owner; set at first boot | used for web UI login |
-| `ZTE_BACKUP_SUFFIX` | device-family constant, **not in this repo** | see `docs/DEPLOYMENT.md` for the acquisition path |
+| `ZTE_BACKUP_SUFFIX` | device-family constant, **not in this repo** | external prerequisite; see [ADB guidance](ADB.md#the-backup-key-suffix) |
 | Agent dashboard password | chosen at deploy time | becomes the OpenUI login |
 
-Provide via env, never on the command line (shell history):
+**Before downloading payloads**, obtain the suffix through the external
+[support channel](https://github.com/wgltony/U60Pro-OpenUI/issues); stop if unavailable.
+Do not post the value or backups there. Simple B31 `strings` extraction does not
+work; offline patching still needs an already obtained suffix. No private author
+environment file is provided or assumed. Use hidden prompts rather than putting
+values in shell history. From a Bash host shell:
 
 ```sh
-export ROUTER_PW='<router admin password>'
-export ZTE_BACKUP_SUFFIX='<suffix>'          # or a gitignored .env.local
+read -rsp 'Router admin password: ' ROUTER_PW; echo
+read -rsp 'Backup-key suffix: ' ZTE_BACKUP_SUFFIX; echo
+export ROUTER_PW ZTE_BACKUP_SUFFIX
 ```
 
 The repo's `scripts/check-device-secrets.py` runs in CI and **rejects** tracked
 files containing a literal suffix, a device IMEI, private keys or tokens. Do not
-paste real values into any file under version control.
+paste real values into any file under version control. Computer-side encrypted
+original recovery backups and identity records remain private, as do decrypted
+work archives from standalone dry runs / `--keep-work`. Main `install.sh` normal-exit
+temporary cleanup is separate from retained encrypted backups. Do not upload
+these materials or assume stock backups contain Tailscale state; no leak is
+asserted. See [privacy details](DEPLOYMENT.md#privacy-and-recovery-material).
 
 ### 2.3 Confirm the target model
 
@@ -174,7 +195,8 @@ curl -s http://192.168.0.1/ubus/ -H 'Content-Type: application/json' \
 # expect: JSON containing "wa_inner_version":"BD_CNMU5250V1.0.0B.."
 ```
 
-Abort if the model is not MU5250/MU5252 and the firmware is not `*MU5250V*`.
+Abort unless the exact model/hardware/firmware match the supported B31 scope;
+do not infer MU5252 or later-firmware support from a family-name match.
 
 ---
 
@@ -210,16 +232,18 @@ restore process runs as root and extracts whatever it is given.
 ### 3.3 Execute
 
 ```sh
-cd <repo>/scripts
+test -f install.sh && test -f scripts/zunlock.py  # repository root required
+UNLOCK_WORK="$HOME/.local/share/open-u60-pro/unlock-work"
+mkdir -p "$UNLOCK_WORK"; chmod 700 "$UNLOCK_WORK"
 
-# STEP 1 — read-only rehearsal. Must pass.
+# STEP 1 — no restore; exports backup/creates local private material. Must pass.
 ROUTER_PW="$ROUTER_PW" ZTE_BACKUP_SUFFIX="$ZTE_BACKUP_SUFFIX" \
-  python3 zunlock.py --dry-run --keep-work /tmp/unlock
+  python3 scripts/zunlock.py --dry-run --keep-work "$UNLOCK_WORK"
 
 # STEP 2 — verify the patched package BEFORE uploading (see 3.4)
-# STEP 3 — real unlock
+# STEP 3 — real unlock, only after confirming USB DATA cable + network access
 ROUTER_PW="$ROUTER_PW" ZTE_BACKUP_SUFFIX="$ZTE_BACKUP_SUFFIX" \
-  python3 zunlock.py --yes --keep-work /tmp/unlock
+  python3 scripts/zunlock.py --keep-work "$UNLOCK_WORK"
 ```
 
 Expected dry-run output:
@@ -268,10 +292,10 @@ Failure handling:
 
 | Symptom | Meaning | Action |
 |---|---|---|
-| `decryption failed — wrong suffix` | suffix invalid for this unit | stop; re-source the suffix |
+| `decryption failed — wrong suffix` | suffix invalid for this unit | stop; confirm via support and re-enter using the hidden prompt |
 | `router login failed` | wrong admin password / no route | stop; confirm password and reachability |
 | upload sha256 mismatch | transport corruption | **aborted before restore**; retry |
-| restore triggered but no ADB after 3 min | booted to stock | see §5 recovery; the device is not bricked |
+| restore triggered but no ADB after 3 min | state unknown: cable/driver/enumeration or restore/boot issue | do not repeat restore blindly; inspect stock UI, USB and power before recovery |
 
 ---
 
@@ -298,7 +322,7 @@ the pinned constants over building locally.
 ```sh
 python3 scripts/deploy-components.py \
   --gateway 192.168.0.1 --auto-adb \
-  --identity-file <unlock-work>/identity.json \
+  --identity-file "$UNLOCK_WORK/identity.json" \
   --agent    build/release/zte-agent \
   --dashboard build/release/dashboard-dist.tar.gz \
   --mihomo   build/mihomo/mihomo \
@@ -319,7 +343,7 @@ Remove `--dry-run`. The tool:
 
 1. takes a **transaction snapshot** of every target before writing
 2. prints a **recovery command** — capture it verbatim
-3. installs under a lock; a failure triggers automatic restore
+3. installs under a lock; observed failure triggers a recovery attempt (not a universal exact-recovery guarantee)
 4. verifies the agent API with the chosen password
 5. verifies SSH is **key-only** (password auth must be refused)
 6. disables FOTA auto-update
@@ -383,7 +407,8 @@ sync; sync
 adb reboot        # or: ssh ... 'reboot'
 ```
 
-Expect the device back in **60–180 s**. Then:
+Allow **60–180 s**; do not treat that estimate as proof of a successful boot.
+The following block runs **on the device**, via an established SSH root shell:
 
 ```sh
 sh -c 'netstat -lntp | grep LISTEN' | grep -E '2222|8080|9090|:80 '
@@ -438,7 +463,7 @@ GATE: S4
 **Rule: never update unless §5 has passed first.** You must have proven that you
 can rebuild the boot hooks, because that is exactly what an update forces you to do.
 
-### 6.2 Pre-update capture (do this while root still works)
+### 6.2 Pre-update capture (on the device, while root still works)
 
 ```sh
 OUT=/data/local/tmp/pre-update
@@ -459,7 +484,7 @@ done
 
 Pull `$OUT` to the host and keep it with the unlock recovery material.
 
-### 6.3 What FOTA preserves (read the real list, do not assume)
+### 6.3 What FOTA preserves (on the device; read the real list)
 
 ```sh
 cat /sbin/backup_fota.list          # paths the updater copies across
@@ -484,7 +509,8 @@ firmware-specific and re-read it on every new build.
 Only after §6.2. Use the stock UI's manual update. Never `abctl --set_active`.
 
 Post-update recovery sequence (assuming ADB or SSH is available again; if the
-device booted to stock without root, re-run §3 first):
+device booted to stock without root, reassess §3 and suffix availability first).
+The following block runs **on the device**, not in the host repository:
 
 ```sh
 # 1. SSH material — the /data copy survived
@@ -517,16 +543,12 @@ Re-lock detection: `zunlock.py --dry-run` fails with
 `decryption failed — wrong suffix`. The device itself still works; only future
 re-unlocking is affected.
 
-Try, in order:
-
-1. Re-derive from the device's own web daemon. The documented source is
-   `strings /usr/sbin/zte_web`; on B31 the daemon is at **`/usr/bin/zte_web`**
-   and the suffix was **not** present as a contiguous string, and not
-   single-byte-XOR'd. Treat this path as *unreliable*, not guaranteed.
-2. Diff the pre/post binary hashes captured in §6.2 and inspect the changed
-   backup-related binary (`zte_topsw_mc`, `libztemc.so` both participate).
-3. Ask the community channel that supplied the original suffix, quoting the new
-   firmware version. Do **not** post the key value itself publicly — see §8.
+Stop rather than promise re-unlock. Simple `strings` extraction is known **not
+to work on B31** (`/usr/bin/zte_web` and examined candidates); single-byte-XOR
+search also failed. Binary investigation is research, not an installation recipe.
+Ask the external support channel for current guidance, quoting only the public
+firmware version, never the suffix or a backup. Offline tools cannot obtain a
+rotated suffix. See [dated investigation](reference/suffix-recovery-b31.md).
 
 ### 6.6 Gate
 
@@ -609,8 +631,12 @@ directly via `curl` with a bearer token.
 
 Violating any of these can brick the device with no software recovery.
 
-1. **No boot hooks outside `/etc/rc.local`.** No firewall includes, no
-   `init.d` service changes. A hook that stalls has no recovery interface.
+1. **Do not alter stock boot-critical services or add firewall boot includes.**
+   The project-owned optional `/etc/init.d/openui-tailscale` and relay guard
+   started from the agent startup script are documented exceptions to an old
+   blanket init.d prohibition, not permission to disable vendor services. The
+   relay guard intentionally commits wireless UCI and a persistent `/data`
+   restore marker. Keep opposite-band Wi-Fi or USB backup management available.
 2. **Never disable a `zte_topsw_daemon.conf` daemon via `init.d`.** The master
    daemon waits for all listed daemons; the device then hangs on the boot logo
    while everything else *looks* fine.
@@ -637,8 +663,15 @@ sh /data/local/tmp/open-u60-transaction.sh restore <transaction-id> <identity-fi
 ```
 
 The exact argv is printed by the deployer. Snapshots live in
-`/data/local/tmp/open-u60-transactions/<id>/{before,present}/`. A failed
-deployment restores automatically; a successful one retains the snapshot.
+`/data/local/tmp/open-u60-transactions/<id>/{before,present}/`. An observed failed
+deployment attempts recovery; a successful one retains the snapshot. New snapshots
+capture FOTA/wireless UCI files, the guard restore marker and original running
+state of owned Tailscale/guard sidecars. Activation stops owned old sidecars;
+recovery stops new ones before file/config restoration, then restarts only those
+previously running. Ambiguous process ownership refuses a kill. Older snapshots
+have **legacy coverage only**. Wireless driver/CSA state, instant control-channel
+continuity, power loss and all future failures are not guaranteed exact recovery.
+This is not firmware rollback or an undo of the earlier unlock restore.
 
 ---
 

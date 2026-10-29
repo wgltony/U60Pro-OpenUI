@@ -1,18 +1,20 @@
 # Safety — how to not brick the U60 Pro
 
 Hard-won rules for this device. Read before running anything against the
-modem with ADB/SSH access. The device was bricked once already (July 2026)
-by going beyond the sanctioned path; everything below is the reason it
-cannot happen again.
+modem with ADB/SSH access. A July 2026 brick incident motivates these boundaries;
+following them reduces risk, but does not guarantee recovery from every failure.
+Use [install.sh](INSTALL.md), not inherited GUI/setup tutorials.
 
 ## Golden rules
 
-1. **Shell/ssh/adb only.** No boot hooks outside `/etc/rc.local`. No
-   firewall includes/hooks, no init.d service changes, no uci changes to
-   system services. A boot-time hook that stalls or whose target moves can
-   wedge the device before any recovery interface exists. (The
-   `firewall.zte_recovery` bootstrap, withdrawn in commit `a41f89c`, is the
-   canonical example of what NOT to reintroduce.)
+1. **Do not alter stock boot-critical services.** OpenUI startup uses
+   `/etc/rc.local`; do not add firewall includes or hooks to vendor boot services.
+   A blocking hook can wedge the device before recovery interfaces exist
+   (`firewall.zte_recovery`, withdrawn in commit `a41f89c`, is the example not to
+   reintroduce). The project-owned optional `/etc/init.d/openui-tailscale`
+   service and relay-band-guard started by the agent startup script are intentional,
+   not permission to disable vendor services. Documented Wi-Fi UCI writes are
+   allowed; a blanket claim that OpenUI never writes UCI/init.d would be false.
 2. **Never disable a daemon listed in `zte_topsw_daemon.conf` via
    `/etc/init.d/<name> disable`** — see the sync barrier below.
 3. **Stay out of partitions.** No `dd`, `mtd`, `fw_setenv`, `/dev/block`,
@@ -53,7 +55,7 @@ zte_topsw_key, zte_topsw_led, zte_topsw_tr098db, zte_dm,
 zte_topsw_fota_result, zte_topsw_devui, zte_topsw_wlan, zte_smart_manage
 ```
 
-**Safe to disable via init.d (NOT in daemon.conf):**
+**Optional candidates observed outside daemon.conf (not a universal safe list):**
 
 ```
 zte_topsw_diag, zte_topsw_samba, zte_topsw_nfc, zte_topsw_get_brand,
@@ -67,8 +69,8 @@ runtime. An unreadable or empty barrier blocks the operation. Do not add daemon.
 (killing `zte_topsw_wms` breaks SMS, `zte_topsw_sleep_faw` breaks wakelocks,
 and procd will respawn them anyway).
 
-If a daemon.conf daemon truly must be disabled, comment it out in
-`/etc/config/zte_topsw_daemon.conf` (prefix `#`) — never via init.d.
+Do not edit the barrier configuration to bypass this rule during installation.
+Firmware-specific service changes require separate investigation and authorization.
 
 ### Overlay whiteouts
 
@@ -140,23 +142,32 @@ ubus call zwrt_data get_wwaniface '{"source_module":"zte_topsw_data","cid":1}'
   firmware keeps the previous profile, OpenUI offers a restart instead.
 
 
-## What the deploy path does (and only this)
+## Current deployment and runtime boundaries
 
-`setup.sh` / `deploy.sh` / `deploy-dashboard.sh` / `scripts/zharden.sh`:
+The current `install.sh` flow stages the agent, dashboard, screen, lpac, Clash,
+WireGuard tools, relay guard and optional Tailscale; it uses the shared transaction
+helper. Hardening installs key-only SSH, the isolated dashboard listener, guarded
+`/etc/rc.local` lines and disables FOTA. See [Deployment](DEPLOYMENT.md) for paths,
+rollback coverage/legacy limits and source prerequisites, not an old setup recipe.
 
-- push `/data/zte-agent` + `/data/local/tmp/start_zte_agent.sh`
-- push dashboard static files to `/data/www`
-- create `/data/www` before starting the dashboard listener, then restart and
-  verify the isolated upstream uhttpd process after deployment
-- append `sh /data/local/tmp/start_*.sh` lines to `/etc/rc.local`
-  (idempotent, grep-guarded, syntax-checked with `sh -n`)
-- install dropbear to `/data/bin` (zharden) with key auth on port 2222
-- install the pinned, checksum-verified upstream OpenWrt uhttpd binary as
-  `/data/bin/dashboard-uhttpd`, removing the unreliable legacy second UCI
-  instance before starting it on :8080
-- disable FOTA auto-update (`zwrt_zte_dm set_update_mode`)
+The relay guard deliberately pauses the same-band hotspot, commits
+`wireless.<radio>.disabled` to UCI and retains
+`/data/local/tmp/relay-band-guard.disabled` across reboot. Keep opposite-band Wi-Fi
+or USB management available; do not rely on a same-band client roaming by itself.
+The marker needs the guard to run for restoration (after its boot grace period);
+a reboot without the guard is not a promise that all relay changes disappear.
 
-Anything beyond this list is a red flag during review.
+Personal configuration stays local rather than being uploaded to project servers,
+but **both router and computer contain private material**. Encrypted original
+recovery backups and identity metadata remain on the computer; standalone dry runs
+and `--keep-work` may also keep decrypted configuration. Main-installer temporary
+cleanup is separate from retained encrypted recovery backups. Never publish these
+materials; do not assume native backups contain Tailscale state. No leak is being
+asserted. See [privacy and recovery material](DEPLOYMENT.md#privacy-and-recovery-material).
+
+Source review, synthetic tests, mocks and CI are not clean-stock B31/cold-boot,
+physical eSIM or Windows first-install qualification. Installation/restoration has
+risk; use a separately authorized spare device for hardware acceptance testing.
 
 ## Known-good ubus surface
 
@@ -168,93 +179,10 @@ and methods; anything outside that surface deserves extra scrutiny.
 
 ---
 
-# Safety audit — 2026-08-09
+## Historical audits
 
-Scope: every commit (`git log --all`), the working tree, and the deploy
-path. Goal: confirm nothing in this repo can brick the device when ADB is
-regained and this is deployed again.
-
-**Verdict: the deploy path is clean.** Findings and dispositions below.
-
-## 1. Deploy path
-
-| Surface | What it does | Verdict |
-|---|---|---|
-| `setup.sh` | unlock (via zunlock.py) + agent push, startup script, rc.local line | idempotent, grep-guarded rc.local edits; safe |
-| `deploy.sh` | ssh-only binary push + restart | safe |
-| `deploy-dashboard.sh` | builds `web-app`, tars to `/data/www`, restarts/verifies isolated dashboard uhttpd | safe (data partition only) |
-| `scripts/zharden.sh` | Dropbear + isolated upstream uhttpd to `/data`, rc.local cleanup, checked :8080 setup, FOTA off | pinned package hashes; v2 removed the firewall-include bootstrap — the last boot-critical hook |
-| `scripts/zunlock.py` / `zbackup.py` | config backup patch + restore (the unlock itself) | highest-risk by nature, but gated: `--dry-run`, explicit confirm, sha256 upload verification, payload auto-discovered from the device's own rc.local |
-
-## 2. Agent boot-time behavior — acceptable, documented
-
-- `main.rs` runs `/data/local/tmp/start_ttl.sh` (iptables mangle TTL/HL
-  rules). Runtime firewall only; no persistence beyond that script. Safe.
-- `usb::enforce_usb_mode_on_boot()` rebuilds the USB configfs gadget **only
-  if NCM was explicitly persisted** (`/data/local/tmp/usb_config.json`),
-  waits up to 75 s for the stock USB stack to finish (bridge-membership
-  check), and skips in power-off-charging states. configfs is runtime sysfs —
-  a failure cannot persist across reboot. Worst case: tethering needs a
-  reboot. Acceptable.
-- All agent state files live under `/data/local/tmp/` (writable data
-  partition). The agent never writes `/etc`, `/zteoverlay`, or raw
-  partitions, except via `uci commit wireless`/`dhcp` and the
-  documented rc.local lines.
-
-## 3. Findings acted on (2026-08-09)
-
-1. **Exploit tooling quarantined.** `zacs.py` (rogue TR-069 ACS with
-   SetParameterValues), `zrce.py`, `zinj.py`, `zdns.py`, `zstrings.py`,
-   `zgap.py` (fac_reset/fac_reboot/FOTA probes), `zadb.py`, `zhidden.py`,
-   `zwrite.py` moved to `scripts/research/` with a warning README. They
-   never ran as part of deploy, but they are the class of tool that bricked
-   the device and should not sit next to sanctioned tools.
-2. **Safety docs consolidated into this file** (device rules + audit).
-3. **v2.1 upstream regressions rejected** during the feature port (below).
-4. **setup.sh unlock modernized**: the dead `zwrt_bsp.usb set {mode:debug}`
-   path replaced with the backup/restore route; the broken in-setup dropbear
-   install (404 URL + unusable opkg) removed in favor of `zharden.sh`.
-
-## 4. v2.1 features ported, and what was deliberately NOT ported
-
-Ported (safe, gated): charge control (`zwrt_bsp.charger`, inverted semantics
-handled), USB powerbank (`zwrt_bsp.powerbank set`), firmware WMS SMS translation
-with readiness gating (no direct database writes), `/api/at/port`, WiFi dual UCI namespace
-(`zte_mbb.wifi.*` + `wireless.zte_mbb.*`) with guest-time read.
-
-**Rejected from v2.1 (safety regressions):**
-
-| v2.1 change | Why rejected |
-|---|---|
-| kill-bloat list adds `zte_topsw_mc`, `zte_dm`, `zte_topsw_wms`, `zte_topsw_sleep_faw`, `zte_topsw_tr098db` | daemon.conf daemons — sync-barrier risk (see above); current list kept |
-| unrestricted AT terminal (any `AT…` accepted) | current allowlist kept (`AT+CFUN`, `AT^…`, `AT+CMGD`, `AT$QCRMCALL` etc. blocked) |
-| bind `0.0.0.0:9090`, no CORS pinning, no body limit, no `X-Confirm` on destructive ops | current hardening kept (LAN bind `192.168.0.1`, LAN-only CORS, 1 MiB body cap, `X-Confirm: true` required) |
-
-The scheduler, DoH proxy and SMS forwarder have since been removed entirely —
-they had no dashboard surface, and `main.rs` runs a one-shot migration that
-undoes DoH's dnsmasq rewiring so a device that had it enabled does not come
-back up forwarding DNS to a dead port.
-| Tailscale module | skipped by owner decision (installs/supervises a daemon, downloads binaries) |
-
-## 5. Secrets / sensitive data
-
-- `back_parameter` (encrypted config backup), `adb-lock-investigation.md`
-  (contains the backup-key suffix, IMEI and sticker credentials), `logs/`,
-  `loopdebug-capture/` are **gitignored and never committed** — verified
-  across all history. Keep it that way.
-- No IMEI, passwords, session tokens or backup-key material in any committed
-  file (scanned 2026-08-09).
-- `scripts/research/` tools are env-parameterized (no embedded credentials).
-
-## 6. Residual risks (accepted, documented)
-
-- `zunlock.py` restore path: inherent to the unlock; mitigations in place.
-- NCM gadget rebuild: runtime-only, recoverable by reboot.
-- `zwrt_bsp.charger set` can stop charging; the charge-limit enforcer
-  re-enables on charger unplug and on disable. Manual override is exposed
-  via the API.
-- `scripts/research/` remains runnable if deliberately invoked — that is the
-  point of the quarantine README.
+The [2026-08-09 audit](archive/safety-audit-2026-08-09.md) is retained as history,
+not a current component inventory or proof that installation cannot fail.
 
 ## WireGuard gateway extension
 
@@ -266,13 +194,14 @@ feature from its current boot path; no additional init.d/firewall hooks are used
 
 ## Wi-Fi relay
 
-The relay adds a client interface (`ou-sta0`) on the hotspot's radio, a wpa_supplicant
-and a udhcpc run by the agent, firewall chains `OUUP_*`, routing table `10431` and
-rules `10429`–`10431`. All of it is runtime state: no UCI, init.d, stock chain or main
-route changes, and nothing survives a reboot without the agent. Inbound traffic from the
-upstream network is dropped except replies and DHCP offers. Turning the relay off
-removes everything; at start the agent drops a previous agent's online rules before its
-own checks pass. See [WIFI-UPLINK.md](WIFI-UPLINK.md).
+The relay adds `ou-sta0`, agent-owned wpa_supplicant/udhcpc, firewall chains
+`OUUP_*`, table `10431` and rules `10429`–`10431`. Those forwarding resources are
+runtime state, but saved relay settings and the band guard's committed UCI change
+and `/data` restore marker are persistent. The same-band AP stays paused while
+associated; disassociation between networks does not immediately give it back.
+Inbound upstream traffic is filtered except replies and DHCP offers. Guard-based
+restoration, boot grace and backup management are described in
+[WIFI-UPLINK.md](WIFI-UPLINK.md).
 
 ## Temporary screen ownership
 
@@ -294,7 +223,7 @@ No legacy SETCRTC or debugfs image_dump writes are permitted. See [SCREEN.md](SC
 
 The agent's QMI requests (`agent/src/qmi.rs`) are limited to the UIM service (logical
 channels to the eUICC's ISD-R, APDUs on them, slot and card status, SIM power off/on)
-and the DMS operating mode. A switch always powers the card back on and returns a
-radio that was online to online, even when a step fails; the worst outcome is a
-device without mobile service until it restarts. No firmware daemon is stopped or
+and the DMS operating mode. The switch cleanup attempts to power the card back on and return a previously
+online radio to online after a failure; it cannot guarantee recovery for every
+card, carrier or hardware fault. A restart may be needed to regain mobile service. No firmware daemon is stopped or
 restarted, and no reboot happens without the owner choosing it. See [ESIM.md](ESIM.md).
