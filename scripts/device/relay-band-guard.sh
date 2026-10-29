@@ -89,12 +89,46 @@ if [ "$1" = restore ]; then
 	exit 0
 fi
 
-# One watcher only.
-pid=$(cat "$PIDFILE" 2>/dev/null)
-if [ -n "$pid" ] && [ "$pid" != $$ ] && grep -q relay-band-guard "/proc/$pid/cmdline" 2>/dev/null; then
-	exit 0
+# One watcher only. A PID or a command substring is not ownership: check the
+# complete interpreter/script argv, executable and Linux start time. Keep a
+# token for transaction recovery and never replace a live unidentified owner.
+identity() {
+	start=$(sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}')
+	exe=$(readlink "/proc/$1/exe") || return 1
+	hash=$(sha256sum "/proc/$1/cmdline" | awk '{print $1}')
+	case "$exe" in /bin/busybox|/bin/ash|/bin/sh) ;; *) return 1 ;; esac
+	argv_hash() { printf '%s\000' "$@" | sha256sum | awk '{print $1}'; }
+	if [ "$hash" != "$(argv_hash /bin/sh /data/bin/relay-band-guard.sh)" ] &&
+	   [ "$hash" != "$(argv_hash /bin/ash /data/bin/relay-band-guard.sh)" ] &&
+	   [ "$hash" != "$(argv_hash /data/bin/relay-band-guard.sh)" ]; then return 1; fi
+	case "$start" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$(awk '/^Uid:/ {print $2 ":" $3 ":" $4 ":" $5}' "/proc/$1/status")" = 0:0:0:0 ] || return 1
+	inode=$(stat -Lc '%d:%i' "/proc/$1/exe") || return 1
+	printf '%s|%s|%s|%s|%s\n' "$1" "$start" "$exe" "$inode" "$(sha256sum "/proc/$1/cmdline" | awk '{print $1}')"
+}
+record=$(cat "$PIDFILE" 2>/dev/null)
+pid=${record%%|*}
+if [ -n "$pid" ]; then
+	case "$pid" in *[!0-9]*) echo 'Invalid guard pidfile' >&2; exit 1 ;; esac
+	if [ -d "/proc/$pid" ]; then
+		live=$(identity "$pid") || { echo 'Unidentified guard pidfile owner' >&2; exit 1; }
+		case "$record" in *'|'*) [ "$record" = "$live" ] || { echo 'Guard PID identity changed' >&2; exit 1; } ;; esac
+		exit 0
+	fi
 fi
-echo $$ > "$PIDFILE"
+lock=/var/run/relay-band-guard.lock
+# Only discard a stale lock when its recorded process is demonstrably gone.
+if [ -n "$pid" ] && [ ! -d "/proc/$pid" ]; then rmdir "$lock" 2>/dev/null || true; fi
+mkdir "$lock" 2>/dev/null || { echo 'Guard startup is already locked' >&2; exit 1; }
+owner=$(identity $$) || { rmdir "$lock"; exit 1; }
+printf '%s\n' "$owner" > "$PIDFILE"
+cleanup() {
+	if [ "$(cat "$PIDFILE" 2>/dev/null)" = "$owner" ]; then rm -f "$PIDFILE"; rmdir "$lock" 2>/dev/null || true; fi
+}
+# Transaction stop must NOT restore an AP or reload Wi-Fi. Its saved UCI/marker
+# is restored separately; explicit `restore` above retains its old meaning.
+trap cleanup EXIT
+trap 'exit 0' HUP INT TERM
 log "guard started"
 
 while :; do

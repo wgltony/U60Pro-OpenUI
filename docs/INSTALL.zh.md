@@ -21,21 +21,23 @@ Clash / WireGuard / Tailscale、无线中继、eSIM、USB 网络共享和路由�
   （约 90 秒没有网络）。你的设置会保留。
 - 安装会关闭固件自动更新（更新可能让解锁失效），在 2222 端口开启只认密钥的 SSH，
   下次重启后 USB 回到普通的网络共享模式。
-- 每次部署都会保留快照，任何一步失败都会自动恢复原样。
-- 仓库里没有任何个人信息。你的密码、Wi-Fi、订阅和 Tailscale 身份只保存在你的路由器上。
+- 每次部署保留快照，并在观测到失败时尝试恢复。新快照包含当前 UCI / 自有 sidecar 生命周期覆盖，旧快照只有旧覆盖范围；不保证所有故障或断电都精确恢复。见[回退边界](DEPLOYMENT.md#rollback-scope-and-limits)。
+- 个人配置不会上传项目服务器。路由器本地保存密码、Wi-Fi、订阅和身份；**电脑也保留私密的加密原始恢复备份和身份记录**。独立 `zunlock.py --dry-run` / `--keep-work` 可能留下解密配置。主安装器正常成功 / 失败退出时清理临时目录，但另行保留加密恢复备份。两类材料都不要公开，也不要假设原厂备份包含 Tailscale 状态。见[隐私说明](DEPLOYMENT.md#privacy-and-recovery-material)。
 
 **需要准备：**
 
 - 一台 Mac 或 Linux 电脑。用 Windows 第一次安装没有测试过；更新时双击 `deploy-windows.cmd` 即可。
-- 一根 USB-C 数据线，或者让电脑连上路由器的 Wi-Fi。
+- **锁定 B31 首装必须连接 USB 数据线，并能通过网络访问路由器**。Wi-Fi 有助于保持原厂网页可达，但只连 Wi-Fi 不能提供恢复后的 USB ADB。已有 root SSH 的更新可以只走 Wi-Fi。
 - 工具：`python3`、`openssl`、`adb`、`curl`、`ssh`。
   - macOS：`brew install python openssl android-platform-tools`
   - Debian/Ubuntu：`sudo apt-get install python3 openssl adb curl openssh-client`
 - 只有锁定的设备才需要（B28 及以后的固件，包括 B31）：
   - 路由器的**管理员密码**（登录 `http://192.168.0.1` 用的密码）；
-  - 这一系列设备的**备份密钥后缀**。应发现者的要求，它不公开发布，请向社区询问。
+  - 这一系列设备的**备份密钥后缀**。它不公开发布；**下载安装文件前先取得**，可向本分支[支持渠道](https://github.com/wgltony/U60Pro-OpenUI/issues)询问当前获取指引，不要公开秘密。无法取得就先停止。
     开启 ADB 的原理和步骤（自动、脚本、完全手动三种方式）见 [ADB.zh.md](ADB.zh.md)；
     后缀说明见 [ADB.zh.md](ADB.zh.md#备份密钥后缀)。
+
+已知 B31 不能用简单 `strings` 提取后缀；离线打补丁工具也需要先取得后缀，不能替你获取。无需也不提供作者的私人环境文件。源码、mock 和 CI 不等于当前干净原厂 B31 首装 / 冷启动、实体 eSIM 或 Windows 首装验收。本分支没有经过验收的桌面分发；旧 GUI / setup 教程以这里的 `install.sh` 流程为准，不推荐上游桌面包。
 
 ## 1. 获取代码
 
@@ -48,7 +50,7 @@ cd U60Pro-OpenUI
 
 ## 2. 连接路由器
 
-用 USB-C 线连到电脑，或者连上它的 Wi-Fi。检查：
+锁定首装时，先接好 **USB 数据线**，并建立到原厂网页的网络连接（可用 Wi-Fi）；**恢复前确认**线材已接好。ADB 通常要恢复重启后才出现。已有 SSH 的更新可只连 Wi-Fi。以下命令均在仓库根目录执行：
 
 ```sh
 adb devices
@@ -57,14 +59,14 @@ adb devices
 - 列出一台状态为 `device` 的设备：ADB 已经可用，跳过解锁。
 - 什么都没列出：锁定的路由器就是这样，`install.sh` 会解锁它。
 
-## 3. 先试运行（不写入任何东西）
+## 3. 先试运行（不写入设备）
 
 ```sh
 bash install.sh --dry-run
 ```
 
 它会检查电脑上的工具，下载并校验所有文件；ADB 已经可用时，还会核对路由器的身份和剩余空间。
-锁定的路由器会运行解锁工具自己的试运行，在恢复任何东西之前停下。
+锁定的路由器会运行解锁工具自己的试运行，在恢复任何东西之前停下；仍会生成本机备份 / 工作材料。通过不代表之后恢复或冷启动必定成功。
 
 ## 4. 安装
 
@@ -76,7 +78,9 @@ bash install.sh                    # 需要 Tailscale 时加 --with-tailscale（
 
 1. **网页控制台的密码**。设一个新密码，用来保护 `http://192.168.0.1:8080` 和 agent API。
 2. 只有锁定的路由器才问：**路由器管理员密码**和**备份密钥后缀**。脚本会先显示将要恢复的内容，
-   征得你同意后才执行；之后路由器重启，回来时 ADB 已开启。
+   先确认 USB 数据线已连接，征得你同意后才执行；之后路由器重启，仍需线材、驱动和 USB 枚举正常，电脑才能看到 ADB。
+
+恢复前，交互式 `install.sh` 要求输入 `YES`，确认 USB 数据线已接到本机。非交互锁定首装须显式传入 `--acknowledge-usb`；这是你对接线的确认，不是电气检测。空的 `adb devices` 列表不证明已接线。可用 `--adb-serial SERIAL` 保留指定设备，等待 ADB 和部署均沿用选择；没有接好就不要确认。
 
 然后在一次部署里装好：
 
@@ -95,7 +99,7 @@ bash install.sh                    # 需要 Tailscale 时加 --with-tailscale（
 路由器自带的 80 端口网页不受影响。重启后所有服务都会自动启动。
 
 想全部自己编译？加 `--from-source`（需要带 `aarch64-unknown-linux-musl` 目标的 Rust、
-Zig 0.14.1 和 Node.js 22；Clash 内核还需要 Go 或 Docker，没有就不装 Clash 内核）。
+**cargo-zigbuild**、Zig 0.14.1、Python 3、Node.js `^20.19.0 || >=22.12.0` 和 npm；agent 用 `cargo zigbuild`，不要求另装 musl 交叉 GCC；Clash 内核还需要 Go 或 Docker，没有就不装 Clash 内核）。
 
 ## 5. 触摸屏检查
 
@@ -124,8 +128,8 @@ python3 scripts/verify-screen.py --gateway 192.168.0.1 --ssh-key ~/.ssh/id_ed255
     或认证密钥登录。然后二选一：开启 **远程管理**，让你的 tailnet 访问本路由器及其局域网，
     可与 Clash 或 WireGuard 同时使用（在 Tailscale 管理后台批准一次 `192.168.0.0/24` 路由）；
     或者使用 **Tailscale 模式**，通过出口节点上网。
-- **无线中继**：把已有的 Wi-Fi 当作上网通道。无线芯片只能在不同频段上同时连接上游和开热点：
-  中继连上后，与上游同频段的热点会暂停，另一个频段照常工作（两个频段同名，大多数设备会自动切过去）。
+- **无线中继**：把已有的 Wi-Fi 当作上网通道。本分支为规避已观测到的 AP/STA 冲突，
+  中继时由守护暂停与上游同频段的热点，保留另一频段；这是当前策略，不是对所有固件或硬件能力的绝对结论。**开启前准备另一频段或 USB 备用管理通道**，不要假设客户端会自动漫游。守护会提交 UCI，并在 `/data/local/tmp/relay-band-guard.disabled` 留下跨重启恢复标记，见[中继边界](WIFI-UPLINK.md#band-guard-and-management-access)。
 - **网络 → 客户端**：已连接的设备；拉黑或解除拉黑 Wi-Fi 设备（触摸屏上也可以）。
 - **概览**：USB 网络共享开关（通过 USB 共享网络）。
 - **系统 → 工具 → 路由器日志**：中继、Tailscale 和拉黑事件，保存在路由器上（约 1 MiB）。
@@ -156,7 +160,7 @@ bash install.sh --update            # 保留密码和 PIN，跳过没有变化�
 | 解锁三分钟后还是没有 ADB | 重新插拔 USB-C 线（要用数据线），运行 `adb devices`；然后再运行一次 `bash install.sh`，ADB 可用时它会接着往下走。 |
 | 解锁失败 | 检查管理员密码和后缀，再运行 `bash install.sh --dry-run`。检查通过之前不会恢复任何东西。 |
 | 重启后打不开控制台 | `ssh -p 2222 root@192.168.0.1 sh /data/local/tmp/start_dashboard.sh` |
-| 部署中途停止 | 它会自动恢复原样；如果没能恢复，会打印一条恢复命令（`sh /data/local/tmp/open-u60-transaction.sh restore …`），在路由器上运行它。 |
+| 部署中途停止 | 它会尝试快照恢复；如果未完成，会打印一条恢复命令（`sh /data/local/tmp/open-u60-transaction.sh restore …`），在路由器上运行它。 |
 | 之后哪里不对劲 | 看 **系统 → 工具 → 路由器日志**，或者通过 SSH 看 `/data/local/tmp/openui-logs/`。 |
 
 更多细节（英文）：[DEPLOYMENT.md](DEPLOYMENT.md)（解锁和部署原理）、[SCREEN.md](SCREEN.md)、

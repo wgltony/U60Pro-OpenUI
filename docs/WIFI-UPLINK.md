@@ -1,8 +1,9 @@
 # Wi-Fi relay (uplink)
 
 The device joins an existing Wi-Fi network (home, hotel, office) and uses it as its
-internet connection instead of mobile data. Its own hotspot, LAN subnet and DHCP stay
-as they are. While the upstream network reaches the internet, all IPv4 traffic goes
+internet connection instead of mobile data. The LAN subnet and DHCP stay as
+configured, but **the same-band hotspot is paused while relaying**; only the
+opposite-band hotspot remains available. While the upstream network reaches the internet, all IPv4 traffic goes
 through it: devices on the hotspot or USB, the device itself, and the WireGuard and
 Clash cores. When it does not, traffic falls back to the cellular link on its own and
 comes back once the upstream network works again.
@@ -18,9 +19,11 @@ row on Overview). See [DASHBOARD.md](DASHBOARD.md) and [SCREEN.md](SCREEN.md).
 
 ## How it works
 
-The agent (`agent/src/wifi_uplink.rs`) runs a supervisor thread. Everything it creates
-is runtime state, removed when the relay is turned off and gone after a reboot without
-the agent. It never writes UCI, init.d, stock firewall chains or main routes.
+The agent (`agent/src/wifi_uplink.rs`) runs a supervisor thread for runtime
+interfaces, processes, forwarding chains and policy rules. Saved settings persist.
+The separate **relay-band-guard** also commits wireless UCI and keeps a persistent
+restore marker: the whole feature is **not runtime-only**, and rebooting without
+the guard is not a guarantee that all hotspot changes disappear.
 
 1. **Client interface.** `iw phy <phy> interface add ou-sta0 type managed` on the radio
    that carries the hotspot. The phy index changes on every firmware Wi-Fi reload, so
@@ -86,6 +89,36 @@ the agent. It never writes UCI, init.d, stock firewall chains or main routes.
    firmware Wi-Fi reload. At start it removes a previous agent's online rules and
    processes for `ou-sta0`, and puts traffic back on Wi-Fi only after its own checks.
 
+## Band guard and management access
+
+The current `scripts/device/relay-band-guard.sh`, installed as
+`/data/bin/relay-band-guard.sh` and started by `start_zte_agent.sh`, handles the
+radio's **one STA + one AP** constraint. Association on 2.4 GHz pauses `wlan0`;
+association on 5 GHz pauses `wlan2`. This is not a brief channel switch: the AP
+stays paused on the upstream band. With only that AP available you can lose the
+management connection. **Prepare opposite-band Wi-Fi or a working USB backup
+management path before enabling relay**; do not assume automatic client roaming.
+
+The guard disables the AP through hostapd and commits
+`wireless.wifi0.disabled=1` or `wireless.wifi1.disabled=1` (without an immediate
+Wi-Fi reload), so web/screen pages show the paused band as off. It records which
+AP it paused in **`/data/local/tmp/relay-band-guard.disabled`**, which survives
+reboot. Enabling the same band from the UI while still associated will be undone
+by the guard. Between network associations it keeps the current pause.
+
+When the relay interface is gone and the **180-second boot grace** has elapsed,
+the running guard gives back the recorded AP and commits its enabled state. If
+a Wi-Fi reload removed that AP interface, restoration can require a firmware
+Wi-Fi reload. Moving the upstream to the other band restores the previous AP
+before pausing the new same-band AP. A stopped/absent guard cannot act on its
+marker; reboot alone is not an unconditional restore mechanism. Driver/hostapd
+recovery and management reachability still require real-device acceptance tests.
+Do not delete the marker as a substitute for restoration.
+
+These documented UCI writes and the project-owned optional
+`/etc/init.d/openui-tailscale` service are distinct from forbidden edits to stock
+boot-critical services or vendor sync-barrier daemons. See [Safety](SAFETY.md).
+
 ## API
 
 - `GET /api/wifi/uplink`: `revision`, `enabled`, `state` (`off`, `unavailable`,
@@ -116,9 +149,9 @@ it holds the passwords).
 
 ## Limits
 
-- One radio serves both the hotspot and the uplink. Joining a network on another
-  channel of the same band can move the hotspot to that channel, and its devices
-  reconnect.
+- The same-band hotspot is paused throughout association; only the opposite
+  band remains usable for Wi-Fi management. DFS/channel behavior and physical
+  wireless recovery are not proven by mocks or policy-rule tests.
 - Web login: a device that Clash routes may send the login page to a node, which the
   portal blocks until the login; turn the proxy off while signing in. Portals that
   charge per device see one device. Portals that only hijack DNS (no HTTP redirect for
@@ -145,6 +178,8 @@ it holds the passwords).
   login page, login mode, a LAN client signing in through the relay, online afterwards),
   preference between two saved networks, WPA3, Clash's node traffic over the uplink, the
   pause after repeated interface losses, agent restart and complete removal.
-- Not covered by the simulation: the real radio and driver (vdev creation next to the
-  hotspots, channel changes, whether the firmware's own Wi-Fi management tolerates the
-  extra interface), and whether the device ships a suitable `wpa_supplicant`.
+- Simulation and unit tests are not current clean-stock/cold-boot qualification.
+  Physical driver/hostapd behavior, same-band pause/restoration across reboot and
+  DFS, management-path continuity, and installed `wpa_supplicant` compatibility need
+  separate hardware evidence. The persistent band guard is part of that acceptance
+  scope; the older runtime-only test description does not prove its recovery.

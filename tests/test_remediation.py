@@ -51,7 +51,10 @@ class Transactions(unittest.TestCase):
         shim = self.root / 'shim/mv'
         shim.write_text('#!/usr/bin/env python3\nimport os,sys\na=sys.argv[1:]\nif a[0]=="-Tf": os.replace(a[1],a[2])\nelse: os.execv("/bin/mv",["mv",*a])\n')
         shim.chmod(0o700)
-        self.env = {**os.environ, 'U60_TEST_ROOT': str(self.root), 'PATH': f'{shim.parent}:{os.environ["PATH"]}'}
+        spec = importlib.util.spec_from_file_location('transaction_runtime_fixture', ROOT / 'tests/test_transaction_runtime.py')
+        fixture = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+        self.env = {**os.environ, 'U60_TEST_ROOT': str(self.root), 'U60_TEST_BACKEND': fixture.make_backend(self.root),
+                    'PATH': f'{shim.parent}:{os.environ["PATH"]}'}
         self.write('etc/rc.local', '#!/bin/sh\nif [ "$(cat /sys/usb_op)" = 2 ]; then\n  : # stock flash protection\nfi\nexit 0\n')
         self.write('data/zte-agent', 'old binary')
         self.original_rc = (self.root / 'etc/rc.local').read_bytes()

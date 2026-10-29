@@ -28,7 +28,9 @@ Usage: bash install.sh [options]
   --release TAG        Release to download (default: the latest)
   --repo OWNER/NAME    GitHub repository with the releases (default: origin)
   --gateway ADDRESS    Router address (default: 192.168.0.1)
-  --adb-serial SERIAL  ADB device to use when several are connected
+  --adb-serial SERIAL  Pin the ADB device, including after an unlock reboot
+  --acknowledge-usb    Confirm this locked router is connected to this computer
+                       by a USB data cable (required for noninteractive unlock)
   --dry-run            Check the computer, the files and the device; write nothing
   -h, --help           This help
 
@@ -37,7 +39,7 @@ ROUTER_PW and ZTE_BACKUP_SUFFIX (only for the unlock of a locked device).
 EOF
 }
 
-UPDATE=0 TAILSCALE=0 SCREEN=1 SOURCE=0 DRY=0 TAG='' REPO='' SERIAL=''
+UPDATE=0 TAILSCALE=0 SCREEN=1 SOURCE=0 DRY=0 ACK_USB=0 TAG='' REPO='' SERIAL=''
 GATEWAY="${ZTE_GATEWAY:-192.168.0.1}"
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -49,6 +51,7 @@ while [ $# -gt 0 ]; do
 		--repo) REPO=${2:?--repo needs OWNER/NAME}; shift ;;
 		--gateway) GATEWAY=${2:?--gateway needs an address}; shift ;;
 		--adb-serial) SERIAL=${2:?--adb-serial needs a serial}; shift ;;
+		--acknowledge-usb) ACK_USB=1 ;;
 		--dry-run) DRY=1 ;;
 		-h|--help) usage; exit 0 ;;
 		*) usage >&2; fail "Unknown option: $1" ;;
@@ -62,7 +65,7 @@ trap 'rm -rf "$WORK"' EXIT
 # ── 1. This computer ───────────────────────────────────────────────────────────
 info 'Checking this computer…'
 NEED=(python3 openssl adb curl ssh ssh-keygen tar)
-[ "$SOURCE" = 1 ] && NEED+=(cargo zig node npm)
+[ "$SOURCE" = 1 ] && NEED+=(cargo rustup zig node npm)
 MISSING=()
 for tool in "${NEED[@]}"; do
 	if command -v "$tool" >/dev/null 2>&1; then echo -e "  ${GREEN}✓${NC} $tool"; else echo -e "  ${RED}✗${NC} $tool"; MISSING+=("$tool"); fi
@@ -75,8 +78,10 @@ if [ ${#MISSING[@]} -gt 0 ]; then
 	[ "$SOURCE" = 1 ] && echo '  Building: https://rustup.rs, Zig 0.14.1 (https://ziglang.org/download/), Node.js 22'
 	fail "Missing: ${MISSING[*]}"
 fi
-if [ "$SOURCE" = 1 ] && command -v rustup >/dev/null && ! rustup target list --installed | grep -qx aarch64-unknown-linux-musl; then
-	fail 'Run: rustup target add aarch64-unknown-linux-musl'
+if [ "$SOURCE" = 1 ]; then
+	cargo zigbuild --version >/dev/null 2>&1 || fail 'Install cargo-zigbuild first: cargo install --locked cargo-zigbuild'
+	rustup target list --installed | grep -qx aarch64-unknown-linux-musl || fail 'Run: rustup target add aarch64-unknown-linux-musl'
+	[ "$(zig version)" = 0.14.1 ] || fail 'Source builds require Zig 0.14.1 on PATH (agent, screen and lpac).'
 fi
 
 # ── 2. Agent password ──────────────────────────────────────────────────────────
@@ -96,7 +101,7 @@ fi
 # ── 3. Files to install (all checked before the device is touched) ─────────────
 if [ "$SOURCE" = 1 ]; then
 	info 'Building the agent…'
-	cargo build --locked --release --target aarch64-unknown-linux-musl -p zte-agent
+	cargo zigbuild --locked --release --target aarch64-unknown-linux-musl -p zte-agent
 	cp "${CARGO_TARGET_DIR:-target}/aarch64-unknown-linux-musl/release/zte-agent" "$WORK/zte-agent"
 	info 'Building the web dashboard…'
 	(cd web-app && npm ci --no-audit --no-fund && npm run build)
@@ -118,12 +123,15 @@ else
 	if [ -z "$REPO" ]; then
 		url=$(git config --get remote.origin.url 2>/dev/null || true)
 		url=${url%/}; url=${url%.git}
-		case "$url" in
-			https://github.com/*/*) REPO=${url#https://github.com/} ;;
-			git@github.com:*/*) REPO=${url#git@github.com:} ;;
-		esac
-		[ -n "$REPO" ] || fail 'Cannot tell which GitHub repository to download from; pass --repo OWNER/NAME.'
+		if [[ "$url" =~ ^https://github\.com/([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)$ ]] ||
+		   [[ "$url" =~ ^git@github\.com:([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)$ ]] ||
+		   [[ "$url" =~ ^ssh://git@github\.com/([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)$ ]]; then
+			REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+		fi
+		[ -n "$REPO" ] || fail 'Cannot identify an exact GitHub origin; pass --repo OWNER/NAME.'
+		[ "$REPO" = wgltony/U60Pro-OpenUI ] || fail 'Origin is not this fork (wgltony/U60Pro-OpenUI); pass --repo explicitly only if intentional.'
 	fi
+	[[ "$REPO" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || fail 'Invalid --repo; expected OWNER/NAME.'
 	[ -n "$TAG" ] || TAG=$(python3 scripts/download-release.py --repo "$REPO" --latest) \
 		|| fail "No release found in $REPO. Use --from-source to build instead."
 	info "Downloading $REPO $TAG…"
@@ -154,14 +162,23 @@ SSH=(ssh -p 2222 -o BatchMode=yes -o StrictHostKeyChecking=accept-new
 mkdir -p "$HOME/.ssh/known_hosts.d"
 if "${SSH[@]}" true >/dev/null 2>&1; then
 	ok 'SSH (port 2222) works; the device identity is checked before any write.'
-elif adb devices 2>/dev/null | grep -q 'device$'; then
+elif { [ -n "$SERIAL" ] && adb -s "$SERIAL" get-state 2>/dev/null | grep -qx device; } ||
+     { [ -z "$SERIAL" ] && adb devices 2>/dev/null | grep -q 'device$'; }; then
 	ok 'ADB works; the device identity is checked before any write.'
 	[ -n "$SERIAL" ] || EXTRA+=(--auto-adb)
 elif [ "$UPDATE" = 1 ]; then
 	fail 'Neither SSH (port 2222) nor ADB reaches the device. Connect it over USB or Wi-Fi and try again.'
 else
-	warn 'The device is locked (no ADB, no SSH): ADB will be enabled through a patched settings backup.'
-	echo '     This needs the router admin password and the backup-key suffix; read docs/INSTALL.md first.'
+	warn 'No selected ADB or SSH connection: unlocking restores settings and reboots the router.'
+	echo '     A physical USB DATA cable must connect THIS router directly to THIS computer.'
+	echo '     Wi-Fi, charging-only cables and an empty ADB device list do not prove this prerequisite.'
+	echo '     Locked firmware may expose no ADB USB descriptor; this requires your physical confirmation.'
+	if [ "$ACK_USB" != 1 ]; then
+		[ -t 0 ] || fail 'Locked fresh install requires USB confirmation before restore; connect the USB data cable and pass --acknowledge-usb.'
+		read -rp 'Confirm the USB data cable is connected and stays connected through reboot; type YES: ' usb_answer
+		[ "$usb_answer" = YES ] || fail 'USB prerequisite not confirmed; no restore was attempted.'
+	fi
+	echo '     This also needs the router admin password and backup-key suffix; read docs/INSTALL.md first.'
 	ROUTER_PW=${ROUTER_PW:-}
 	[ -n "$ROUTER_PW" ] || { read -rsp 'Router admin password (the 192.168.0.1 login): ' ROUTER_PW; echo; }
 	SUFFIX=${ZTE_BACKUP_SUFFIX:-}
@@ -174,8 +191,9 @@ else
 	fi
 	ROUTER_PW="$ROUTER_PW" ZTE_BACKUP_SUFFIX="$SUFFIX" python3 scripts/zunlock.py --gw "$GATEWAY" --keep-work "$WORK/unlock"
 	info 'The device restores and reboots; waiting up to three minutes for ADB…'
-	python3 -c 'import subprocess; subprocess.run(["adb", "wait-for-device"], timeout=180, check=True)'
-	EXTRA+=(--auto-adb --identity-file "$WORK/unlock/identity.json")
+	python3 -c 'import subprocess,sys; subprocess.run(["adb", *(["-s",sys.argv[1]] if sys.argv[1] else []), "wait-for-device"], timeout=180, check=True)' "$SERIAL"
+	[ -n "$SERIAL" ] || EXTRA+=(--auto-adb)
+	EXTRA+=(--identity-file "$WORK/unlock/identity.json")
 fi
 
 # ── 5. Install (one transaction; a failure restores the previous state) ────────

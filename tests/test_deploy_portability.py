@@ -51,7 +51,8 @@ class FakeModem:
     def identity(self): return dict(IDENTITY)
     def shell(self, command, data=None):
         self.commands.append((command, data))
-        if command.startswith('cat /data/local/tmp/start_zte_agent.sh'): return self.startup
+        if command.startswith('od -An -tx1 -v /data/local/tmp/start_zte_agent.sh'):
+            return self.startup.encode().hex()
         if command.startswith('sha256sum '): return self.installed
         if command.startswith('test -e /tmp/openui-screen/owner'): return 'active' if self.screen_active else ''
         if 'df -Pk' in command: return '1000000\n1000000\n1000000\n100'

@@ -53,14 +53,30 @@ The backup's encryption password is `<device IMEI><suffix>`:
 - the **suffix** is a fixed string shared across this ZTE generation. At the
   request of the researchers who found it, it is **not published** (publishing it
   gets it patched out in the next firmware), and it is not in this repository.
-  To obtain it:
-  - ask the community;
-  - or extract it yourself from a rooted same-generation (SDX75) ZTE MBB unit:
-    the web server builds the backup password in memory, and the suffix is
-    visible in the strings near its backup/restore code paths.
+  **Obtain it externally before downloading installation payloads.** Ask the fork's
+  [support/issues channel](https://github.com/wgltony/U60Pro-OpenUI/issues) for current
+  acquisition guidance without posting suffixes, backups or device identities.
+  Availability is not guaranteed; if unavailable, stop.
+
+Simple `strings` extraction does **not** recover the known B31 suffix from
+`/usr/bin/zte_web` or the examined candidates; a single-byte-XOR search also failed.
+See the [dated investigation](reference/suffix-recovery-b31.md). Offline tools need
+an already obtained suffix too; they do not solve acquisition. No private author
+environment file is needed.
 
 Provide it with `--suffix`, the `ZTE_BACKUP_SUFFIX` env var, or the interactive
 (hidden) prompt. It never enters this repository.
+
+**Connection prerequisite:** locked B31 first install needs a **USB DATA cable
+and network access** to the stock web UI (Wi-Fi can supply the network path, not
+USB ADB). Confirm the cable before restoring, not after discovering it is charge-only.
+
+**Computer privacy:** standalone dry runs / `--keep-work` retain work that can
+contain decrypted configuration. Original encrypted backups and identity records
+are separately retained in `~/.local/share/open-u60-pro/recovery`. Main `install.sh`
+normal-exit cleanup removes its temporary work, not the encrypted recovery backup.
+Never publish either; this is not evidence of a leak and does not assume Tailscale
+state is included.
 
 ## Path 1: let `install.sh` do it (easiest)
 
@@ -72,6 +88,11 @@ bash install.sh --dry-run     # check only, write nothing to the device
 bash install.sh               # real run; shows what it will restore and asks first
 ```
 
+For a locked first install, `install.sh` requires interactive `YES` confirmation
+of the USB DATA cable, or explicit `--acknowledge-usb` for noninteractive use.
+An empty ADB list is not cable detection; `--adb-serial` preserves selection
+through waiting and deployment.
+
 It prompts for the router admin password and the backup-key suffix, runs the
 unlock tool's own dry run, and only then restores. The device reboots; about
 60–90 s later ADB is on and the install continues. See the
@@ -82,7 +103,7 @@ unlock tool's own dry run, and only then restores. The device reboots; about
 To enable ADB without installing OpenUI yet, run the unlock script on its own:
 
 ```sh
-python3 scripts/zunlock.py --dry-run          # full flow, just no upload (safe)
+python3 scripts/zunlock.py --dry-run          # online export/local processing; no upload or restore
 python3 scripts/zunlock.py                     # real run, confirms before upload
 ```
 
@@ -101,7 +122,7 @@ What it does:
 Give the suffix with `--suffix` or `ZTE_BACKUP_SUFFIX`; `--keep-work DIR` keeps
 the intermediate artifacts.
 
-## Path 3: fully offline, restore it yourself (most cautious)
+## Path 3: online preparation, manual restore
 
 If you would rather the script not upload and trigger the restore for you, have
 it produce only the **patched backup file** and do the restore yourself in the
