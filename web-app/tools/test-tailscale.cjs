@@ -87,7 +87,7 @@ test('sign-in requests carry only a valid name and key; stages follow the daemon
   const { tailscaleUpdate, setupStage } = load('../src/features/proxy/tailscaleModel.ts')
   const base = { ...fixture, self: null, backend_state: 'NeedsLogin', installed: true, login_active: false }
   assert.deepEqual(plain(tailscaleUpdate(base, 'login', '', { hostname: ' u60-pro ', authKey: '' })), { expected_revision: 7, action: 'login', hostname: 'u60-pro' })
-  assert.deepEqual(plain(tailscaleUpdate(base, 'login', '', { hostname: '', authKey: 'tskey-auth-abc123CNTRL-xyz' })), { expected_revision: 7, action: 'login', auth_key: 'tskey-auth-abc123CNTRL-xyz' })
+  assert.deepEqual(plain(tailscaleUpdate(base, 'login', '', { hostname: '', authKey: 'tskey-auth-EXAMPLE-not-a-real-key' })), { expected_revision: 7, action: 'login', auth_key: 'tskey-auth-EXAMPLE-not-a-real-key' })
   assert.deepEqual(plain(tailscaleUpdate(base, 'login')), { expected_revision: 7, action: 'login' })
   assert.throws(() => tailscaleUpdate(base, 'login', '', { hostname: 'bad name', authKey: '' }), /letters, digits and hyphens/)
   assert.throws(() => tailscaleUpdate(base, 'login', '', { hostname: '', authKey: 'not-a-key' }), /tskey-/)

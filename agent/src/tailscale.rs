@@ -1546,7 +1546,7 @@ mod tests {
         for bad in ["", "-a", "a-", "a b", "a.b", "a;rm", &"a".repeat(64)] {
             assert!(!valid_hostname(bad), "{bad}");
         }
-        assert!(valid_auth_key("tskey-auth-kAbC123CNTRL-xyz789"));
+        assert!(valid_auth_key("tskey-auth-EXAMPLE-not-a-real-key")); // fake placeholder, not a credential
         for bad in [
             "tskey-",
             "abc-tskey-auth-1234567890",
