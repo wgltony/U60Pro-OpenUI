@@ -20,6 +20,8 @@
 
 ### 本仓库在上游基础上新增
 
+本仓库是 [acloudpeng/U60Pro-OpenUI](https://github.com/acloudpeng/U60Pro-OpenUI) 的分支，新增内容如下：
+
 - **Tailscale**：在网页上登录（登录链接或认证密钥）、退出；Tailscale 模式（出口节点）；
   **远程管理**（子网路由，在任何地方通过 tailnet 访问路由器和局域网，可与 Clash / WireGuard 同时使用）。
 - **设置向导**：Clash、WireGuard、Tailscale 各有分步向导，新用户照着点就能配好。
@@ -104,7 +106,7 @@
 
 ### 发布版本
 
-每个[发布版本](https://github.com/acloudpeng/U60Pro-OpenUI/releases)都列出了文件及其 SHA-256 校验和。在同一版本的仓库里，用
+每个[发布版本](https://github.com/wgltony/U60Pro-OpenUI/releases)都列出了文件及其 SHA-256 校验和。在同一版本的仓库里，用
 `scripts/deploy-components.py` 部署这些文件，方法见下文。
 
 发布页附带的桌面安装器来自上游 OpenUI，会下载上游的包并覆盖本项目新增的内容，不要用于本项目。

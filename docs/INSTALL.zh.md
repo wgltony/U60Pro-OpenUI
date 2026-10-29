@@ -26,9 +26,7 @@ Clash / WireGuard / Tailscale、无线中继、USB 网络共享和路由器日�
 
 **需要准备：**
 
-- 一台 Mac 或 Linux 电脑。用 Windows 第一次安装没有测试过；更新时可以用
-  `deploy-windows.cmd -Repo <owner>/U60Pro-OpenUI`（不加 `-Repo` 会装上游的版本，
-  没有本仓库的功能）。
+- 一台 Mac 或 Linux 电脑。用 Windows 第一次安装没有测试过；更新时双击 `deploy-windows.cmd` 即可。
 - 一根 USB-C 数据线，或者让电脑连上路由器的 Wi-Fi。
 - 工具：`python3`、`openssl`、`adb`、`curl`、`ssh`。
   - macOS：`brew install python openssl android-platform-tools`
@@ -41,11 +39,11 @@ Clash / WireGuard / Tailscale、无线中继、USB 网络共享和路由器日�
 ## 1. 获取代码
 
 ```sh
-git clone https://github.com/<owner>/U60Pro-OpenUI.git
+git clone https://github.com/wgltony/U60Pro-OpenUI.git
 cd U60Pro-OpenUI
 ```
 
-把 `<owner>` 换成发布本仓库的账号。`install.sh` 会从你克隆的仓库下载对应的发布文件。
+`install.sh` 会从你克隆的仓库下载对应的发布文件。
 
 ## 2. 连接路由器
 

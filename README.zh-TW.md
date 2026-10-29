@@ -93,7 +93,7 @@
 
 ### 發行版本
 
-每個[發行版本](https://github.com/acloudpeng/U60Pro-OpenUI/releases)都列出了檔案及其 SHA-256 校驗碼。在同一版本的儲存庫裡，用
+每個[發行版本](https://github.com/wgltony/U60Pro-OpenUI/releases)都列出了檔案及其 SHA-256 校驗碼。在同一版本的儲存庫裡，用
 `scripts/deploy-components.py` 部署這些檔案，方法見下文。
 
 發行頁附帶的桌面安裝程式來自上游 OpenUI，會下載上游的套件並覆蓋本專案新增的內容，請勿用於本專案。

@@ -23,6 +23,8 @@ needed) to the dashboard, touchscreen and every feature. Step by step: the
 
 ### What this repository adds to upstream
 
+This repository is a fork of [acloudpeng/U60Pro-OpenUI](https://github.com/acloudpeng/U60Pro-OpenUI). It adds:
+
 - **Tailscale**: sign in on the web page (link or auth key) and sign out; Tailscale mode
   with an exit node; **remote management** (a subnet route: reach the router and its LAN
   from anywhere on your tailnet, alongside Clash or WireGuard).
@@ -139,7 +141,7 @@ below also run directly on Windows.
 
 ### Releases
 
-Each [release](https://github.com/acloudpeng/U60Pro-OpenUI/releases) lists its files
+Each [release](https://github.com/wgltony/U60Pro-OpenUI/releases) lists its files
 and their SHA-256 checksums. Deploy them with `scripts/deploy-components.py` from a
 checkout of the same version, as shown below.
 

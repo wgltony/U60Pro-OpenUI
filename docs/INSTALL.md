@@ -31,8 +31,7 @@ In short:
 **You need:**
 
 - A Mac or Linux computer. A first install from Windows is untested; for updates,
-  `deploy-windows.cmd -Repo <owner>/U60Pro-OpenUI` works (without `-Repo` it installs
-  upstream's release, which lacks this repository's features).
+  double-click `deploy-windows.cmd`.
 - A USB-C data cable, or the computer on the router's Wi-Fi.
 - Tools: `python3`, `openssl`, `adb`, `curl`, `ssh`.
   - macOS: `brew install python openssl android-platform-tools`
@@ -46,12 +45,11 @@ In short:
 ## 1. Get the code
 
 ```sh
-git clone https://github.com/<owner>/U60Pro-OpenUI.git
+git clone https://github.com/wgltony/U60Pro-OpenUI.git
 cd U60Pro-OpenUI
 ```
 
-Replace `<owner>` with the account this repository is published under. `install.sh`
-downloads the matching release files from the repository you cloned.
+`install.sh` downloads the matching release files from the repository you cloned.
 
 ## 2. Connect the router
 

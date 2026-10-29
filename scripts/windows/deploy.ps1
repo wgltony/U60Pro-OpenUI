@@ -42,7 +42,7 @@ param(
     [string]$Gateway,
     [string]$SshKey,
     [string]$AssetsDir,
-    [string]$Repo = 'acloudpeng/U60Pro-OpenUI',
+    [string]$Repo = 'wgltony/U60Pro-OpenUI',
     [switch]$All,
     [switch]$SkipScreenCheck,
     [switch]$Yes
