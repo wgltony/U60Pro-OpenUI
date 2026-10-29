@@ -206,6 +206,7 @@ sh screen/build.sh --preview      # 触摸屏的本机预览和自测，渲染�
 ## 文档
 
 - [安装教程](docs/INSTALL.zh.md)（中文）/ [Install guide](docs/INSTALL.md)
+- [开启 ADB](docs/ADB.zh.md)（中文）/ [Enabling ADB](docs/ADB.md)：原厂 B31 开启 ADB 的原理和步骤
 - 以下为英文：[部署](docs/DEPLOYMENT.md)、[安全](docs/SAFETY.md)、[控制台](docs/DASHBOARD.md)、[触摸屏](docs/SCREEN.md)、
   [Clash](docs/CLASH.md)、[WireGuard](docs/WIREGUARD.md)、[Wi-Fi 中继](docs/WIFI-UPLINK.md)、[eSIM](docs/ESIM.md)、
   [Agent API](docs/AGENT.md)、[操作手册](docs/OPERATIONS.md)

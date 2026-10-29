@@ -40,7 +40,8 @@ In short:
   - the router's **admin password** (the login of `http://192.168.0.1`);
   - the **backup-key suffix** for this device family. It is deliberately not
     published, at the request of the people who found it; ask the community. See
-    [DEPLOYMENT.md](DEPLOYMENT.md#the-backup-key-suffix).
+    [ADB.md](ADB.md#the-backup-key-suffix). How ADB enabling works, step by step
+    (automatic, script, or fully manual): [ADB.md](ADB.md).
 
 ## 1. Get the code
 

@@ -246,6 +246,7 @@ sh screen/build.sh --preview      # touchscreen preview and self-tests; renders 
 ## Documentation
 
 - [Install guide](docs/INSTALL.md) / [安装教程](docs/INSTALL.zh.md)
+- [Enabling ADB](docs/ADB.md) / [开启 ADB](docs/ADB.zh.md): how to re-enable ADB on stock B31
 - [Deployment](docs/DEPLOYMENT.md), [Safety](docs/SAFETY.md), [Dashboard](docs/DASHBOARD.md),
   [Touchscreen](docs/SCREEN.md), [Clash](docs/CLASH.md), [WireGuard](docs/WIREGUARD.md),
   [Wi-Fi relay](docs/WIFI-UPLINK.md), [eSIM](docs/ESIM.md), [Agent API](docs/AGENT.md),

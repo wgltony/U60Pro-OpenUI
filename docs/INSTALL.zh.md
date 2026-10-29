@@ -34,7 +34,8 @@ Clash / WireGuard / Tailscale、无线中继、eSIM、USB 网络共享和路由�
 - 只有锁定的设备才需要（B28 及以后的固件，包括 B31）：
   - 路由器的**管理员密码**（登录 `http://192.168.0.1` 用的密码）；
   - 这一系列设备的**备份密钥后缀**。应发现者的要求，它不公开发布，请向社区询问。
-    见 [DEPLOYMENT.md](DEPLOYMENT.md#the-backup-key-suffix)。
+    开启 ADB 的原理和步骤（自动、脚本、完全手动三种方式）见 [ADB.zh.md](ADB.zh.md)；
+    后缀说明见 [ADB.zh.md](ADB.zh.md#备份密钥后缀)。
 
 ## 1. 获取代码
 
