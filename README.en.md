@@ -17,6 +17,26 @@ listed under [Acknowledgements](#acknowledgements).
 | Dashboard | `http://192.168.0.1:8080/` |
 | Authenticated API | `http://192.168.0.1:9090/` |
 
+**One-command install:** `bash install.sh` — from a stock device (enabling ADB first when
+needed) to the dashboard, touchscreen and every feature. Step by step: the
+[install guide](docs/INSTALL.md).
+
+### What this repository adds to upstream
+
+- **Tailscale**: sign in on the web page (link or auth key) and sign out; Tailscale mode
+  with an exit node; **remote management** (a subnet route: reach the router and its LAN
+  from anywhere on your tailnet, alongside Clash or WireGuard).
+- **Setup guides** for Clash, WireGuard and Tailscale, step by step for new users.
+- **Wi-Fi relay**: pauses the hotspot on the upstream's band (the radio supports one
+  upstream plus one hotspot on different bands only); on-screen keyboard for passwords.
+- **Wi-Fi clients**: connected devices, block / unblock (web and touchscreen) with name
+  matching for random MACs; transmit power.
+- **USB**: USB LAN switch, RNDIS / ECM modes (with descriptions and Apply on the screen).
+- **Router log**: relay, Tailscale and blocklist events in a rotating log on the router,
+  under **System → Tools**.
+- **Deployment**: dashboard starts at boot, WireGuard tool, optional Tailscale, all in
+  the rolled-back-on-failure deployment.
+
 ## Device
 
 | **Model** | ZTE U60 Pro (MU5250) |
@@ -88,6 +108,9 @@ are off. The stock lock screen does not stop the two-finger hold or the four pre
 Stock UI and Back (top left) are always accessible. Leaving DevUI does not affect the network. See [DevUI details](docs/SCREEN.md).
 
 ## Install and update
+
+First install and updates: `install.sh`, see the [install guide](docs/INSTALL.md)
+(`bash install.sh`; updates: `bash install.sh --update`).
 
 The steps below update a modem that already runs OpenUI, with SSH on port 2222. To
 unlock a device and install OpenUI for the first time, read

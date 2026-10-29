@@ -72,6 +72,8 @@
 
 ## 安裝和更新
 
+第一次安裝和日常更新都可以用 `install.sh`：見[安裝教學（簡體中文）](docs/INSTALL.zh.md)或 [English](docs/INSTALL.md)。
+
 下面的步驟用於更新已經裝好 OpenUI、並在 2222 連接埠開著 SSH 的裝置。第一次解鎖裝置、安裝 OpenUI 時，請先讀
 [docs/SAFETY.md](docs/SAFETY.md)，再依照 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 操作（英文）。
 

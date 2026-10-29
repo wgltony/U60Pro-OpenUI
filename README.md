@@ -15,6 +15,20 @@
 | 网页控制台 | `http://192.168.0.1:8080/` |
 | 需要登录的 API | `http://192.168.0.1:9090/` |
 
+**一条命令安装：** `bash install.sh` —— 从原厂设备（必要时先开启 ADB）一直装到网页、触摸屏和各项功能。
+完整步骤见 [安装教程](docs/INSTALL.zh.md)。
+
+### 本仓库在上游基础上新增
+
+- **Tailscale**：在网页上登录（登录链接或认证密钥）、退出；Tailscale 模式（出口节点）；
+  **远程管理**（子网路由，在任何地方通过 tailnet 访问路由器和局域网，可与 Clash / WireGuard 同时使用）。
+- **设置向导**：Clash、WireGuard、Tailscale 各有分步向导，新用户照着点就能配好。
+- **无线中继**：自动暂停与上游同频段的热点（该芯片只支持不同频段上的“1 个上游 + 1 个热点”），触摸屏上有键盘可输入密码。
+- **Wi-Fi 客户端**：查看已连接设备，拉黑 / 解除拉黑（网页和触摸屏），按设备名识别随机 MAC；发射功率调节。
+- **USB**：USB 网络共享开关，RNDIS / ECM 模式切换（触摸屏上带说明和应用按钮）。
+- **路由器日志**：中继、Tailscale、拉黑事件写入路由器上的滚动日志，在 **系统 → 工具** 查看。
+- **部署**：控制台开机自启、WireGuard 工具、可选 Tailscale，全部纳入可回滚的部署。
+
 ## 设备
 
 | **型号** | 中兴 U60 Pro（MU5250） |
@@ -69,6 +83,8 @@
 屏幕上始终有 **原厂界面** 和 **返回**（左上角）。退出 DevUI 不影响网络。见 [DevUI 说明](docs/SCREEN.md)。
 
 ## 安装和更新
+
+第一次安装和日常更新都用 `install.sh`：见 [安装教程](docs/INSTALL.zh.md)（`bash install.sh`，更新用 `bash install.sh --update`）。
 
 下面的步骤用于更新已经装好 OpenUI、并在 2222 端口开着 SSH 的设备。第一次解锁设备、安装 OpenUI 时，先读
 [docs/SAFETY.md](docs/SAFETY.md)，再按 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 操作（英文）。
