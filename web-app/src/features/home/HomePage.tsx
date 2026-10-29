@@ -4,9 +4,9 @@ import { api } from '../../data/api'
 import { formatBandwidthMHz, formatBytes, formatSpeed, formatUptime, modemMode, qualityLabel, qualityText, rsrpQuality, sumBandwidthMHz } from '../../format'
 import { t, tm } from '../../i18n'
 import { IActivity, IBattery, IBolt, IDownload, IMonitor, IRadio, ISignal, IUpload } from '../../icons'
-import type { ChargeControlState, ProxyStatus, TtlStatus } from '../../types'
+import type { ChargeControlState, ProxyStatus, TtlStatus, UsbLanState } from '../../types'
 import { Button, Segmented } from '../../ui/controls'
-import { toast } from '../../ui/feedback'
+import { confirm, toast } from '../../ui/feedback'
 import { Card, Chip, Meter, PageHeader, Row, SignalBars, Skeleton } from '../../ui/primitives'
 
 function PageSkeleton() {
@@ -78,24 +78,35 @@ function useControlState() {
   const [ttl, setTtl] = useState<TtlStatus | null>(null)
   const [charge, setCharge] = useState<ChargeControlState | null>(null)
   const [proxy, setProxy] = useState<ProxyStatus | null>(null)
+  const [usbLan, setUsbLan] = useState<UsbLanState | null>(null)
   const [version, setVersion] = useState(0)
   useEffect(() => {
     let live = true
-    void Promise.allSettled([api.ttlStatus(), api.chargeControl(), api.proxy()]).then(([a, b, c]) => {
+    void Promise.allSettled([api.ttlStatus(), api.chargeControl(), api.proxy(), api.usbLan()]).then(([a, b, c, d]) => {
       if (!live) return
       if (a.status === 'fulfilled') setTtl(a.value)
       if (b.status === 'fulfilled') setCharge(b.value)
       if (c.status === 'fulfilled') setProxy(c.value)
+      if (d.status === 'fulfilled') setUsbLan(d.value)
     })
     return () => {
       live = false
     }
   }, [version])
   const reload = useCallback(() => setVersion((v) => v + 1), [])
-  return { ttl, charge, proxy, reload }
+  return { ttl, charge, proxy, usbLan, reload }
 }
 
-export default function HomePage({ onNavigate }: { onNavigate?: (g: 'proxy' | 'devui') => void }) {
+/** What USB LAN is doing now, for the control's status line. */
+function usbLanNow(s: UsbLanState | null): string | undefined {
+  if (!s) return undefined
+  if (!s.enabled) return t('Not shared over USB')
+  if (!s.interface) return t('No USB network adapter')
+  if (!s.active) return t('{iface} not up yet', { iface: s.interface })
+  return s.linked ? t('{iface} connected', { iface: s.interface }) : t('Waiting for a USB device')
+}
+
+export default function HomePage({ onNavigate }: { onNavigate?: (g: 'uplink' | 'proxy' | 'devui') => void }) {
   const { data, error, refresh } = useHome()
   const controls = useControlState()
   const [busy, setBusy] = useState(false)
@@ -137,7 +148,22 @@ export default function HomePage({ onNavigate }: { onNavigate?: (g: 'proxy' | 'd
   const ttlValue = controls.ttl ? (controls.ttl.active ? String(controls.ttl.ttl_value ?? '') : '0') : ''
   const limit = controls.charge ? (controls.charge.charge_limit_enabled ? String(controls.charge.charge_limit) : '100') : ''
   const active = controls.proxy?.active
-  const proxyName = active === 'wireguard' ? 'WireGuard' : active === 'clash' ? 'Clash' : active === 'off' ? t('Off') : '—'
+  const proxyName = active === 'wireguard' ? 'WireGuard' : active === 'clash' ? 'Clash' : active === 'tailscale' ? t('Tailscale') : active === 'off' ? t('Off') : '—'
+  const usbLan = controls.usbLan
+  const usbLanValue = usbLan ? (usbLan.enabled ? 'on' : 'off') : ''
+
+  async function setUsbLan(enabled: boolean) {
+    if (!enabled) {
+      const ok = await confirm({
+        title: t('Turn off USB LAN?'),
+        body: t('Devices connected over USB lose their network, including this page if it is open over USB. ADB is not affected.'),
+        confirmLabel: t('Turn off'),
+        danger: true,
+      })
+      if (!ok) return
+    }
+    await run(() => api.usbLanSet(enabled), enabled ? t('USB LAN turned on') : t('USB LAN turned off'))
+  }
 
   return (
     <div className="space-y-4">
@@ -270,6 +296,24 @@ export default function HomePage({ onNavigate }: { onNavigate?: (g: 'proxy' | 'd
               options={NET_MODES.map((m) => ({ value: m.value, label: m.label() }))}
               onChange={(v) => v !== signal?.net_select && void run(() => api.networkModeSet(v), t('Network mode updated'))}
             />
+          </Control>
+
+          <Control label={t('USB LAN')} now={usbLanNow(usbLan)}>
+            <Segmented
+              value={usbLanValue}
+              disabled={busy || !usbLan}
+              options={[
+                { value: 'on', label: t('On') },
+                { value: 'off', label: t('Off') },
+              ]}
+              onChange={(v) => v !== usbLanValue && void setUsbLan(v === 'on')}
+            />
+          </Control>
+
+          <Control label={t('Wi-Fi repeater')}>
+            <Button size="sm" variant="outline" onClick={() => onNavigate?.('uplink')}>
+              {t('Manage upstream Wi-Fi networks')}
+            </Button>
           </Control>
 
           <Control label={t('Proxy')} now={proxyName}>

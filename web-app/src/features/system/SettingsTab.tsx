@@ -9,10 +9,11 @@ import { ILogout, IPower, IRefresh, IRestart } from '../../icons'
 import { Button, Toggle } from '../../ui/controls'
 import { confirm, toast, toastError } from '../../ui/feedback'
 import { Card, Row } from '../../ui/primitives'
+import ServiceAccessSection from './ServiceAccessSection'
 
 // ── USB mode + powerbank ──────────────────────────────────────────────────────
 
-type UsbModeKey = 'rndis' | 'ecm' | 'ncm' | 'debug'
+type UsbModeKey = 'rndis' | 'ecm' | 'ncm'
 
 const USB_MODE_INFO: Record<UsbModeKey, { label: string; description: string; warning?: string }> = {
   rndis: {
@@ -28,10 +29,6 @@ const USB_MODE_INFO: Record<UsbModeKey, { label: string; description: string; wa
     description:
       N_('CDC-NCM USB Ethernet. Higher throughput in theory. Experimental — ZTE does not wire ncm.0 into the normal USB switch.'),
     warning: N_('Experimental'),
-  },
-  debug: {
-    label: N_('Debug (ADB)'),
-    description: N_('USB debug composition with adbd. Reboot returns to normal tethering.'),
   },
 }
 
@@ -61,7 +58,7 @@ function UsbSection() {
   async function setMode(mode: UsbModeKey) {
     const capability = status?.mode_capabilities?.find((c) => c.mode === mode)
     const isSupported =
-      mode === 'debug' || capability?.supported || status?.supported_modes?.includes(mode)
+      capability?.supported || status?.supported_modes?.includes(mode)
     if (!isSupported) {
       toast(t('{mode} is not available on this firmware', { mode: t(USB_MODE_INFO[mode].label) }), 'err')
       return
@@ -128,7 +125,7 @@ function UsbSection() {
   const activeMode = status?.active_mode ?? null
   const ncmDefaultEnabled = status?.ncm_persist_on_boot ?? status?.default_mode === 'ncm'
   const supported = new Set(status?.supported_modes ?? ['rndis', 'ecm'])
-  const modes: UsbModeKey[] = ['rndis', 'ecm', 'ncm', 'debug']
+  const modes: UsbModeKey[] = ['rndis', 'ecm', 'ncm']
 
   return (
     <Card title={t('USB mode')}>
@@ -148,7 +145,7 @@ function UsbSection() {
             const info = USB_MODE_INFO[mode]
             const isActive = activeMode === mode
             const capability = status?.mode_capabilities?.find((c) => c.mode === mode)
-            const isSupported = mode === 'debug' || capability?.supported || supported.has(mode)
+            const isSupported = capability?.supported || supported.has(mode)
             return (
               <button
                 key={mode}
@@ -251,6 +248,7 @@ export default function SettingsTab({ onLogout }: { onLogout: () => void }) {
       </div>
 
       <UsbSection />
+      <ServiceAccessSection />
 
       <Card title={t('Service controls')}>
         <div className="flex flex-wrap items-center gap-2">

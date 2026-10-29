@@ -5,7 +5,8 @@ import { Button, Input, Select } from '../../../ui/controls'
 import { Card, Chip, Stat } from '../../../ui/primitives'
 import { confirm, toast, toastError } from '../../../ui/feedback'
 import { Tabs } from '../../../ui/Tabs'
-import { useProxy } from '../ProxyContext'
+import { backendOf, useProxy } from '../ProxyContext'
+import SetupGuide, { type SetupStep } from '../SetupGuide'
 import { t, tm } from '../../../i18n'
 
 type Section = 'status' | 'profiles' | 'devices'
@@ -16,7 +17,7 @@ function bytes(n: number) {
 
 /** WireGuard's settings on the Proxy page; turning it on or off is the backend selector's job. */
 export default function WireGuardTab() {
-  const { epoch, refresh: refreshProxy } = useProxy()
+  const { epoch, refresh: refreshProxy, status: proxy, switchTo, pending, settingsBusy } = useProxy()
   const [section, setSection] = useState<Section>('status')
   const [status, setStatus] = useState<WireGuardStatus | null>(null)
   const [clients, setClients] = useState<Client[]>([])
@@ -118,6 +119,35 @@ export default function WireGuardTab() {
   const rows = [...known.values()]
   const selected = (m: string) => mode === 'all' ? !macs.includes(m) : macs.includes(m)
   const dirty = mode !== status?.mode || [...macs].sort().join() !== [...(status?.macs ?? [])].sort().join()
+  const backend = proxy ? backendOf(proxy, 'wireguard') : undefined
+  const steps: SetupStep[] = status ? [
+    {
+      title: t('WireGuard support on the router'),
+      done: status.kernel_supported && status.tools_installed,
+      blocked: !status.kernel_supported
+        ? t('This firmware’s kernel has no WireGuard support, so WireGuard cannot run here.')
+        : t('The wg tool is not installed at /data/bin/wg. Deploy it with scripts/prepare-wireguard.py and deploy-components.py --wireguard-tools.'),
+    },
+    {
+      title: t('Import your VPN configuration'),
+      done: profiles.length > 0,
+      detail: t('Your VPN provider or server gives you a .conf file (the one you would import into the WireGuard app). Upload it or paste its text.'),
+      actions: [{ label: t('Go to Saved configurations'), onClick: () => setSection('profiles') }],
+    },
+    {
+      title: t('Choose which devices use WireGuard'),
+      done: status.mode === 'all' || status.macs.length > 0,
+      detail: status.mode === 'all' ? t('All devices') : t('No device selected'),
+      actions: [{ label: t('Go to Device routing'), onClick: () => setSection('devices') }],
+    },
+    {
+      title: t('Turn WireGuard on'),
+      done: proxy?.active === 'wireguard',
+      final: true,
+      detail: t('Only one of WireGuard, Clash and Tailscale mode can be on; switching keeps the others’ settings.'),
+      actions: [{ label: t('Turn WireGuard on'), onClick: () => void switchTo('wireguard'), disabled: !!pending || settingsBusy || !backend?.ready, loading: pending === 'wireguard' }],
+    },
+  ] : []
   const summary = status?.connected ? t('Recent handshake') : status?.enabled ? status.error ? t('Needs attention') : t('Waiting for handshake') : t('Off')
 
   return (
@@ -132,6 +162,7 @@ export default function WireGuardTab() {
         onChange={setSection}
       />
 
+      {section === 'status' && steps.length > 0 && <SetupGuide id="wireguard" title={t('Set up WireGuard')} steps={steps} />}
       {section === 'status' && <Card title="WireGuard" action={<Chip tone={status?.connected ? 'ok' : status?.enabled ? 'warn' : 'default'}>{summary}</Chip>}>
         <div className="space-y-4">
           <div>

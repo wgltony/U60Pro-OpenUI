@@ -1,8 +1,10 @@
+import { useState } from 'react'
 import { api } from '../../data/api'
 import { usePoll } from '../../data/poll'
-import type { Client, UsbStatus } from '../../types'
+import type { Client, UsbStatus, WifiBlocklist } from '../../types'
 import { ICable, ILaptop, IRefresh, IUsb, IWifi } from '../../icons'
 import { Button } from '../../ui/controls'
+import { confirm, toast, toastError } from '../../ui/feedback'
 import { Card, Chip, Empty, Skeleton } from '../../ui/primitives'
 import { t } from '../../i18n'
 
@@ -41,11 +43,33 @@ export default function ClientsTab() {
   const { data, refreshing, refresh } = usePoll(
     'clients',
     async () => {
-      const [clients, usb] = await Promise.all([api.clients(), api.usbStatus().catch(() => null)])
-      return { clients: clients ?? [], usb }
+      // Agents without the blocklist API answer 404: the block controls stay hidden.
+      const [clients, usb, blocklist] = await Promise.all([api.clients(), api.usbStatus().catch(() => null), api.wifiBlocked().catch(() => null)])
+      return { clients: clients ?? [], usb, blocklist }
     },
     15000,
   )
+  const [busy, setBusy] = useState('')
+
+  async function setBlocked(mac: string, blocked: boolean, name?: string) {
+    if (busy) return
+    if (blocked && !(await confirm({
+      title: t('Block {name}?', { name: name || mac }),
+      body: t('It is disconnected from the hotspot and cannot rejoin until you unblock it. If it comes back with a new random MAC under the same name, it is blocked again.'),
+      confirmLabel: t('Block'),
+      danger: true,
+    }))) return
+    setBusy(mac)
+    try {
+      await api.wifiBlockSet(mac, blocked, name)
+      toast(blocked ? t('{name} blocked.', { name: name || mac }) : t('{name} unblocked.', { name: name || mac }))
+      await refresh()
+    } catch (e) {
+      toastError(e, blocked ? t('Unable to block the device') : t('Unable to unblock the device'))
+    } finally {
+      setBusy('')
+    }
+  }
 
   if (!data) {
     return (
@@ -56,7 +80,8 @@ export default function ClientsTab() {
     )
   }
 
-  const { clients, usb } = data as { clients: Client[]; usb: UsbStatus | null }
+  const { clients, usb, blocklist } = data as { clients: Client[]; usb: UsbStatus | null; blocklist: WifiBlocklist | null }
+  const canBlock = !!blocklist && !blocklist.allowlist
   const grouped = groupClients(clients)
   const usbLink = usb?.link
   const usbNegotiatedRate = formatBitrate(usbLink?.negotiated_mbps)
@@ -106,6 +131,7 @@ export default function ClientsTab() {
                   <th className={TH_CLS}>{t('Signal')}</th>
                   <th className={TH_CLS}>{t('Link')}</th>
                   <th className="pb-1.5 font-semibold">MAC</th>
+                  {canBlock && <th className="pb-1.5" />}
                 </tr>
               </thead>
               <tbody>
@@ -121,11 +147,34 @@ export default function ClientsTab() {
                     </td>
                     <td className={`${TD_CLS} tnum text-ink2`}>{formatWifiLink(c)}</td>
                     <td className="tnum py-2 font-mono text-[11px] text-ink3">{c.mac}</td>
+                    {canBlock && <td className="py-2 pl-4 text-right">
+                      <Button size="sm" variant="ghost" className="whitespace-nowrap text-danger" loading={busy === c.mac} disabled={!!busy}
+                        onClick={() => void setBlocked(c.mac, true, c.hostname)}>{t('Block')}</Button>
+                    </td>}
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+        </Card>
+      )}
+
+      {blocklist && (blocklist.blocked.length > 0 || blocklist.allowlist) && (
+        <Card title={t('Blocked devices ({count})', { count: blocklist.blocked.length })}>
+          {blocklist.allowlist ? <p className="text-[13px] text-ink2">{t('Wi-Fi allowlist mode is on; blocking is unavailable')}</p> : <>
+            <div className="divide-y divide-line/8">
+              {blocklist.blocked.map((b) => (
+                <div key={b.mac} className="flex items-center gap-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[13px] font-medium text-ink">{b.name || '—'}</p>
+                    <p className="tnum font-mono text-[11px] text-ink3">{b.mac}</p>
+                  </div>
+                  <Button size="sm" variant="outline" loading={busy === b.mac} disabled={!!busy} onClick={() => void setBlocked(b.mac, false, b.name ?? undefined)}>{t('Unblock')}</Button>
+                </div>
+              ))}
+            </div>
+            <p className="mt-2 text-xs text-ink3">{t('Unblocking one entry also unblocks the other MACs saved under the same name. Blocking is shared with the device screen.')}</p>
+          </>}
         </Card>
       )}
 

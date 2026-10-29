@@ -49,4 +49,15 @@ export default {
   'Kill ZTE bloatware': '一键清理冗余进程',
   'Drop caches': '释放内存缓存',
   'Kernel caches dropped': '已释放系统内存缓存',
+  'USB LAN': 'USB 网络共享',
+  'Not shared over USB': '未向 USB 设备共享',
+  'No USB network adapter': '未检测到 USB 网卡',
+  '{iface} connected': '{iface} 已连接',
+  'Waiting for a USB device': '等待 USB 设备连接',
+  '{iface} not up yet': '{iface} 尚未生效',
+  'Turn off USB LAN?': '关闭 USB 网络共享？',
+  'Devices connected over USB lose their network, including this page if it is open over USB. ADB is not affected.':
+    '通过 USB 连接的设备将断网；如果你正通过 USB 打开本页面，也会断开。ADB 不受影响。',
+  'USB LAN turned on': '已开启 USB 网络共享',
+  'USB LAN turned off': '已关闭 USB 网络共享',
 } satisfies Dict

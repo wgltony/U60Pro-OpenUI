@@ -86,6 +86,20 @@ export interface Client {
   wired_link_mbps?: number
 }
 
+/** Newest lines of the agent's and the relay band guard's own logs, oldest first. */
+export interface SystemLogs {
+  agent: string[]
+  relay_guard: string[]
+}
+
+/** Hotspot blocklist: blocked MACs with the device name they were blocked under. */
+export interface WifiBlocklist {
+  blocked: { mac: string; name: string | null }[]
+  /** The firmware's allowlist mode is on; blocking is unavailable. */
+  allowlist: boolean
+  max: number
+}
+
 export interface CpuInfo {
   overall: number
   cores: number[]
@@ -111,6 +125,37 @@ export interface UsbLink {
   at_full_speed?: boolean
 }
 
+export type AdminService = 'adb' | 'ssh'
+export type AdminServiceAction = 'runtime' | 'boot'
+export interface AdminServicesStatus {
+  revision: number
+  stamp: number
+  busy: boolean
+  adb_running: boolean
+  adb_exposed: boolean
+  adb_boot: boolean
+  ssh_running: boolean
+  ssh_boot: boolean
+  adb_available: boolean
+  ssh_available: boolean
+}
+export interface AdminServiceUpdate {
+  revision: number
+  service: AdminService
+  action: AdminServiceAction
+  enabled: boolean
+}
+
+/** USB LAN sharing: the saved choice and whether the USB interface is bridged now. */
+export interface UsbLanState {
+  enabled: boolean
+  active: boolean
+  /** Active, and a USB host has the link. */
+  linked: boolean
+  interface: string | null
+  mode: UsbMode | null
+}
+
 export interface UsbStatus {
   active_mode: UsbMode | null
   default_mode?: UsbMode
@@ -125,6 +170,7 @@ export interface UsbStatus {
   interfaces?: { ecm0?: boolean; rndis0?: boolean; ncm0?: boolean; ncm_ifname?: string | null }
   usb_ids?: { vendor?: string | null; product?: string | null }
   ncm_last_error?: string
+  lan?: UsbLanState
   connect?: number
   typec_cc?: string
 }
@@ -395,7 +441,7 @@ export interface HomeData {
 }
 
 /** `GET/PUT /api/proxy` — mirrors agent/src/proxy.rs: at most one backend is on. */
-export type ProxyBackendId = 'wireguard' | 'clash'
+export type ProxyBackendId = 'wireguard' | 'clash' | 'tailscale'
 export type ProxyChoice = 'off' | ProxyBackendId
 export interface ProxyBackend {
   id: ProxyBackendId
@@ -412,7 +458,7 @@ export interface ProxyBackend {
 }
 export interface ProxyStatus {
   active: ProxyChoice
-  /** Both saved as on; WireGuard is the one in effect. */
+  /** More than one backend saved as on; the agent resolves precedence. */
   conflict: boolean
   backends: ProxyBackend[]
 }
@@ -423,6 +469,35 @@ export interface ProxySwitch {
   /** For off: the backend shown as on; the agent answers 409 if another one is on. */
   active?: ProxyBackendId
 }
+
+/** Sanitized authenticated agent contract; no raw Tailscale prefs or identity state. */
+export interface TailscaleStatus {
+  revision: number
+  enabled: boolean
+  backend_state: string
+  self: { id: string; name: string; ips: string[]; online: boolean } | null
+  exit_nodes: { id: string; name: string; hostname?: string; ip: string; online: true }[]
+  selected_exit_node: string
+  error: string | null
+  /** Remote management: subnet route for the LAN (newer agents only). */
+  remote_access?: boolean
+  lan_cidr?: string | null
+  lan_ip?: string | null
+  advertised_routes?: string[]
+  route_approved?: boolean
+  remote_error?: string | null
+  /** Sign-in (newer agents only): the daemon's link while it waits, and the signed-in account. */
+  installed?: boolean
+  auth_url?: string | null
+  login_active?: boolean
+  login_error?: string | null
+  account?: string | null
+}
+export type TailscaleUpdate =
+  | { expected_revision: number; action: 'connect' | 'disconnect' | 'cancel_login' | 'logout' }
+  | { expected_revision: number; action: 'login'; hostname?: string; auth_key?: string }
+  | { expected_revision: number; action: 'select_exit'; exit_node: string }
+  | { expected_revision: number; action: 'remote_access'; enabled: boolean }
 
 export interface WireGuardProfile {
   id: number
@@ -683,7 +758,7 @@ export type ClashCoreAction =
   | { action: 'rollback' }
   | { action: 'geodata'; route?: ClashCoreRoute; mirror?: string }
 
-export type DevUIPageId = 'overview' | 'proxy' | 'wireguard' | 'clash' | 'esim' | 'uplink' | 'profiles' | 'devices' | 'wifi' | 'signal' | 'usb' | 'power' | 'booster'
+export type DevUIPageId = 'tailscale' | 'overview' | 'proxy' | 'wireguard' | 'clash' | 'esim' | 'uplink' | 'profiles' | 'devices' | 'wifi' | 'signal' | 'usb' | 'power' | 'booster'
 export interface DevUISettings {
   revision: number
   shortcut_enabled: boolean

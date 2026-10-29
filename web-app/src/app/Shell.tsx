@@ -2,29 +2,30 @@
 import { Suspense, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useAlerts, useHome } from './HomeContext'
 import {
-  IActivity, IBattery, IBolt, ICpu, IGauge, IGlobe, IHome, IMonitor, IMoon, IPower, IRestart, ISignal, ISim, ISun, IThermo, IX,
+  IActivity, IBattery, IBolt, ICpu, IGauge, IGlobe, IHome, IMonitor, IMoon, IPower, IRestart, ISignal, ISim, ISun, IThermo, IWifi, IX,
 } from '../icons'
 import { Spinner } from '../ui/primitives'
 import { powerAction } from './power'
 import { formatSpeed } from '../format'
 import { N_, t, type Lang } from '../i18n'
 
-export type Group = 'home' | 'signal' | 'network' | 'proxy' | 'modem' | 'devui' | 'system'
+export type Group = 'home' | 'uplink' | 'signal' | 'network' | 'proxy' | 'modem' | 'devui' | 'system'
 
 type NavIcon = (p: { size?: number; className?: string }) => ReactNode
 
 export const NAV: { id: Group; label: string; hint: string; icon: NavIcon }[] = [
   { id: 'home', label: N_('Home'), hint: N_('Status at a glance'), icon: (p) => <IHome {...p} /> },
-  { id: 'signal', label: N_('Signal'), hint: N_('Radio metrics and locking'), icon: (p) => <ISignal {...p} /> },
-  { id: 'network', label: N_('Network'), hint: N_('Clients, Wi-Fi and relay'), icon: (p) => <IGlobe {...p} /> },
+  { id: 'uplink', label: N_('Wi-Fi repeater'), hint: N_('Manage upstream Wi-Fi networks'), icon: (p) => <IWifi {...p} /> },
   { id: 'proxy', label: N_('Proxy'), hint: N_('WireGuard and Clash'), icon: (p) => <IActivity {...p} /> },
+  { id: 'network', label: N_('Network'), hint: N_('Clients, Wi-Fi and relay'), icon: (p) => <IGlobe {...p} /> },
+  { id: 'signal', label: N_('Signal'), hint: N_('Radio metrics and locking'), icon: (p) => <ISignal {...p} /> },
   { id: 'modem', label: N_('Modem'), hint: N_('APN, eSIM, data, TTL and SMS'), icon: (p) => <ISim {...p} /> },
   { id: 'devui', label: N_('DevUI'), hint: N_('The device screen'), icon: (p) => <IMonitor {...p} /> },
   { id: 'system', label: N_('System'), hint: N_('Metrics, tools and settings'), icon: (p) => <IGauge {...p} /> },
 ]
 
 /** The phone's bottom bar: these four, then "More" for the rest. */
-const PRIMARY: Group[] = ['home', 'signal', 'network', 'proxy']
+const PRIMARY: Group[] = ['home', 'uplink', 'proxy', 'network']
 
 // ── Alert banner (fed by the home poll — zero extra requests) ─────────────────
 

@@ -13,6 +13,7 @@ import ConnectionsTab from './ConnectionsTab'
 import LogsTab from './LogsTab'
 import AdvancedTab from './AdvancedTab'
 import WireGuardTab from './wireguard/WireGuardTab'
+import TailscaleTab from './TailscaleTab'
 import { PageHeader } from '../../ui/primitives'
 import { t } from '../../i18n'
 
@@ -37,7 +38,7 @@ function ClashView() {
         onChange={setTab}
       />
 
-      {tab === 'overview' && <OverviewTab />}
+      {tab === 'overview' && <OverviewTab onGo={setTab} />}
       {tab === 'subscriptions' && <SubscriptionsTab />}
       {tab === 'proxies' && <ProxiesTab />}
       {tab === 'devices' && <DevicesTab />}
@@ -52,11 +53,11 @@ function Content() {
   const { status, error } = useProxy()
   // Which settings are shown: the user's pick, else the active backend's (Clash when off).
   const [view, setView] = useState<ProxyBackendId | null>(null)
-  const shown = view ?? (status ? (status.active === 'wireguard' ? 'wireguard' : 'clash') : error ? 'clash' : null)
+  const shown = view ?? (status ? (status.active === 'off' ? 'clash' : status.active) : error ? 'clash' : null)
 
   return (
     <div className="space-y-4">
-      <PageHeader title={t('Proxy')} sub={t('Choose WireGuard or Clash for your devices and configure each')} />
+      <PageHeader title={t('Proxy')} sub={t('Choose WireGuard, Clash or Tailscale and configure each')} />
 
       {/* After a switch, show the backend just turned on. */}
       <BackendSelector onSwitched={target => setView(target === 'off' ? shown : target)} />
@@ -65,15 +66,15 @@ function Content() {
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <h2 className="text-[13px] font-semibold text-ink">{t('Configure')}</h2>
           <Segmented<ProxyBackendId> value={shown} onChange={setView}
-            options={[{ value: 'wireguard', label: 'WireGuard' }, { value: 'clash', label: 'Clash' }]} />
+            options={[{ value: 'wireguard', label: 'WireGuard' }, { value: 'clash', label: 'Clash' }, { value: 'tailscale', label: t('Tailscale') }]} />
         </div>
-        {shown === 'clash' ? <ClashView /> : <WireGuardTab />}
+        {shown === 'clash' ? <ClashView /> : shown === 'tailscale' ? <TailscaleTab /> : <WireGuardTab />}
       </>}
     </div>
   )
 }
 
-/** Both proxy backends: the active-backend switch, then each one's settings. */
+/** Native network backends: the active-backend switch, then each one's settings. */
 export default function ProxyPage() {
   return (
     <ProxyProvider>

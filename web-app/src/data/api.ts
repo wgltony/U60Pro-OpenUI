@@ -1,4 +1,5 @@
 import { readCsv } from './client'
+import { parseAdminServices } from './adminServices'
 // Agent API bindings + response mappers.
 //
 // The mappers encode hard-won knowledge of the firmware's response shapes
@@ -7,8 +8,11 @@ import { readCsv } from './client'
 import { get, post, put, req, upload } from './client'
 import type {
   AtSendResult,
+  AdminServiceUpdate,
   ProxyStatus,
   ProxySwitch,
+  TailscaleStatus,
+  TailscaleUpdate,
   WireGuardStatus,
   ScreenStatus,
   DevUISettings,
@@ -48,6 +52,7 @@ import type {
   ThermalInfo,
   TtlStatus,
   UsagePeriod,
+  UsbLanState,
   UsbMode,
   UsbStatus,
   UplinkSeen,
@@ -56,6 +61,8 @@ import type {
   Wan6Info,
   WanInfo,
   WifiAll,
+  WifiBlocklist,
+  SystemLogs,
 } from '../types'
 
 // ── EARFCN / NR-ARFCN to frequency ──────────────────────────────────────────
@@ -634,6 +641,8 @@ function mapHome(d: Record<string, unknown>): HomeData {
 // ── API surface ───────────────────────────────────────────────────────────────
 
 export const api = {
+  adminServices: () => get('/api/admin/services').then(parseAdminServices),
+  adminServiceSet: (body: AdminServiceUpdate) => req('PUT', '/api/admin/services', body).then(parseAdminServices),
   screenSettings: () => get('/api/screen/settings').then(d => d as unknown as DevUISettings),
   screenSettingsSet: (body: Omit<DevUISettings, 'revision'> & { expected_revision: number }) => req('PUT', '/api/screen/settings', body).then(d => d as unknown as DevUISettings),
   screenLanguageSet: (language: 'zh' | 'en') => req('PUT', '/api/screen/language', { language }).then(d => d as unknown as DevUISettings),
@@ -643,6 +652,8 @@ export const api = {
   // The active backend; a switch rebuilds both policies and can take up to ~2 minutes.
   proxy: () => get('/api/proxy').then(d => d as unknown as ProxyStatus),
   proxySet: (body: ProxySwitch) => req('PUT', '/api/proxy', body, undefined, 180_000).then(d => d as unknown as ProxyStatus),
+  tailscale: () => get('/api/tailscale').then(d => d as unknown as TailscaleStatus),
+  tailscaleSet: (body: TailscaleUpdate) => req('PUT', '/api/tailscale', body, undefined, 120_000).then(d => d as unknown as TailscaleStatus),
   wireguard: () => get('/api/wireguard').then(d => d as unknown as WireGuardStatus),
   wireguardSet: (body: WireGuardUpdate) => req('PUT', '/api/wireguard', body, undefined, 120_000).then(d => d as unknown as WireGuardStatus),
   // Clash — downloads and core restarts can take a while
@@ -747,6 +758,13 @@ export const api = {
     put('/api/usb/default', { mode, ...(options ?? {}) }),
   usbStatus: () => get('/api/usb/status').then((d) => d as unknown as UsbStatus),
   usbPowerbank: (on: boolean) => put('/api/usb/powerbank', { state: on ? 1 : 0 }),
+  systemLogs: () => get('/api/system/logs').then((d) => d as unknown as SystemLogs),
+  wifiBlocked: () => get('/api/wifi/blocked').then((d) => d as unknown as WifiBlocklist),
+  wifiBlockSet: (mac: string, blocked: boolean, name?: string) =>
+    // The firmware applies the list in the background; the agent waits up to 10 s for it.
+    req('PUT', '/api/wifi/blocked', { mac, blocked, ...(name ? { name } : {}) }, undefined, 30_000).then((d) => d as unknown as WifiBlocklist),
+  usbLan: () => get('/api/usb/lan').then((d) => d as unknown as UsbLanState),
+  usbLanSet: (enabled: boolean) => put('/api/usb/lan', { enabled }).then((d) => d as unknown as UsbLanState),
 
   // TTL
   ttlStatus: () => get('/api/ttl/status').then((d) => d as unknown as TtlStatus),

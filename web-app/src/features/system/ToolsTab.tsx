@@ -3,9 +3,9 @@ import { api } from '../../data/api'
 import { usePoll } from '../../data/poll'
 import { formatBytes, formatDuration } from '../../format'
 import { t, tm, N_ } from '../../i18n'
-import type { LoggerDownload, LoggerStatus, ProcessListResult } from '../../types'
+import type { LoggerDownload, LoggerStatus, ProcessListResult, SystemLogs } from '../../types'
 import { IInfo, IRefresh } from '../../icons'
-import { Button, Field, Select } from '../../ui/controls'
+import { Button, Field, Segmented, Select } from '../../ui/controls'
 import { confirm, toast, toastError } from '../../ui/feedback'
 import { Card, Empty, Meter } from '../../ui/primitives'
 
@@ -388,11 +388,58 @@ function Processes() {
   )
 }
 
+// ── Router logs (agent + relay band guard) ────────────────────────────────────
+
+type LogSource = 'agent' | 'relay_guard'
+
+/** The router's own event log: relay, Tailscale, blocklist and agent messages. */
+function RouterLogCard() {
+  const [source, setSource] = useState<LogSource>('agent')
+  const { data, error, refreshing, refresh } = usePoll<SystemLogs>('system-logs', api.systemLogs, 30000)
+  const box = useRef<HTMLPreElement>(null)
+  const lines = data?.[source] ?? []
+  // Newest at the bottom, scrolled into view when the lines change.
+  useEffect(() => { if (box.current) box.current.scrollTop = box.current.scrollHeight }, [lines.length, source])
+
+  function download() {
+    const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${source}_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.log` // i18n-ignore: file name
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  return (
+    <Card
+      title={t('Router logs')}
+      action={<div className="flex gap-1">
+        <Button size="sm" variant="ghost" onClick={refresh} loading={refreshing}><IRefresh size={13} /> {t('Refresh')}</Button>
+        <Button size="sm" variant="ghost" disabled={!lines.length} onClick={download}>{t('Download')}</Button>
+      </div>}
+    >
+      <div className="space-y-2">
+        <Segmented<LogSource> value={source} onChange={setSource}
+          options={[{ value: 'agent', label: t('Agent') }, { value: 'relay_guard', label: t('Relay band guard') }]} />
+        <p className="text-[12px] text-ink2">{source === 'agent'
+          ? t('Relay state changes, Tailscale state and actions, Wi-Fi blocks and agent messages. Times are UTC.')
+          : t('When the hotspot band shared with the relay is paused and given back. Times are UTC.')}</p>
+        {error && !data ? <p className="text-[13px] text-danger">{tm(error)}</p>
+          : !lines.length ? <Empty icon={<IInfo size={24} />} title={data ? t('No log lines yet.') : t('Loading…')} />
+          : <pre ref={box} className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-surface2/70 p-3 font-mono text-[11px] leading-relaxed text-ink2">{lines.join('\n')}</pre>}
+        <p className="text-xs text-ink3">{t('Kept on the router in two files of up to 512 KiB each; the newest 400 lines are shown.')}</p>
+      </div>
+    </Card>
+  )
+}
+
 // ── Tab ───────────────────────────────────────────────────────────────────────
 
 export default function ToolsTab() {
   return (
     <div className="space-y-3">
+      <RouterLogCard />
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         <LoggerCard
           pollKey="logger-signal"

@@ -3,7 +3,9 @@ import { formatUptime } from '../../format'
 import { Segmented } from '../../ui/controls'
 import { Card, Chip, Stat } from '../../ui/primitives'
 import { useClash } from './ClashContext'
+import { backendOf, useProxy } from './ProxyContext'
 import DiagnosticsCard from './DiagnosticsCard'
+import SetupGuide, { type SetupStep } from './SetupGuide'
 import { t, tm } from '../../i18n'
 
 /** Which devices the saved routing sends through Clash; `macs` are exclusions in all-devices mode. */
@@ -13,13 +15,54 @@ function scope({ mode, macs }: ClashStatus) {
   return n === 0 ? t('No device selected') : n === 1 ? t('Only {n} selected device', { n }) : t('Only {n} selected devices', { n })
 }
 
-export default function OverviewTab() {
+/** Tabs a setup step can send the user to. */
+export type ClashSetupTab = 'subscriptions' | 'devices' | 'advanced'
+
+export default function OverviewTab({ onGo }: { onGo: (tab: ClashSetupTab) => void }) {
   const { status, error, busy, update } = useClash()
+  const proxy = useProxy()
   const active = status?.subscriptions.find(s => s.id === status.active_subscription)
+  const backend = proxy.status ? backendOf(proxy.status, 'clash') : undefined
+  const steps: SetupStep[] = status ? [
+    {
+      title: t('Install the Clash core'),
+      done: status.core_installed,
+      detail: t('The mihomo core does the proxying. Under Advanced → Core, download the official build or upload one.'),
+      actions: [{ label: t('Go to Advanced'), onClick: () => onGo('advanced') }],
+    },
+    {
+      title: t('Install geo data'),
+      done: status.geodata.length > 0,
+      optional: true,
+      detail: t('Needed when your rules use GEOIP or GEOSITE; the core cannot always fetch it itself. Also under Advanced → Core.'),
+      actions: [{ label: t('Go to Advanced'), onClick: () => onGo('advanced') }],
+    },
+    {
+      title: t('Add your subscription'),
+      done: !!active?.downloaded,
+      detail: t('Paste the Clash / mihomo subscription URL from your provider. It is downloaded, checked and selected.'),
+      actions: [{ label: t('Go to Subscriptions'), onClick: () => onGo('subscriptions') }],
+    },
+    {
+      title: t('Choose which devices use Clash'),
+      done: status.mode === 'all' || status.macs.length > 0,
+      detail: t('Device routing: {scope}', { scope: scope(status) }),
+      actions: [{ label: t('Go to Devices'), onClick: () => onGo('devices') }],
+    },
+    {
+      title: t('Turn Clash on'),
+      done: proxy.status?.active === 'clash',
+      final: true,
+      detail: t('Only one of WireGuard, Clash and Tailscale mode can be on; switching keeps the others’ settings.'),
+      blocked: !status.tun_supported ? t('This firmware has no TUN support, so Clash cannot run.') : undefined,
+      actions: [{ label: t('Turn Clash on'), onClick: () => void proxy.switchTo('clash'), disabled: !!proxy.pending || proxy.settingsBusy || !backend?.ready, loading: proxy.pending === 'clash' }],
+    },
+  ] : []
   const summary = status?.connected ? t('Running') : status?.enabled ? status.error ? t('Needs attention') : t('Starting') : t('Off')
 
   return (
     <div className="space-y-4">
+      {steps.length > 0 && <SetupGuide id="clash" title={t('Set up Clash')} steps={steps} />}
       <Card title="Clash" action={<Chip tone={status?.connected ? 'ok' : status?.enabled ? 'warn' : 'default'}>{summary}</Chip>}>
         <div className="space-y-4">
           <div>

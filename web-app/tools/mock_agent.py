@@ -128,9 +128,28 @@ def dashboard_batch():
     }
 
 
+# Hotspot blocklist (agent/src/wifi.rs): MAC -> the name it was blocked under.
+BLOCKED = {"02:00:00:00:00:09": "Old-Tablet"}
+
+
+def blocklist():
+    return {"blocked": [{"mac": m, "name": n} for m, n in sorted(BLOCKED.items())], "allowlist": False, "max": 32}
+
+
+def blocklist_set(body):
+    mac = str(body.get("mac", "")).lower()
+    if not {"mac", "blocked"} <= set(body) <= {"mac", "blocked", "name"} or len(mac) != 17:
+        raise ValueError("Invalid MAC address")
+    if body["blocked"]:
+        BLOCKED[mac] = body.get("name") or None
+    else:
+        BLOCKED.pop(mac, None)
+    return blocklist()
+
+
 def clients():
     return {
-        "clients": [
+        "clients": [c for c in [
             {"mac": "02:00:00:00:00:01", "ip": "192.0.2.101", "hostname": "Demo-MacBook",
              "medium": "wifi", "medium_detail": "wifi_5ghz", "wifi_band": "5 GHz",
              "signal_dbm": -42, "tx_bitrate_mbps": 2401.9, "rx_bitrate_mbps": 2401.9,
@@ -149,7 +168,7 @@ def clients():
             {"mac": "02:00:00:00:00:05", "ip": "192.0.2.105", "hostname": "office-pc",
              "medium": "ethernet", "medium_detail": "ethernet", "interface": "eth0",
              "wired_link_mbps": 1000, "connected_secs": 512_000},
-        ]
+        ] if c["mac"] not in BLOCKED]
     }
 
 
@@ -540,7 +559,8 @@ def proxy_status():
         if name == "clash":
             entry["running"] = value["running"]
         backends.append(entry)
-    active = "wireguard" if wg["enabled"] else "clash" if clash["enabled"] else "off"
+    backends.append({"id": "tailscale", "enabled": TS["enabled"], "revision": TS["revision"], "ready": True, "reason": None, "error": None})
+    active = "wireguard" if wg["enabled"] else "clash" if clash["enabled"] else "tailscale" if TS["enabled"] else "off"
     return {"active": active, "conflict": wg["enabled"] and clash["enabled"], "backends": backends}
 
 
@@ -938,7 +958,91 @@ def uplink_scan(body):
     return {"networks": UPLINK_SCAN}
 
 
+# Tailscale as agent/src/tailscale.rs reports it: signed out at first; a sign-in shows its
+# link after 2 s and "completes" 12 s after it started.
+TS = {"revision": 0, "enabled": False, "remote_access": False, "signed_in": False, "login_started": 0.0, "hostname": "u60-pro"}
+
+
+def tailscale_status():
+    ts, now = TS, time.time()
+    if ts["login_started"] and now - ts["login_started"] >= 12:
+        ts["signed_in"], ts["login_started"] = True, 0.0
+    waiting, signed = ts["login_started"] > 0, ts["signed_in"]
+    remote = ts["remote_access"] and signed
+    return {"revision": ts["revision"], "enabled": ts["enabled"],
+            "backend_state": ("Running" if ts["enabled"] or remote else "Stopped") if signed else "NeedsLogin",
+            "self": {"id": "nDemo1CNTRL", "name": ts["hostname"], "ips": ["100.101.102.103"], "online": True} if signed else None,
+            "exit_nodes": [], "selected_exit_node": "", "error": None, "remote_access": ts["remote_access"],
+            "lan_cidr": "192.168.0.0/24", "lan_ip": "192.168.0.1", "advertised_routes": ["192.168.0.0/24"] if remote else [],
+            "route_approved": False, "remote_error": None, "installed": True,
+            "auth_url": "https://login.tailscale.com/a/demo123" if waiting and now - ts["login_started"] >= 2 else None,
+            "login_active": waiting, "login_error": None, "account": "demo@example.com" if signed else None}
+
+
+def tailscale_set(body):
+    ts, action = TS, body.get("action")
+    if body.get("expected_revision") != ts["revision"]:
+        raise ValueError("Configuration changed; refresh before saving")
+    if action == "login":
+        if ts["signed_in"]:
+            raise ValueError("Tailscale is already signed in; sign out first")
+        ts["hostname"] = body.get("hostname") or ts["hostname"]
+        ts["login_started"] = time.time() - (10 if body.get("auth_key") else 0)
+    elif action == "cancel_login":
+        ts["login_started"] = 0.0
+    elif action == "logout":
+        ts.update({"signed_in": False, "enabled": False, "remote_access": False})
+    elif action in ("remote_access", "connect", "disconnect"):
+        if not ts["signed_in"]:
+            raise ValueError("Tailscale is not signed in; sign in on the Tailscale page first")
+        if action == "remote_access":
+            ts["remote_access"] = bool(body.get("enabled"))
+        else:
+            ts["enabled"] = action == "connect"
+    else:
+        raise ValueError("Invalid Tailscale request")
+    ts["revision"] += 1
+    return tailscale_status()
+
+
+# Admin services (agent/src/admin_services.rs) and USB LAN (agent/src/usb.rs).
+ADMIN = {"revision": 0, "stamp": 0, "busy": False, "adb_running": True, "adb_exposed": True, "adb_boot": True,
+         "ssh_running": True, "ssh_boot": True, "adb_available": True, "ssh_available": True}
+USB_LAN = {"enabled": False}
+
+
+def admin_services():
+    return {**ADMIN, "stamp": int(time.time())}
+
+
+def admin_services_set(body):
+    if set(body) != {"revision", "service", "action", "enabled"} or body["service"] not in ("adb", "ssh") \
+            or body["action"] not in ("runtime", "boot") or not isinstance(body["enabled"], bool):
+        raise ValueError("Invalid admin services request")
+    if body["revision"] != ADMIN["revision"]:
+        raise ValueError("Configuration changed; refresh before saving")
+    key = f'{body["service"]}_{"running" if body["action"] == "runtime" else "boot"}'
+    ADMIN.update({key: body["enabled"], "revision": ADMIN["revision"] + 1})
+    return admin_services()
+
+
+def usb_lan():
+    on = USB_LAN["enabled"]
+    return {"enabled": on, "active": on, "linked": on, "interface": "usb0" if on else None, "mode": "ecm" if on else None}
+
+
+def usb_lan_set(body):
+    if set(body) != {"enabled"} or not isinstance(body["enabled"], bool):
+        raise ValueError("Invalid USB LAN request")
+    USB_LAN["enabled"] = body["enabled"]
+    return usb_lan()
+
+
 ROUTES_PUT = {
+    "/api/admin/services": admin_services_set,
+    "/api/usb/lan": usb_lan_set,
+    "/api/wifi/blocked": blocklist_set,
+    "/api/tailscale": tailscale_set,
     "/api/proxy": proxy_set,
     "/api/clash": clash_set,
     "/api/clash/proxies": clash_select,
@@ -1149,6 +1253,9 @@ def esim_delete(body):
 
 
 ROUTES_GET = {
+    "/api/admin/services": admin_services,
+    "/api/usb/lan": usb_lan,
+    "/api/tailscale": tailscale_status,
     "/api/proxy": proxy_status,
     "/api/wireguard": wireguard_status,
     "/api/clash": clash_status,
@@ -1165,6 +1272,12 @@ ROUTES_GET = {
     "/api/screen/settings": lambda: STATE["screen_settings"],
     "/api/dashboard": dashboard_batch,
     "/api/network/clients": clients,
+    "/api/wifi/blocked": blocklist,
+    "/api/system/logs": lambda: {"agent": ["2026-10-28 20:41:13 [tailscale] Running online",
+                                           "2026-10-28 20:44:02 [relay] Off -> Connecting Cafe-Upstream",
+                                           "2026-10-28 20:44:07 [relay] Checking -> Online Cafe-Upstream",
+                                           "2026-10-28 20:51:40 [wifi] blocked 02:00:00:00:00:09 (Old-Tablet)"],
+                                 "relay_guard": ["2026-10-28 20:44:06 relay on 5G (5580 MHz), disabled wlan2"]},
     "/api/device": lambda: dashboard_batch()["device"],
     "/api/cpu": lambda: dashboard_batch()["cpu"],
     "/api/memory": lambda: dashboard_batch()["memory"],

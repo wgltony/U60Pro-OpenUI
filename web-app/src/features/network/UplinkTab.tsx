@@ -11,12 +11,16 @@ import { Card, Chip, Empty, Row, SignalBars, Skeleton, Spinner, type ChipTone } 
 import { N_, t, tm } from '../../i18n'
 
 // Wi-Fi relay (agent/src/wifi_uplink.rs): the router joins an upstream Wi-Fi network and
-// sends all traffic through it while that network reaches the internet, otherwise over
-// the cellular connection. Saves answer at once; the agent applies them in the
+// attempts to route traffic through it while that network reaches the internet, with
+// cellular fallback. Saves answer at once; the agent applies them in the
 // background, so the tab polls the state.
 
 const POLL_MS = 3000
-const ACK_KEY = 'u60.uplink.ack'
+const ACK_KEY = 'u60.uplink.ack.v2'
+// Verified on this device (WCN7851): one upstream and one hotspot can share the radio only on
+// different bands; relay-band-guard pauses the same-band hotspot while the relay is connected.
+const RELAY_LIMIT = N_('The relay and the hotspot work together, with one limit: a band can carry either the upstream Wi-Fi or the hotspot, not both. While the relay is connected, the hotspot on the upstream’s band pauses (5G upstream pauses the 5G hotspot, 2.4G upstream pauses the 2.4G hotspot); the other band stays on. Both bands use the same hotspot name, so most devices move over by themselves. The paused band comes back when the relay disconnects.')
+const SCAN_NOTE = N_('Scanning takes a few seconds and uses the hotspot radio; connected devices may notice a brief pause.')
 
 const STATES: Record<UplinkState, { label: string; tone: ChipTone; text: string }> = {
   off: { label: N_('Off'), tone: 'default', text: 'text-ink2' },
@@ -96,9 +100,7 @@ async function confirmEnable() {
   if (acknowledged()) return true
   const ok = await confirm({
     title: t('Turn on the Wi-Fi relay?'),
-    body: t(
-      'The router joins the upstream Wi-Fi with the same radio as its hotspot. The hotspot may move to the upstream network’s channel, so connected devices can drop for a few seconds. While the upstream Wi-Fi reaches the internet, all traffic goes through it, including the router’s own; otherwise traffic stays on the cellular connection. IPv6 for LAN devices is held while traffic is on Wi-Fi. Networks with a web login page (captive portals) are not supported yet, and the upstream network must use a different subnet than this router’s LAN.',
-    ),
+    body: `${t(RELAY_LIMIT)} ${t('The relay shares the hotspot radio. When the upstream Wi-Fi has internet access, the router attempts to route traffic through it; otherwise it falls back to cellular. IPv6 for LAN devices is held while traffic is on Wi-Fi. Networks with a captive portal may require manual web login. The upstream network must use a different subnet than this router’s LAN.')}`,
     confirmLabel: t('Turn on'),
   })
   if (ok) acknowledge()
@@ -306,7 +308,7 @@ function StatusCard({ status, busy, onToggle, onLogin }: { status: UplinkStatus;
             <p className={`text-lg font-semibold leading-snug ${info.text}`} role="status">{t(info.label)}</p>
             <p className="mt-0.5 text-xs text-ink2">
               {status.state === 'online' && status.ssid
-                ? t('All traffic goes through {ssid}.', { ssid: status.ssid })
+                ? t('Upstream Wi-Fi {ssid} reports internet access.', { ssid: status.ssid })
                 : status.state === 'logging_in'
                   ? t('Traffic goes over this Wi-Fi so its login page can open.')
                   : status.enabled
@@ -442,6 +444,12 @@ function ScanCard({
   const [results, setResults] = useState<UplinkSeen[] | null>(null)
 
   async function scan() {
+    const ok = await confirm({
+      title: t('Scan for Wi-Fi networks?'),
+      body: t(SCAN_NOTE),
+      confirmLabel: t('Scan'),
+    })
+    if (!ok) return
     setScanning(true)
     try {
       const found = await api.uplinkScan()
@@ -457,14 +465,14 @@ function ScanCard({
     <Card
       title={t('Nearby networks')}
       action={
-        <Button size="sm" variant="ghost" loading={scanning} onClick={() => void scan()}>
+        <Button size="sm" variant="ghost" loading={scanning} disabled={busy} onClick={() => void scan()}>
           {!scanning && <IRefresh size={14} />}{scanning ? t('Scanning…') : t('Scan')}
         </Button>
       }
     >
       {scanning && !results ? (
         <div className="space-y-2" aria-busy={true}>
-          <p className="text-xs text-ink3">{t('Scanning takes up to 10 seconds; the hotspot stays on.')}</p>
+          <p className="text-xs text-ink3">{t('Scanning… Wi-Fi may be interrupted.')}</p>
           <Skeleton className="h-10" />
           <Skeleton className="h-10" />
           <Skeleton className="h-10" />
@@ -614,6 +622,10 @@ export default function UplinkTab() {
 
   return (
     <div className="space-y-4">
+      <div role="note" className="flex items-start gap-2 rounded-lg border border-accent/25 bg-accent/8 p-3 text-[13px] text-ink">
+        <IAlert size={16} className="mt-0.5 shrink-0 text-accent" />
+        <p>{t(RELAY_LIMIT)}</p>
+      </div>
       <StatusCard status={status} busy={busy} onToggle={(on) => void toggle(on)} onLogin={(on) => void login(on)} />
       <SavedCard
         status={status}
