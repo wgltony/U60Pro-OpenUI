@@ -78,6 +78,114 @@ static LOGIN: Mutex<Option<Instant>> = Mutex::new(None);
 /// Bumped for every supplicant started; its event monitor stops when this moves on.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// Explicit reconnect requests are consumed by the supervisor, even when the saved
+/// supplicant text is unchanged. Incremented only after a successful revisioned save.
+static RECONNECT: AtomicU64 = AtomicU64::new(0);
+const SCAN_ROWS: usize = 60;
+const SCAN_TTL: Duration = Duration::from_secs(120);
+static RELAY_SCAN: Mutex<RelayScan> = Mutex::new(RelayScan::new());
+
+/// Never expose typed or saved passwords through Debug, error strings or projections.
+#[derive(PartialEq)]
+pub struct RelayPassword(pub Option<String>);
+impl std::fmt::Debug for RelayPassword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+#[derive(Debug, PartialEq)]
+pub enum RelayAction {
+    Scan,
+    Save {
+        revision: u64,
+        id: u64,
+        ssid: String,
+        security: Security,
+        hidden: bool,
+        password: RelayPassword,
+    },
+    SaveScan {
+        revision: u64,
+        generation: u64,
+        index: usize,
+        id: u64,
+        password: RelayPassword,
+    },
+    Connect {
+        revision: u64,
+        id: u64,
+    },
+    Reconnect {
+        revision: u64,
+    },
+    Disconnect {
+        revision: u64,
+    },
+    Delete {
+        revision: u64,
+        id: u64,
+    },
+}
+struct RelayScan {
+    generation: u64,
+    state: &'static str,
+    stamp: u64,
+    finished: Option<Instant>,
+    rows: Vec<Seen>,
+}
+impl RelayScan {
+    const fn new() -> Self {
+        Self {
+            generation: 0,
+            state: "idle",
+            stamp: 0,
+            finished: None,
+            rows: Vec::new(),
+        }
+    }
+    fn begin(&mut self) {
+        self.generation = self.generation.saturating_add(1);
+        self.state = "running";
+        self.stamp = 0;
+        self.finished = None;
+        self.rows.clear();
+    }
+    fn finish(
+        &mut self,
+        result: Result<Vec<Seen>, String>,
+        at: Instant,
+        stamp: u64,
+    ) -> Result<(), String> {
+        self.stamp = stamp;
+        self.finished = Some(at);
+        match result {
+            Ok(rows) => {
+                self.rows = dedup(rows);
+                self.state = "ready";
+                Ok(())
+            }
+            Err(_) => {
+                self.rows.clear();
+                self.state = "failed";
+                Err("Wi-Fi scan failed; try again".into())
+            }
+        }
+    }
+    fn choice(&self, generation: u64, index: usize, at: Instant) -> Result<&Seen, String> {
+        if self.state != "ready"
+            || self.generation != generation
+            || self
+                .finished
+                .is_none_or(|t| at.saturating_duration_since(t) > SCAN_TTL)
+        {
+            return Err("Configuration changed; scan again".into());
+        }
+        self.rows
+            .get(index)
+            .ok_or_else(|| "Configuration changed; scan again".into())
+    }
+}
+
 // ---------- Settings ----------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,7 +198,7 @@ pub enum Security {
     Wpa2Wpa3,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Network {
     id: u64,
@@ -100,6 +208,18 @@ struct Network {
     password: String,
     #[serde(default)]
     hidden: bool,
+}
+
+impl std::fmt::Debug for Network {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Network")
+            .field("id", &self.id)
+            .field("ssid", &self.ssid)
+            .field("security", &self.security)
+            .field("hidden", &self.hidden)
+            .field("password", &"[redacted]")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -219,7 +339,10 @@ fn edited(old: &Settings, u: Update) -> Result<Settings, String> {
         next.enabled = enabled;
     }
     validate(&next)?;
-    next.revision = old.revision.saturating_add(1);
+    next.revision = old
+        .revision
+        .checked_add(1)
+        .ok_or("Configuration revision exhausted")?;
     Ok(next)
 }
 
@@ -599,11 +722,24 @@ fn wpa(cmd: &str, timeout: Duration) -> Result<String, String> {
             .map_err(|_| "supplicant not running")?;
         sock.send(cmd.as_bytes()).map_err(|_| "control socket")?;
         let mut buf = vec![0u8; 16384];
+        let deadline = Instant::now() + timeout;
         loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("supplicant did not answer");
+            }
+            sock.set_read_timeout(Some(remaining))
+                .map_err(|_| "control socket")?;
             let n = sock
                 .recv(&mut buf)
                 .map_err(|_| "supplicant did not answer")?;
-            let text = String::from_utf8_lossy(&buf[..n]).to_string();
+            // A truncated or lossy-decoded final SSID must never become a new identity.
+            if n == buf.len() {
+                return Err("supplicant reply too large");
+            }
+            let text = std::str::from_utf8(&buf[..n])
+                .map_err(|_| "supplicant reply is not UTF-8")?
+                .to_owned();
             // Unsolicited events arrive only on attached sockets; skip any anyway.
             if !text.starts_with('<') {
                 return Ok(text);
@@ -626,17 +762,23 @@ fn unescape(s: &str) -> Option<String> {
     let b = s.as_bytes();
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'\\' && i + 1 < b.len() {
-            if b[i + 1] == b'x' && i + 3 < b.len() {
-                out.push(u8::from_str_radix(&s[i + 2..i + 4], 16).ok()?);
+        if b[i] == b'\\' {
+            let next = *b.get(i + 1)?;
+            if next == b'x' {
+                let hi = (*b.get(i + 2)? as char).to_digit(16)?;
+                let lo = (*b.get(i + 3)? as char).to_digit(16)?;
+                out.push((hi * 16 + lo) as u8);
                 i += 4;
                 continue;
             }
-            out.push(match b[i + 1] {
+            out.push(match next {
                 b'n' => b'\n',
                 b't' => b'\t',
+                b'r' => b'\r',
                 b'e' => 0x1b,
-                c => c,
+                b'\\' => b'\\',
+                b'"' => b'"',
+                _ => return None,
             });
             i += 2;
             continue;
@@ -671,7 +813,7 @@ fn security_of(psk: bool, sae: bool, encrypted: bool) -> Option<Security> {
 
 /// One entry per name, strongest first; hidden networks are dropped.
 fn dedup(mut seen: Vec<Seen>) -> Vec<Seen> {
-    seen.retain(|s| !s.ssid.is_empty() && !s.ssid.chars().all(|c| c == '\0'));
+    seen.retain(|s| validate_ssid(&s.ssid).is_ok());
     seen.sort_by_key(|s| std::cmp::Reverse(s.signal));
     let mut out: Vec<Seen> = Vec::new();
     for s in seen {
@@ -742,7 +884,7 @@ fn parse_iw_scan(text: &str) -> Vec<Seen> {
     let mut seen = Vec::new();
     let mut cur: Option<Cur> = None;
     for line in text.lines() {
-        let t = line.trim();
+        let t = line.trim_start();
         if let Some(rest) = line.strip_prefix("BSS ") {
             if let Some(c) = cur.take() {
                 seen.extend(finish(c));
@@ -780,7 +922,8 @@ fn parse_iw_scan(text: &str) -> Vec<Seen> {
                 .and_then(|n| n.parse::<f64>().ok())
                 .map_or(-100, |n| n as i32);
         } else if let Some(v) = t.strip_prefix("SSID:") {
-            c.ssid = unescape(v.trim());
+            // iw inserts one separator space; all remaining SSID spaces are identity.
+            c.ssid = unescape(v.strip_prefix(' ').unwrap_or(v));
         } else if t.starts_with("capability:") && t.contains("Privacy") {
             c.privacy = true;
         } else if t.starts_with("RSN:") || t.starts_with("WPA:") {
@@ -802,46 +945,104 @@ fn parse_iw_scan(text: &str) -> Vec<Seen> {
 /// Nearby networks. Uses the running supplicant when there is one, otherwise an
 /// off-channel scan on a hotspot interface, which keeps the hotspot up.
 pub fn scan() -> (u16, Value) {
-    let result = (|| -> Result<Vec<Seen>, String> {
-        if wpa("PING", Duration::from_secs(1)).is_ok_and(|r| r.starts_with("PONG")) {
-            let _ = wpa("SCAN", Duration::from_secs(2));
-            std::thread::sleep(Duration::from_secs(4));
-            let results = wpa("SCAN_RESULTS", Duration::from_secs(2))?;
-            return Ok(parse_scan_results(&results));
-        }
-        let radio = radio();
-        let iface = radio
-            .aps
-            .first()
-            .map(|(name, _)| name.clone())
-            .ok_or("The Wi-Fi radio is off; turn the hotspot on first")?;
-        let mut last = String::from("Wi-Fi scan failed");
-        for attempt in 0..3 {
-            if attempt > 0 {
-                std::thread::sleep(Duration::from_millis(1500));
-            }
-            let mut cmd = Command::new("iw");
-            cmd.args(["dev", &iface, "scan"]);
-            match process_runner::output(&mut cmd, None, Duration::from_secs(20), 1 << 20) {
-                Ok(o) if o.status.success() => {
-                    let seen = parse_iw_scan(&String::from_utf8_lossy(&o.stdout));
-                    if !seen.is_empty() {
-                        return Ok(seen);
-                    }
-                    last = "No Wi-Fi networks found".into();
-                }
-                _ => last = "Wi-Fi scan failed; the radio may be busy, try again".into(),
-            }
-        }
-        Err(last)
-    })();
-    match result {
+    match scan_networks() {
         Ok(seen) => (
             200,
             json!({"ok": true, "data": {"networks": seen.iter().map(seen_json).collect::<Vec<_>>()}}),
         ),
         Err(e) => (503, json!({"ok": false, "error": e})),
     }
+}
+
+/// Wait for completion of an accepted scan on the same attached control socket. A
+/// rejection/timeout can never fall through to cached SCAN_RESULTS success.
+fn scan_event(accepted: &mut bool, text: &str) -> Result<bool, String> {
+    let text = text.trim();
+    if text == "OK" {
+        *accepted = true;
+        return Ok(false);
+    }
+    if text.starts_with("FAIL") || text.contains("CTRL-EVENT-SCAN-FAILED") {
+        return Err("Wi-Fi scan rejected; try again".into());
+    }
+    Ok(*accepted && text.contains("CTRL-EVENT-SCAN-RESULTS"))
+}
+fn supplicant_scan() -> Result<Vec<Seen>, String> {
+    let local = PathBuf::from(format!(
+        "{RUN}/scan-{}-{}",
+        std::process::id(),
+        NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| -> Result<Vec<Seen>, String> {
+        let sock = UnixDatagram::bind(&local).map_err(|_| "Cannot start Wi-Fi scan")?;
+        sock.connect(ctrl_dir().join(IFACE))
+            .map_err(|_| "Wi-Fi scan unavailable")?;
+        sock.set_read_timeout(Some(Duration::from_secs(2)))
+            .map_err(|_| "Wi-Fi scan unavailable")?;
+        sock.send(b"ATTACH").map_err(|_| "Wi-Fi scan unavailable")?;
+        let mut buf = [0u8; 4096];
+        let n = sock.recv(&mut buf).map_err(|_| "Wi-Fi scan unavailable")?;
+        if &buf[..n] != b"OK\n" && &buf[..n] != b"OK" {
+            return Err("Wi-Fi scan unavailable".into());
+        }
+        sock.send(b"SCAN").map_err(|_| "Wi-Fi scan unavailable")?;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut accepted = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("Wi-Fi scan timed out; try again".into());
+            }
+            sock.set_read_timeout(Some(remaining))
+                .map_err(|_| "Wi-Fi scan unavailable")?;
+            let n = sock
+                .recv(&mut buf)
+                .map_err(|_| "Wi-Fi scan timed out; try again")?;
+            if scan_event(&mut accepted, &String::from_utf8_lossy(&buf[..n]))? {
+                break;
+            }
+        }
+        let results = wpa("SCAN_RESULTS", Duration::from_secs(2))?;
+        if !results.starts_with("bssid") {
+            return Err("Wi-Fi scan results unavailable".into());
+        }
+        Ok(parse_scan_results(&results))
+    })();
+    let _ = fs::remove_file(&local);
+    result
+}
+
+fn scan_networks() -> Result<Vec<Seen>, String> {
+    if wpa("PING", Duration::from_secs(1)).is_ok_and(|r| r.starts_with("PONG")) {
+        return supplicant_scan();
+    }
+    let radio = radio();
+    let iface = radio
+        .aps
+        .first()
+        .map(|(name, _)| name.clone())
+        .ok_or("The Wi-Fi radio is off; turn the hotspot on first")?;
+    let mut last = String::from("Wi-Fi scan failed");
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(1500));
+        }
+        let mut cmd = Command::new("iw");
+        cmd.args(["dev", &iface, "scan"]);
+        match process_runner::output(&mut cmd, None, Duration::from_secs(20), 1 << 20) {
+            Ok(o) if o.status.success() => {
+                let text = std::str::from_utf8(&o.stdout)
+                    .map_err(|_| "Wi-Fi scan returned unsupported SSIDs")?;
+                let seen = parse_iw_scan(text);
+                if !seen.is_empty() {
+                    return Ok(seen);
+                }
+                last = "No Wi-Fi networks found".into();
+            }
+            _ => last = "Wi-Fi scan failed; the radio may be busy, try again".into(),
+        }
+    }
+    Err(last)
 }
 
 fn band(freq: u32) -> &'static str {
@@ -1115,6 +1316,27 @@ iptables -w 2 -t nat -A {p}_OUT -o {IFACE} ! -d {dns} -p {proto} --dport 53 -j D
         "ip6tables -w 2 -A {p}_V6 -i br-lan -o br-lan -j RETURN\nip6tables -w 2 -A {p}_V6 -i br-lan -j REJECT\n"
     ));
     out
+}
+
+/// Mark cleanup necessary *before* invoking a fallible script: it can install policy
+/// and then fail while adding DNS or V6. The error handler must not trust old flags.
+fn install_online(
+    routing: &mut bool,
+    lease: &Lease,
+    run: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    *routing = true;
+    run(&online_script(lease))
+}
+
+fn firewall_restore_script(lease: Option<&Lease>, routing: bool) -> Result<String, String> {
+    let mut script = firewall_script();
+    if routing {
+        script.push_str(&online_script(
+            lease.ok_or("Missing Wi-Fi lease during firewall recovery")?,
+        ));
+    }
+    Ok(script)
 }
 
 fn offline_script() -> String {
@@ -1765,7 +1987,12 @@ fn step(rt: &mut Runtime, s: &Settings) -> Result<(), String> {
             radio.phy.unwrap_or_default()
         ));
     } else if egress::run("sh", &["-c", &hooks_check()]).is_err() {
-        sh(&firewall_script())?;
+        // Rebuilding flushes DNS/OUT/V6. Restore dynamic rules in the same checked
+        // script, rather than trusting routing=true and leaving those chains empty.
+        sh(&firewall_restore_script(
+            rt.view.lease.as_ref(),
+            rt.routing,
+        )?)?;
     }
     let was_running = rt.supplicant.is_some();
     if was_running && !alive(&mut rt.supplicant) {
@@ -1866,11 +2093,11 @@ fn step(rt: &mut Runtime, s: &Settings) -> Result<(), String> {
     }
     let route = rt.view.online || login_active();
     if route && (!rt.routing || !rules_present(true)) {
-        sh(&online_script(&lease))?;
-        if !rt.routing && !rt.view.online {
+        let was_routing = rt.routing;
+        install_online(&mut rt.routing, &lease, sh)?;
+        if !was_routing && !rt.view.online {
             log_line("uplink: login mode, traffic on Wi-Fi until the login is done");
         }
-        rt.routing = true;
     } else if !route && rt.routing {
         go_offline(rt);
     }
@@ -1894,12 +2121,35 @@ fn step(rt: &mut Runtime, s: &Settings) -> Result<(), String> {
 }
 
 fn publish(view: &Snapshot) {
-    *SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()) = view.clone();
+    let mut last = SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());
+    // Each change of state goes to the agent log: when the relay dropped, and why.
+    if last.state != view.state {
+        let ssid = view
+            .link
+            .as_ref()
+            .map(|l| format!(" {}", l.ssid))
+            .unwrap_or_default();
+        let reason = view
+            .reason
+            .as_deref()
+            .map(|r| format!(" ({r})"))
+            .unwrap_or_default();
+        eprintln!("[relay] {:?} -> {:?}{ssid}{reason}", last.state, view.state);
+    }
+    *last = view.clone();
 }
 
 fn wake() {
     *WAKE.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
     WAKE.1.notify_all();
+}
+
+/// Shared fail-closed path for configuration-load and step errors. Always run owned
+/// cleanup, including when routing=false (a script might have partially succeeded).
+fn fail_closed(rt: &mut Runtime, error: String, cleanup: impl FnOnce(&mut Runtime)) {
+    cleanup(rt);
+    rt.view.state = State::Unavailable;
+    rt.view.reason = Some(error);
 }
 
 pub fn start() {
@@ -1924,23 +2174,27 @@ pub fn start() {
             paused: None,
         };
         let mut first = true;
+        let mut reconnect_seen = 0;
         loop {
             match load() {
                 Ok(s) => {
+                    let reconnect = RECONNECT.load(Ordering::Acquire);
+                    if reconnect != reconnect_seen {
+                        teardown(&mut rt);
+                        *LOGIN.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                        rt.paused = None;
+                        rt.losses.clear();
+                        reconnect_seen = reconnect;
+                    }
                     if first && !s.enabled {
                         // A previous agent may have left the interface and rules.
                         teardown(&mut rt);
                     }
                     if let Err(e) = step(&mut rt, &s) {
-                        go_offline(&mut rt);
-                        rt.view.state = State::Unavailable;
-                        rt.view.reason = Some(e);
+                        fail_closed(&mut rt, e, teardown);
                     }
                 }
-                Err(e) => {
-                    rt.view.state = State::Unavailable;
-                    rt.view.reason = Some(e);
-                }
+                Err(e) => fail_closed(&mut rt, e, teardown),
             }
             first = false;
             publish(&rt.view);
@@ -2011,12 +2265,240 @@ pub fn get() -> (u16, Value) {
     }
 }
 
+/// Build only the existing Update shape, preserving unedited secrets by saved ID.
+/// Pure: tests exercise revision/identity/security/delete/reconnect without any I/O.
+fn relay_edited(
+    old: &Settings,
+    action: &RelayAction,
+    scan: &RelayScan,
+    at: Instant,
+) -> Result<(Settings, bool), String> {
+    let mut edits: Vec<NetworkEdit> = old
+        .networks
+        .iter()
+        .map(|n| NetworkEdit {
+            id: Some(n.id),
+            ssid: n.ssid.clone(),
+            security: n.security,
+            password: None,
+            hidden: n.hidden,
+        })
+        .collect();
+    let (revision, enabled, force) = match action {
+        RelayAction::Save { revision, .. } | RelayAction::SaveScan { revision, .. } => {
+            (*revision, None, false)
+        }
+        RelayAction::Connect { revision, id } => {
+            let i = old
+                .networks
+                .iter()
+                .position(|n| n.id == *id)
+                .ok_or("Network not found; reload and try again")?;
+            let entry = edits.remove(i);
+            edits.insert(0, entry);
+            (*revision, Some(true), true)
+        }
+        RelayAction::Reconnect { revision } => (*revision, Some(true), true),
+        RelayAction::Disconnect { revision } => (*revision, Some(false), false),
+        RelayAction::Delete { revision, id } => {
+            let i = old
+                .networks
+                .iter()
+                .position(|n| n.id == *id)
+                .ok_or("Network not found; reload and try again")?;
+            edits.remove(i);
+            (
+                *revision,
+                if edits.is_empty() { Some(false) } else { None },
+                true,
+            )
+        }
+        RelayAction::Scan => return Err("Invalid relay action".into()),
+    };
+    if revision != old.revision {
+        return Err("Configuration changed; reload and try again".into());
+    }
+    let new_edit = match action {
+        RelayAction::Save {
+            id,
+            ssid,
+            security,
+            hidden,
+            password,
+            ..
+        } => Some(NetworkEdit {
+            id: if *id == 0 { None } else { Some(*id) },
+            ssid: ssid.clone(),
+            security: *security,
+            hidden: *hidden,
+            password: password.0.clone(),
+        }),
+        RelayAction::SaveScan {
+            generation,
+            index,
+            id,
+            password,
+            ..
+        } => {
+            let seen = scan.choice(*generation, *index, at)?;
+            let security = seen.security.ok_or("Unsupported Wi-Fi security")?;
+            Some(NetworkEdit {
+                id: if *id == 0 { None } else { Some(*id) },
+                ssid: seen.ssid.clone(),
+                security,
+                hidden: false,
+                password: password.0.clone(),
+            })
+        }
+        _ => None,
+    };
+    if let Some(edit) = new_edit {
+        if edit.security == Security::Open && edit.password.is_some() {
+            return Err("Open network needs no password".into());
+        }
+        if let Some(id) = edit.id {
+            let slot = edits
+                .iter_mut()
+                .find(|n| n.id == Some(id))
+                .ok_or("Network not found; reload and try again")?;
+            *slot = edit;
+        } else {
+            if edits.len() >= MAX_NETWORKS {
+                return Err("Saved Wi-Fi list is full".into());
+            }
+            edits.push(edit);
+        }
+    }
+    let next = edited(
+        old,
+        Update {
+            expected_revision: revision,
+            enabled,
+            networks: Some(edits),
+        },
+    )?;
+    Ok((next, force))
+}
+
+/// Only called by the existing serialized screen job worker. No caller can supply
+/// arbitrary Update JSON, shell text, control socket verbs, or a raw stored password.
+pub fn relay_action(action: &RelayAction) -> (u16, Value) {
+    if matches!(action, RelayAction::Scan) {
+        // A restart must not recycle generation 1 into an old, still-open dialog.
+        // Entropy is local only; never fall back to a timestamp/counter on failure.
+        let mut bytes = [0u8; 8];
+        let entropy = fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes));
+        let generation = u64::from_ne_bytes(bytes);
+        {
+            let mut scan = RELAY_SCAN.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = scan.generation;
+            scan.begin(); // immediately invalidate old rows, even if entropy failed
+            if entropy.is_err() || generation == 0 || generation == previous {
+                scan.state = "failed";
+                return (
+                    503,
+                    json!({"ok":false,"error":"Cannot start a fresh Wi-Fi scan"}),
+                );
+            }
+            scan.generation = generation;
+        }
+        let result = scan_networks();
+        let result = RELAY_SCAN.lock().unwrap_or_else(|e| e.into_inner()).finish(
+            result,
+            Instant::now(),
+            now_secs(),
+        );
+        return match result {
+            Ok(()) => (200, json!({"ok":true})),
+            Err(e) => (503, json!({"ok":false,"error":e})),
+        };
+    }
+    let result = (|| -> Result<(), String> {
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old = load()?;
+        let (next, force) = {
+            let scan = RELAY_SCAN.lock().unwrap_or_else(|e| e.into_inner());
+            relay_edited(&old, action, &scan, Instant::now())?
+        };
+        commit(&old, &next, force)
+    })();
+    match result {
+        Ok(()) => (200, json!({"ok":true})),
+        Err(e) => (
+            if e.starts_with("Configuration changed;") {
+                409
+            } else {
+                400
+            },
+            json!({"ok":false,"error":e}),
+        ),
+    }
+}
+
+/// Redacted cached rows only. No scan, control socket request, radio operation or tools.
+/// The caller uses this settings load for both R and L so their revisions agree.
+pub fn screen_view() -> (Option<Summary>, String) {
+    let Ok(s) = load() else {
+        return (None, String::new());
+    };
+    let records = relay_records(&s, &RELAY_SCAN.lock().unwrap_or_else(|e| e.into_inner()));
+    (Some(summary_for(&s)), records)
+}
+
+fn security_word(s: Security) -> &'static str {
+    match s {
+        Security::Open => "open",
+        Security::Wpa2 => "wpa2",
+        Security::Wpa3 => "wpa3",
+        Security::Wpa2Wpa3 => "wpa2_wpa3",
+    }
+}
+fn relay_records(s: &Settings, scan: &RelayScan) -> String {
+    let mut out = format!(
+        "L\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        s.revision,
+        scan.generation,
+        scan.state,
+        scan.stamp,
+        s.networks.len(),
+        scan.rows.len()
+    );
+    for (i, n) in s.networks.iter().take(MAX_NETWORKS).enumerate() {
+        out.push_str(&format!(
+            "l\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            n.id,
+            u8::from(i == 0),
+            security_word(n.security),
+            u8::from(n.hidden),
+            u8::from(!n.password.is_empty()),
+            hex(n.ssid.as_bytes())
+        ));
+    }
+    for (i, n) in scan.rows.iter().take(SCAN_ROWS).enumerate() {
+        out.push_str(&format!(
+            "w\t{i}\t{}\t{}\t{}\t{}\n",
+            n.security.map_or("unsupported", security_word),
+            n.signal,
+            n.frequency,
+            hex(n.ssid.as_bytes())
+        ));
+    }
+    out
+}
+
 /// Saves under the lock; the supervisor applies the change on its next pass, at once.
 fn save(u: Update) -> Result<Settings, String> {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let old = load()?;
     let next = edited(&old, u)?;
-    persist(&next)?;
+    commit(&old, &next, false)?;
+    Ok(next)
+}
+fn commit(old: &Settings, next: &Settings, force: bool) -> Result<(), String> {
+    persist(next)?;
+    if force {
+        RECONNECT.fetch_add(1, Ordering::Release);
+    }
     if next.enabled != old.enabled {
         let mut view = SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());
         view.state = if next.enabled {
@@ -2030,7 +2512,7 @@ fn save(u: Update) -> Result<Settings, String> {
         }
     }
     wake();
-    Ok(next)
+    Ok(())
 }
 
 pub fn update(body: &[u8]) -> (u16, Value) {
@@ -2107,11 +2589,10 @@ pub struct Summary {
     pub saved: usize,
 }
 
-pub fn summary() -> Option<Summary> {
-    let s = load().ok()?;
+fn summary_for(s: &Settings) -> Summary {
     let view = SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let (rx_bytes, tx_bytes) = traffic(&view);
-    Some(Summary {
+    Summary {
         revision: s.revision,
         enabled: s.enabled,
         state: view.state,
@@ -2128,7 +2609,7 @@ pub fn summary() -> Option<Summary> {
         tx_bytes,
         online_since: view.online_since,
         saved: s.networks.len(),
-    })
+    }
 }
 
 /// Turns the uplink on or off for the screen; a newer saved revision answers a conflict.
@@ -2153,6 +2634,268 @@ mod tests {
             password: password.into(),
             hidden: false,
         }
+    }
+
+    fn relay_fixture() -> Settings {
+        Settings {
+            revision: 7,
+            enabled: true,
+            networks: vec![
+                net(1, "First", Security::Wpa2, "fixture-only-secret"),
+                net(2, "Second", Security::Open, ""),
+            ],
+        }
+    }
+    #[test]
+    fn relay_edits_preserve_password_and_revisions() {
+        let old = relay_fixture();
+        let scan = RelayScan::new();
+        let at = Instant::now();
+        let action = RelayAction::Save {
+            revision: 7,
+            id: 1,
+            ssid: "Renamed".into(),
+            security: Security::Wpa2Wpa3,
+            hidden: true,
+            password: RelayPassword(None),
+        };
+        let (next, force) = relay_edited(&old, &action, &scan, at).unwrap();
+        assert_eq!(next.revision, 8);
+        assert_eq!(next.networks[0].password, old.networks[0].password);
+        assert!(next.networks[0].hidden && next.enabled && !force);
+        assert!(!format!("{action:?} {old:?}").contains("fixture-only-secret"));
+        let add = RelayAction::Save {
+            revision: 7,
+            id: 0,
+            ssid: "Third".into(),
+            security: Security::Open,
+            hidden: false,
+            password: RelayPassword(None),
+        };
+        let (next, _) = relay_edited(&old, &add, &scan, at).unwrap();
+        assert_eq!(next.networks.len(), 3);
+        assert_eq!(next.networks[2].id, 3);
+        for bad in [
+            RelayAction::Delete { revision: 6, id: 1 },
+            RelayAction::Delete {
+                revision: 7,
+                id: 99,
+            },
+            RelayAction::Save {
+                revision: 7,
+                id: 99,
+                ssid: "Unknown".into(),
+                security: Security::Open,
+                hidden: false,
+                password: RelayPassword(None),
+            },
+            RelayAction::Save {
+                revision: 7,
+                id: 0,
+                ssid: "Protected".into(),
+                security: Security::Wpa2,
+                hidden: false,
+                password: RelayPassword(None),
+            },
+            RelayAction::Save {
+                revision: 7,
+                id: 0,
+                ssid: "First".into(),
+                security: Security::Open,
+                hidden: false,
+                password: RelayPassword(None),
+            },
+        ] {
+            assert!(relay_edited(&old, &bad, &scan, at).is_err());
+        }
+        let (one, _) =
+            relay_edited(&old, &RelayAction::Delete { revision: 7, id: 1 }, &scan, at).unwrap();
+        assert!(one.enabled);
+        let (empty, _) =
+            relay_edited(&one, &RelayAction::Delete { revision: 8, id: 2 }, &scan, at).unwrap();
+        assert!(empty.networks.is_empty() && !empty.enabled);
+    }
+    #[test]
+    fn relay_connect_reconnect_force_restart_even_unchanged() {
+        let old = relay_fixture();
+        let scan = RelayScan::new();
+        let at = Instant::now();
+        let (same, force) =
+            relay_edited(&old, &RelayAction::Reconnect { revision: 7 }, &scan, at).unwrap();
+        assert!(force && same.enabled);
+        assert_eq!(same.networks, old.networks);
+        assert_eq!(supplicant_config(&same), supplicant_config(&old));
+        let (chosen, force) = relay_edited(
+            &old,
+            &RelayAction::Connect { revision: 7, id: 2 },
+            &scan,
+            at,
+        )
+        .unwrap();
+        assert!(force && chosen.enabled);
+        assert_eq!(chosen.networks[0].id, 2);
+        let (off, force) =
+            relay_edited(&old, &RelayAction::Disconnect { revision: 7 }, &scan, at).unwrap();
+        assert!(!off.enabled && !force);
+        assert_eq!(off.networks, old.networks);
+        let empty = Settings::default();
+        assert!(relay_edited(&empty, &RelayAction::Reconnect { revision: 0 }, &scan, at).is_err());
+    }
+    fn seen(ssid: &str) -> Seen {
+        Seen {
+            ssid: ssid.into(),
+            bssid: "not-projected".into(),
+            frequency: 2412,
+            signal: -42,
+            security: Some(Security::Open),
+        }
+    }
+    #[test]
+    fn relay_scan_choice_refuses_drift_expiry_and_failure() {
+        let at = Instant::now();
+        let mut cache = RelayScan::new();
+        cache.begin();
+        cache
+            .finish(Ok(vec![seen("Exact SSID ")]), at, 100)
+            .unwrap();
+        let g = cache.generation;
+        assert_eq!(cache.choice(g, 0, at).unwrap().ssid, "Exact SSID ");
+        assert!(cache
+            .choice(g, 0, at + SCAN_TTL + Duration::from_secs(1))
+            .is_err());
+        assert!(cache.choice(g + 1, 0, at).is_err());
+        assert!(cache.choice(g, 1, at).is_err());
+        let a = RelayAction::SaveScan {
+            revision: 0,
+            generation: g,
+            index: 0,
+            id: 0,
+            password: RelayPassword(None),
+        };
+        let (saved, _) = relay_edited(&Settings::default(), &a, &cache, at).unwrap();
+        assert_eq!(saved.networks[0].ssid, "Exact SSID ");
+        cache.begin(); // a dialog for the old scan must not dispatch the replacement row
+        cache.finish(Ok(vec![seen("Different")]), at, 101).unwrap();
+        assert!(relay_edited(&Settings::default(), &a, &cache, at).is_err());
+        cache.begin();
+        assert!(cache.finish(Err("FAIL-BUSY".into()), at, 102).is_err());
+        assert_eq!(cache.state, "failed");
+        assert!(cache.rows.is_empty() && cache.choice(cache.generation, 0, at).is_err());
+        let mut unsupported = seen("Enterprise");
+        unsupported.security = None;
+        cache.begin();
+        cache.finish(Ok(vec![unsupported]), at, 103).unwrap();
+        let a = RelayAction::SaveScan {
+            revision: 0,
+            generation: cache.generation,
+            index: 0,
+            id: 0,
+            password: RelayPassword(None),
+        };
+        assert!(relay_edited(&Settings::default(), &a, &cache, at).is_err());
+    }
+    #[test]
+    fn scan_rejection_never_accepts_cached_success() {
+        let mut accepted = false;
+        assert!(!scan_event(&mut accepted, "<3>CTRL-EVENT-SCAN-RESULTS").unwrap());
+        assert!(scan_event(&mut accepted, "FAIL-BUSY\n").is_err());
+        assert!(!scan_event(&mut accepted, "OK\n").unwrap());
+        assert!(scan_event(&mut accepted, "<3>CTRL-EVENT-SCAN-FAILED ret=-16").is_err());
+        assert!(scan_event(&mut accepted, "<3>CTRL-EVENT-SCAN-RESULTS").unwrap());
+        assert_eq!(unescape("\\x家"), None);
+        let rows =
+            parse_iw_scan("BSS 00:00:00:00:00:01(on wlan0)\n\tfreq: 2412\n\tSSID:  exact  \n");
+        assert_eq!(rows[0].ssid, " exact  ");
+    }
+    #[test]
+    fn relay_records_redact_and_bound_max_catalog() {
+        let mut s = relay_fixture();
+        s.networks = (0..MAX_NETWORKS)
+            .map(|i| {
+                net(
+                    u64::MAX - i as u64,
+                    &format!("{i:032}"),
+                    Security::Wpa2Wpa3,
+                    "fixture-only-secret",
+                )
+            })
+            .collect();
+        let mut scan = RelayScan::new();
+        scan.begin();
+        scan.finish(
+            Ok((0..SCAN_ROWS).map(|i| seen(&format!("{i:032}"))).collect()),
+            Instant::now(),
+            u64::MAX,
+        )
+        .unwrap();
+        let records = relay_records(&s, &scan);
+        assert!(records.len() < 12 * 1024);
+        assert_eq!(
+            records.lines().filter(|l| l.starts_with("l\t")).count(),
+            MAX_NETWORKS
+        );
+        assert_eq!(
+            records.lines().filter(|l| l.starts_with("w\t")).count(),
+            SCAN_ROWS
+        );
+        assert!(records.starts_with(&format!("L\t7\t1\tready\t{}\t8\t60\n", u64::MAX)));
+        assert!(!records.contains("fixture-only-secret") && !records.contains("not-projected"));
+    }
+    fn empty_runtime() -> Runtime {
+        Runtime {
+            view: Snapshot::new(),
+            supplicant: None,
+            dhcp: None,
+            written: None,
+            passes: 0,
+            fails: 0,
+            routing: false,
+            last_check: None,
+            lost_since: None,
+            last_phy: None,
+            created: false,
+            losses: VecDeque::new(),
+            paused: None,
+        }
+    }
+    #[test]
+    fn cleanup_runs_on_load_and_partial_policy_errors_even_with_false_flag() {
+        let lease = parse_lease("ip=10.9.0.2\nmask=24\nrouter=10.9.0.1\ndns=10.9.0.1\n").unwrap();
+        let mut rt = empty_runtime();
+        assert!(install_online(&mut rt.routing, &lease, |_| Err(
+            "fixture partial failure".into()
+        ))
+        .is_err());
+        assert!(rt.routing, "partial install must be marked for cleanup");
+        for routing in [true, false] {
+            rt.routing = routing;
+            let mut cleaned = false;
+            fail_closed(&mut rt, "fixture configuration load error".into(), |r| {
+                cleaned = true;
+                r.routing = false;
+                r.view.online = false;
+                r.view.lease = None;
+            });
+            assert!(cleaned && !rt.routing && !rt.view.online);
+            assert_eq!(rt.view.state, State::Unavailable);
+        }
+        assert!(cleanup_script().contains(&format!("route flush table {TABLE}")));
+        for p in [PRIO_SOURCE, PRIO_MAIN, PRIO_ALL] {
+            assert!(cleanup_script().contains(&format!("priority {p}")));
+        }
+    }
+    #[test]
+    fn firewall_rehook_restores_dynamic_dns_and_ipv6() {
+        let lease = parse_lease("ip=10.9.0.2\nmask=24\nrouter=10.9.0.1\ndns=10.9.0.1\n").unwrap();
+        let script = firewall_restore_script(Some(&lease), true).unwrap();
+        for rule in ["-A OUUP_DNS", "-A OUUP_OUT", "-A OUUP_V6"] {
+            assert!(script.contains(rule));
+        }
+        assert!(script.contains(&format!("rule add priority {PRIO_ALL}")));
+        assert!(firewall_restore_script(None, true).is_err());
+        assert!(!firewall_restore_script(None, false)
+            .unwrap()
+            .contains("-A OUUP_DNS"));
     }
 
     #[test]

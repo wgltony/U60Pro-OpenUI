@@ -1,4 +1,6 @@
 use crate::process::BoundedCommand;
+mod admin_services;
+mod agent_log;
 mod at_cmd;
 mod auth;
 mod cache;
@@ -35,6 +37,8 @@ mod sim;
 mod sms;
 mod storage;
 mod system;
+mod tailscale;
+mod transition;
 mod ubus;
 mod uci_transaction;
 mod usb;
@@ -53,6 +57,11 @@ const DEFAULT_THREADS: usize = 4;
 const STARTUP_SCRIPT: &str = "/data/local/tmp/start_zte_agent.sh";
 
 fn main() {
+    // The start script pipes the agent's output through a second copy of itself.
+    if std::env::args().nth(1).as_deref() == Some("log-writer") {
+        agent_log::run_writer(agent_log::AGENT);
+        return;
+    }
     let threads: usize = std::env::var("ZTE_AGENT_THREADS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -91,14 +100,19 @@ fn main() {
         .arg("/data/local/tmp/start_ttl.sh")
         .bounded_output();
 
+    tailscale::start();
     wireguard::start();
     // Before the supervisor: an interrupted core update may have left its files or lock.
     clash_core::cleanup_on_start();
     clash::start();
     wifi_uplink::start();
+    admin_services::start();
     screen::start(state.clone());
 
+    usb::remember_boot_composition();
     usb::enforce_usb_mode_on_boot();
+    usb::start_usb_lan_enforcer();
+    wifi::start_name_guard();
 
     state.lan.recover();
     server::start(threads.clamp(1, 16), state);

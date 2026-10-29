@@ -447,9 +447,375 @@ pub fn wifi_set(_state: &AppState, body: &[u8]) -> (u16, Value) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Blocklist (kick)
+// ---------------------------------------------------------------------------
+
+/// The hotspot sections the firmware's MAC filter covers; guests only while enabled.
+const ACL_SECTIONS: [&str; 4] = ["main_2g", "main_5g", "guest_2g", "guest_5g"];
+const MAX_BLOCKED: usize = 32;
+/// Names of blocked devices, kept because a blocked device leaves the client list.
+const BLOCKED_NAMES: &str = "/data/local/tmp/openui-wifi-blocked.json";
+
+fn uci_get(key: &str) -> Option<String> {
+    Command::new("uci")
+        .args(["-q", "get", key])
+        .bounded_output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+pub fn valid_mac(mac: &str) -> bool {
+    mac.len() == 17
+        && mac
+            .split(':')
+            .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Blocked MACs (lowercase, sorted) from the main hotspots' deny lists.
+pub fn blocked_macs() -> Vec<String> {
+    let mut out: Vec<String> = ["main_2g", "main_5g"]
+        .iter()
+        .filter_map(|s| uci_get(&format!("wireless.{s}.denymaclist")))
+        .flat_map(|l| {
+            l.split_whitespace()
+                .map(str::to_lowercase)
+                .collect::<Vec<_>>()
+        })
+        .filter(|m| valid_mac(m))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+pub fn blocked_names() -> HashMap<String, String> {
+    std::fs::read(BLOCKED_NAMES)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_blocked_names(macs: &[String], name: Option<&str>) {
+    let mut names = blocked_names();
+    for mac in macs {
+        match name.filter(|n| !n.trim().is_empty()) {
+            Some(n) => names.insert(mac.clone(), n.chars().take(48).collect()),
+            None => names.remove(mac),
+        };
+    }
+    if let Ok(bytes) = serde_json::to_vec(&names) {
+        let _ = crate::storage::atomic_write(std::path::Path::new(BLOCKED_NAMES), &bytes);
+    }
+}
+
+/// Names too common to identify one device: matching them would block strangers.
+const GENERIC_NAMES: [&str; 8] = [
+    "iphone",
+    "ipad",
+    "android",
+    "localhost",
+    "unknown",
+    "galaxy",
+    "macbook",
+    "esp32",
+];
+
+/// The device name to match on, or `None` for a name too generic or short to trust.
+fn match_name(name: &str) -> Option<String> {
+    let n = name.trim().to_lowercase();
+    (n.chars().count() >= 4 && n != "-" && !GENERIC_NAMES.contains(&n.as_str())).then_some(n)
+}
+
+/// `mac` and every blocked MAC saved under the same (matchable) name: one device that
+/// changed its random MAC, unblocked together.
+fn macs_sharing_name(mac: &str, names: &HashMap<String, String>) -> Vec<String> {
+    let mut out = vec![mac.to_string()];
+    if let Some(wanted) = names.get(mac).and_then(|n| match_name(n)) {
+        out.extend(
+            names
+                .iter()
+                .filter(|(m, n)| {
+                    m.as_str() != mac && match_name(n).as_deref() == Some(wanted.as_str())
+                })
+                .map(|(m, _)| m.clone()),
+        );
+    }
+    out.sort();
+    out
+}
+
+/// Connected stations whose name is a blocked device's while their MAC is not blocked:
+/// phones with random MACs come back under a new one after a kick.
+fn stations_to_autoblock(
+    clients: &[Value],
+    blocked: &[String],
+    names: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let wanted: std::collections::HashSet<String> =
+        names.values().filter_map(|n| match_name(n)).collect();
+    clients
+        .iter()
+        .filter(|c| c["medium"] == "wifi")
+        .filter_map(|c| {
+            Some((
+                c["mac"].as_str()?.to_lowercase(),
+                c["hostname"].as_str()?.to_string(),
+            ))
+        })
+        .filter(|(mac, name)| {
+            valid_mac(mac)
+                && !blocked.contains(mac)
+                && match_name(name).is_some_and(|n| wanted.contains(&n))
+        })
+        .collect()
+}
+
+/// One writer at a time: the panel's kick and the name guard both rewrite the list.
+static BLOCK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Block (kick) or unblock a station through the firmware's own ACL path (`zwrt_wlan
+/// set` with the whole deny list): it saves the lists, updates hostapd's deny ACL and
+/// disconnects blocked stations, without restarting Wi-Fi. Unblocking also unblocks the
+/// other MACs saved under the same name, or the name guard would block it again.
+pub fn set_blocked(mac: &str, blocked: bool, name: Option<&str>) -> (u16, Value) {
+    let mac = mac.to_lowercase();
+    if !valid_mac(&mac) {
+        return (400, json!({"ok": false, "error": "Invalid MAC address"}));
+    }
+    let _lock = BLOCK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if uci_get("wireless.main_2g.macfilter").as_deref() == Some("allow") {
+        return (
+            409,
+            json!({"ok": false, "error": "Wi-Fi allowlist mode is on; blocking is unavailable"}),
+        );
+    }
+    let targets = if blocked {
+        vec![mac.clone()]
+    } else {
+        macs_sharing_name(&mac, &blocked_names())
+    };
+    let done = |list: &[String]| targets.iter().all(|t| list.contains(t) == blocked);
+    let mut list = blocked_macs();
+    if !done(&list) {
+        if blocked {
+            if list.len() >= MAX_BLOCKED {
+                return (409, json!({"ok": false, "error": "The blocklist is full"}));
+            }
+            list.push(mac.clone());
+            list.sort();
+        } else {
+            list.retain(|m| !targets.contains(m));
+        }
+        let mut body = serde_json::Map::new();
+        for s in ACL_SECTIONS {
+            if s.starts_with("main")
+                || uci_get(&format!("wireless.{s}.disabled")).as_deref() == Some("0")
+            {
+                body.insert(s.into(), json!({"macfilter": "deny", "denymaclist": list}));
+            }
+        }
+        if let Err(e) = ubus::call("zwrt_wlan", "set", Some(&Value::Object(body).to_string())) {
+            return (503, json!({"ok": false, "error": e}));
+        }
+        // The firmware applies it in the background; wait for the saved list.
+        for _ in 0..20 {
+            if done(&blocked_macs()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        if !done(&blocked_macs()) {
+            return (
+                500,
+                json!({"ok": false, "error": "The Wi-Fi blocklist did not change"}),
+            );
+        }
+    }
+    save_blocked_names(&targets, if blocked { name } else { None });
+    eprintln!(
+        "[wifi] {} {}{}",
+        if blocked { "blocked" } else { "unblocked" },
+        targets.join(" "),
+        name.map(|n| format!(" ({n})")).unwrap_or_default()
+    );
+    if blocked {
+        for ifname in ["wlan0", "wlan2"] {
+            let _ = Command::new("hostapd_cli")
+                .args([
+                    "-p",
+                    "/data/vendor/wifi/hostapd",
+                    "-i",
+                    ifname,
+                    "disassociate",
+                    &mac,
+                ])
+                .bounded_output();
+        }
+    }
+    (
+        200,
+        json!({"ok": true, "data": {"blocked": blocked_macs()}}),
+    )
+}
+
+/// The blocklist as the web page shows it: each MAC with the name it was blocked under.
+fn blocked_view() -> Value {
+    let names = blocked_names();
+    let list: Vec<Value> = blocked_macs()
+        .into_iter()
+        .map(|m| json!({"name": names.get(&m), "mac": m}))
+        .collect();
+    json!({
+        "blocked": list,
+        "allowlist": uci_get("wireless.main_2g.macfilter").as_deref() == Some("allow"),
+        "max": MAX_BLOCKED,
+    })
+}
+
+pub fn blocked_get() -> (u16, Value) {
+    (200, json!({"ok": true, "data": blocked_view()}))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BlockRequest {
+    mac: String,
+    blocked: bool,
+    /// The device's name when blocked: a later station under it is blocked too.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// `PUT /api/wifi/blocked`: the same block (kick) and unblock as the screen's.
+pub fn blocked_set(body: &[u8]) -> (u16, Value) {
+    let Ok(r) = serde_json::from_slice::<BlockRequest>(body) else {
+        return (400, json!({"ok": false, "error": "Invalid request"}));
+    };
+    let name = r
+        .name
+        .map(|n| n.chars().filter(|c| !c.is_control()).collect::<String>());
+    let (code, reply) = set_blocked(&r.mac, r.blocked, name.as_deref());
+    if code != 200 {
+        return (code, reply);
+    }
+    (200, json!({"ok": true, "data": blocked_view()}))
+}
+
+/// Every 5 s while a blocked device has a usable name: kick and block a station that
+/// connects under that name with a new MAC.
+pub fn start_name_guard() {
+    std::thread::spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        let names = blocked_names();
+        if !names.values().any(|n| match_name(n).is_some()) {
+            continue;
+        }
+        let clients = crate::network_ext::clients();
+        for (mac, name) in stations_to_autoblock(&clients, &blocked_macs(), &names) {
+            let (code, _) = set_blocked(&mac, true, Some(&name));
+            eprintln!("[wifi] blocked {mac} by its name \"{name}\": {code}");
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn web_block_requests_are_strict_and_reject_bad_macs() {
+        let r: BlockRequest =
+            serde_json::from_str(r#"{"mac":"AA:BB:CC:00:00:01","blocked":true,"name":"Pixel-8"}"#)
+                .unwrap();
+        assert!(r.blocked && r.name.as_deref() == Some("Pixel-8"));
+        assert!(serde_json::from_str::<BlockRequest>(
+            r#"{"mac":"aa:bb:cc:00:00:01","blocked":false}"#
+        )
+        .unwrap()
+        .name
+        .is_none());
+        for bad in [
+            r#"{"mac":"aa:bb:cc:00:00:01"}"#,
+            r#"{"mac":"aa:bb:cc:00:00:01","blocked":"yes"}"#,
+            r#"{"mac":"aa:bb:cc:00:00:01","blocked":true,"cmd":"x"}"#,
+        ] {
+            assert!(serde_json::from_str::<BlockRequest>(bad).is_err(), "{bad}");
+        }
+        // A bad MAC is refused before any uci or ubus call.
+        assert_eq!(
+            blocked_set(br#"{"mac":"aa:bb:cc:00:00:0g","blocked":true}"#).0,
+            400
+        );
+        assert_eq!(
+            blocked_set(br#"{"mac":"aa:bb:cc:00:00:01;reboot","blocked":true}"#).0,
+            400
+        );
+        assert_eq!(blocked_set(b"not json").0, 400);
+    }
+    #[test]
+    fn name_guard_matches_specific_names_only() {
+        let names = HashMap::from([
+            (
+                "02:11:22:33:44:56".to_string(),
+                "Alex-s-Galaxy-Fold".to_string(),
+            ),
+            ("aa:aa:aa:aa:aa:01".to_string(), "iPhone".to_string()),
+        ]);
+        let blocked = vec![
+            "02:11:22:33:44:56".to_string(),
+            "aa:aa:aa:aa:aa:01".to_string(),
+        ];
+        let clients = vec![
+            json!({"mac":"06:AA:BB:CC:DD:EF","medium":"wifi","hostname":"alex-s-galaxy-fold"}),
+            json!({"mac":"bb:bb:bb:bb:bb:01","medium":"wifi","hostname":"iPhone"}),
+            json!({"mac":"bb:bb:bb:bb:bb:02","medium":"usb-c","hostname":"Alex-s-Galaxy-Fold"}),
+            json!({"mac":"02:11:22:33:44:56","medium":"wifi","hostname":"Alex-s-Galaxy-Fold"}),
+            json!({"mac":"bb:bb:bb:bb:bb:03","medium":"wifi","hostname":null}),
+        ];
+        assert_eq!(
+            stations_to_autoblock(&clients, &blocked, &names),
+            vec![(
+                "06:aa:bb:cc:dd:ef".to_string(),
+                "alex-s-galaxy-fold".to_string()
+            )]
+        );
+        assert_eq!(match_name(" iPad "), None);
+        assert_eq!(match_name("abc"), None);
+    }
+
+    #[test]
+    fn unblocking_takes_every_mac_of_the_same_name() {
+        let names = HashMap::from([
+            (
+                "02:11:22:33:44:56".to_string(),
+                "Alex-s-Galaxy-Fold".to_string(),
+            ),
+            (
+                "06:aa:bb:cc:dd:ef".to_string(),
+                "ALEX-S-GALAXY-FOLD".to_string(),
+            ),
+            ("aa:aa:aa:aa:aa:01".to_string(), "iPhone".to_string()),
+            ("aa:aa:aa:aa:aa:02".to_string(), "iPhone".to_string()),
+        ]);
+        assert_eq!(
+            macs_sharing_name("02:11:22:33:44:56", &names),
+            vec![
+                "02:11:22:33:44:56".to_string(),
+                "06:aa:bb:cc:dd:ef".to_string()
+            ]
+        );
+        // Generic names are never grouped.
+        assert_eq!(
+            macs_sharing_name("aa:aa:aa:aa:aa:01", &names),
+            vec!["aa:aa:aa:aa:aa:01".to_string()]
+        );
+        assert_eq!(
+            macs_sharing_name("cc:cc:cc:cc:cc:01", &names),
+            vec!["cc:cc:cc:cc:cc:01".to_string()]
+        );
+    }
+
     fn config() -> WifiConfig {
         let mut wireless = HashMap::new();
         for (_, path) in WIFI_FIELDS {

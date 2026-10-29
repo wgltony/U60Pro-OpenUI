@@ -49,6 +49,18 @@ pub fn request(
     body: Option<&Value>,
     timeout: Duration,
 ) -> Result<(u16, Value), String> {
+    request_with_host(socket, method, path, body, timeout, "mihomo")
+}
+
+/// Fixed internal callers only; never pass a request-supplied host or path.
+pub(crate) fn request_with_host(
+    socket: &Path,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    timeout: Duration,
+    host: &str,
+) -> Result<(u16, Value), String> {
     let mut stream = UnixStream::connect(socket).map_err(|_| "Clash core is not running")?;
     stream
         .set_read_timeout(Some(timeout))
@@ -56,7 +68,7 @@ pub fn request(
         .map_err(|_| "Cannot use Clash controller")?;
     let body = body.map(|b| b.to_string()).unwrap_or_default();
     let request = format!(
-        "{method} {path} HTTP/1.0\r\nHost: mihomo\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        "{method} {path} HTTP/1.0\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
     stream

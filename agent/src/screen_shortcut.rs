@@ -52,7 +52,9 @@ impl Gesture {
         let duration = ms - start;
         let gap = self.released.map(|v| start - v);
         self.released = Some(ms);
-        if !(30..800).contains(&duration) || gap.is_some_and(|g| g < 80) {
+        // Real pmic_pwrkey traces include deliberate release gaps of 75–79 ms.
+        // Keep a bounce guard, but do not discard those ordinary fast presses.
+        if !(30..800).contains(&duration) || gap.is_some_and(|g| g < 40) {
             self.count = 0;
             return false;
         }
@@ -215,6 +217,29 @@ mod tests {
             }
             assert!(!press(&mut g, 3500, 100));
             assert!(!press(&mut g, 3850, 100));
+        }
+    }
+    #[test]
+    fn actual_fast_power_traces_are_shortcuts() {
+        // Two real four-press groups: the third press previously reset the count
+        // at a 75 ms / 79 ms release gap, despite normal 100–128 ms holds.
+        for trace in [
+            [(0, 109), (206, 112), (393, 104), (592, 120)],
+            [(0, 101), (181, 118), (378, 128), (606, 112)],
+        ] {
+            let mut g = Gesture::default();
+            for (i, (start, duration)) in trace.into_iter().enumerate() {
+                assert_eq!(press(&mut g, 1000 + start, duration), i == 3);
+            }
+        }
+    }
+    #[test]
+    fn release_bounce_boundary_remains_guarded() {
+        for gap in [0, 1, 39, 40, 75, 79, 80] {
+            let mut g = Gesture::default();
+            assert!(!press(&mut g, 1000, 100));
+            assert!(!press(&mut g, 1100 + gap, 100));
+            assert_eq!(g.count, if gap < 40 { 0 } else { 2 });
         }
     }
     #[test]

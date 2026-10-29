@@ -1082,7 +1082,8 @@ pub fn cleanup_on_start() {
 /// unless WireGuard is on too (the supervisor then keeps the core stopped). Without them
 /// the files are only swapped. The caller holds the Clash lock.
 fn start_settings() -> Option<clash::Settings> {
-    clash::enabled_settings().filter(|_| !wireguard::stored_enabled())
+    clash::enabled_settings()
+        .filter(|_| crate::tailscale::native_allowed() && !wireguard::stored_enabled())
 }
 /// Stops the core if it runs and starts it on the saved settings, so a replaced binary or
 /// geo data takes effect, then waits until it answers and stays up.
@@ -1170,6 +1171,7 @@ fn install(source_name: &str, version: String) -> Result<(), String> {
     if old.as_ref().is_some_and(|(o, _)| o.sha256 == sha256) {
         return Err("This core is already installed".into());
     }
+    let _transition = crate::transition::lock();
     let _guard = clash::lock();
     let settings = start_settings();
     let had_core = swap_in(core, previous, Path::new(PREVIOUS_NEW), aside, staged)
@@ -1264,6 +1266,7 @@ fn rollback() -> Result<(), String> {
     let state = load_state();
     let current = identity(core, &state);
     let (back, _) = identity(previous, &state).ok_or("No previous core to roll back to")?;
+    let _transition = crate::transition::lock();
     let _guard = clash::lock();
     let settings = start_settings();
     exchange(core, previous, swap).map_err(|_| CANNOT_INSTALL)?;
@@ -1363,6 +1366,7 @@ fn geodata_steps(via: &Via, new: &Path, home: &Path) -> Result<(), String> {
     step("installing", 0);
     let keep = Path::new(GEO_PREVIOUS);
     let _deploy = DeployLock::take()?;
+    let _transition = crate::transition::lock();
     let _guard = clash::lock();
     let settings = start_settings();
     let mut change = GeoChange::default();

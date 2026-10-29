@@ -824,6 +824,7 @@ fn apply(s: &Settings) -> Result<(), String> {
         }
         return Ok(());
     }
+    crate::tailscale::require_native_allowed()?;
     prepare(s)?;
     egress_script(&policy(s))
 }
@@ -832,6 +833,7 @@ fn apply(s: &Settings) -> Result<(), String> {
 /// supervisor's recovery; the core updater stops the core first so a replaced binary or
 /// geo data takes effect. The caller holds the lock.
 pub(crate) fn restart_locked(s: &Settings) -> Result<(), String> {
+    crate::tailscale::require_native_allowed()?;
     let result = prepare(s)
         .and_then(|_| egress_script(&EGRESS.hold()))
         .and_then(|_| egress_script(&policy(s)))
@@ -860,6 +862,23 @@ fn active_changed(old: &Settings, next: &Settings) -> bool {
 
 // ---------- WireGuard exclusivity ----------
 
+/// Caller holds transition then WireGuard lock. Persist off only after cleanup.
+pub(crate) fn disable_for_tailscale() -> Result<(), String> {
+    let _guard = LOCK.lock().unwrap();
+    let mut s = load()?;
+    let changed = s.enabled;
+    s.enabled = false;
+    apply(&s)?;
+    egress_script(&EGRESS.release())?;
+    if changed {
+        s.revision = s
+            .revision
+            .checked_add(1)
+            .ok_or("Configuration revision exhausted")?;
+        persist(&s)?;
+    }
+    Ok(())
+}
 pub(crate) struct Suspended(Settings);
 /// Whether Clash is saved as on. Read without the lock (atomic file replacement).
 pub(crate) fn stored_enabled() -> bool {
@@ -1088,6 +1107,11 @@ fn transact(
 }
 
 pub fn update(body: &[u8]) -> (u16, Value) {
+    let _transition = crate::transition::lock();
+    update_locked(body)
+}
+/// Caller holds the global transition lock, never either backend lock.
+pub(crate) fn update_locked(body: &[u8]) -> (u16, Value) {
     reply((|| -> Result<Value, String> {
         let u: Update = serde_json::from_slice(body).map_err(|_| "Invalid Clash request")?;
         let current = load()?;
@@ -1138,6 +1162,9 @@ pub fn update(body: &[u8]) -> (u16, Value) {
         let _guard = LOCK.lock().unwrap();
         let old = load()?;
         let (next, written) = edited(&old, u, fetched.as_ref())?;
+        if next.enabled {
+            crate::tailscale::ensure_down()?;
+        }
         let wg_on = next.enabled && wireguard::stored_enabled();
         if wg_on && !takeover {
             return Err("WireGuard is on; turn it off or confirm switching to Clash".into());
@@ -1216,6 +1243,7 @@ fn refresh_subscription(id: u64) -> Result<(), String> {
             return Err(e);
         }
     };
+    let _transition = crate::transition::lock();
     let _guard = LOCK.lock().unwrap();
     let s = load()?;
     if !s.subscriptions.iter().any(|q| q.id == id && q.url == p.url) {
@@ -1408,9 +1436,12 @@ pub fn start() {
         loop {
             let first = tick == 0;
             {
+                let _transition = crate::transition::lock();
                 let _guard = LOCK.lock().unwrap();
                 if let Ok(s) = load() {
-                    if s.enabled && wireguard::stored_enabled() {
+                    if !crate::tailscale::native_allowed() {
+                        stop_core();
+                    } else if s.enabled && wireguard::stored_enabled() {
                         stop_core();
                         *ERROR.lock().unwrap() = Some(
                             "WireGuard is also on; Clash stays off until one is turned off".into(),

@@ -59,7 +59,10 @@ pub enum Job {
         node: usize,
     },
     /// `delay <generation> <group>`: tests every member of the group.
-    Delay { generation: u64, group: usize },
+    Delay {
+        generation: u64,
+        group: usize,
+    },
     /// `core check`, `core update <tag>`, `core rollback`, `core geodata`.
     Core(Value),
     /// `diag`: starts the one-tap diagnosis.
@@ -67,9 +70,17 @@ pub enum Job {
     /// `esim scan`, `esim enable <generation> <index>`, `esim reboot`.
     Esim(Esim),
     /// `uplink <revision> on|off`: the Wi-Fi uplink switch.
-    Uplink { revision: u64, enabled: bool },
+    Uplink {
+        revision: u64,
+        enabled: bool,
+    },
     /// `uplink login`: ten minutes of login mode for a network that wants a web login.
     UplinkLogin,
+    /// Strict, credential-redacted daily relay actions; never arbitrary JSON or commands.
+    Relay(crate::wifi_uplink::RelayAction),
+    Tailscale(Tailscale),
+    /// Shared, strict native-service controller; no shell text.
+    Admin(crate::admin_services::Update),
     /// Pocket OS toolbox actions: stock UI switch, Wi-Fi/USB/Network/TTL/Power/System controls.
     Tool(Tool),
 }
@@ -83,6 +94,12 @@ pub enum Tool {
     WifiToggle { band: String, enabled: bool },
     /// Switch USB mode (`rndis`, `ecm`, or the experimental `ncm`).
     UsbMode { mode: String },
+    /// Set both bands' transmit power percent (`20`, `50`, `80` or `100`).
+    WifiPower { percent: u8 },
+    /// Kick a Wi-Fi station and block it from reconnecting (`true`), or unblock it.
+    WifiBlock { mac: String, blocked: bool },
+    /// Share the LAN over the active USB network function (`true`) or stop (`false`).
+    UsbLan { enabled: bool },
     /// Switch the preferred network mode to one of the firmware's `net_select` values.
     NetMode { mode: String },
     /// Set IPv4/IPv6 hop limit / TTL (`0` clears TTL mangling, `64`/`65`/`128` applies it).
@@ -108,6 +125,115 @@ pub enum Esim {
     },
     /// Only while a switch waits for a restart.
     Reboot,
+}
+
+/// Fixed owner-local actions; IDs and assigned names never come from command text.
+#[derive(Debug, PartialEq)]
+pub enum Tailscale {
+    Connect(u64),
+    Disconnect(u64),
+    Clear(u64),
+    Exit {
+        revision: u64,
+        generation: u64,
+        index: usize,
+    },
+}
+
+/// Only the already-sanitized, eligible backend snapshot is accepted here. Bound both
+/// the projection and the index namespace; hash IDs too, so renames/reordering/removal
+/// invalidate an open choice even when configuration revision did not change.
+fn ts_exits(v: &Value) -> Vec<&Value> {
+    v["exit_nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(32)
+        .collect()
+}
+fn ts_generation(v: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    v["revision"].as_u64().hash(&mut h);
+    for p in ts_exits(v) {
+        p["id"].as_str().hash(&mut h);
+        p["name"].as_str().hash(&mut h);
+    }
+    h.finish()
+}
+fn ts_name(v: &Value) -> String {
+    // Defense in depth: never project a full tailnet DNS name, even in fixtures.
+    text_bytes(v.as_str().unwrap_or("").split('.').next().unwrap_or(""), 48)
+}
+/// T revision generation enabled state error selected-name stamp; t index selected name.
+/// No stable IDs, IPs, identity, auth URL or backend error strings cross this boundary.
+pub fn tailscale_records(v: &Value, stamp: u64) -> String {
+    // Only the daemon's known states; anything else is shown as unavailable.
+    let state = v["backend_state"]
+        .as_str()
+        .filter(|s| {
+            matches!(
+                *s,
+                "Running" | "Stopped" | "Starting" | "NeedsLogin" | "NeedsMachineAuth"
+            )
+        })
+        .unwrap_or("Unavailable");
+    let exits = ts_exits(v);
+    let selected = exits.iter().find(|p| p["id"] == v["selected_exit_node"]);
+    let name = selected.map(|p| ts_name(&p["name"])).unwrap_or_else(|| {
+        if v["selected_exit_node"].as_str().unwrap_or("").is_empty() {
+            "-".into()
+        } else {
+            "Unavailable".into()
+        }
+    });
+    let mut out = format!(
+        "T\t{}\t{}\t{}\t{state}\t{}\t{name}\t{stamp}\n",
+        v["revision"].as_u64().unwrap_or(0),
+        ts_generation(v),
+        u8::from(v["enabled"] == true),
+        u8::from(v["error"].is_string())
+    );
+    for (i, p) in exits.iter().enumerate() {
+        out.push_str(&format!(
+            "t\t{i}\t{}\t{}\n",
+            u8::from(p["id"] == v["selected_exit_node"]),
+            ts_name(&p["name"])
+        ));
+    }
+    out
+}
+/// Resolve against a *fresh* get() under the shared transition lock, then call
+/// update_locked before dropping it. The backend rechecks revision and eligibility.
+pub fn tailscale_body(v: &Value, action: &Tailscale) -> Result<Value, &'static str> {
+    let (revision, action_name, exit) = match *action {
+        Tailscale::Connect(r) => (r, "connect", None),
+        Tailscale::Disconnect(r) => (r, "disconnect", None),
+        Tailscale::Clear(r) => (r, "select_exit", Some(String::new())),
+        Tailscale::Exit {
+            revision,
+            generation,
+            index,
+        } => {
+            if generation != ts_generation(v) {
+                return Err("Stale Tailscale exit list. Reload.");
+            }
+            let exits = ts_exits(v);
+            let id = exits
+                .get(index)
+                .and_then(|p| p["id"].as_str())
+                .ok_or("Invalid Tailscale exit index")?;
+            (revision, "select_exit", Some(id.to_owned()))
+        }
+    };
+    if v["revision"].as_u64() != Some(revision) {
+        return Err("Configuration changed; reload Tailscale.");
+    }
+    let mut b = json!({"action":action_name,"expected_revision":revision});
+    if let Some(id) = exit {
+        b["exit_node"] = json!(id);
+    }
+    Ok(b)
 }
 
 fn number(word: &str, error: &'static str) -> Result<u64, &'static str> {
@@ -140,9 +266,156 @@ fn devices(list: &str) -> Result<Vec<Value>, &'static str> {
     Ok(devices)
 }
 
+/// Relay grammar is deliberately smaller than the HTTP API; fields are decoded before
+/// queuing and never reflected in errors. The request's Debug redacts its password.
+fn relay(words: &[&str]) -> Result<crate::wifi_uplink::RelayAction, &'static str> {
+    use crate::wifi_uplink::{RelayAction as A, RelayPassword, Security};
+    let num = |s: &str| {
+        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("Invalid relay number");
+        }
+        s.parse::<u64>().map_err(|_| "Invalid relay number")
+    };
+    let id = |s: &str| {
+        num(s).and_then(|v| {
+            if v > 0 {
+                Ok(v)
+            } else {
+                Err("Invalid relay ID")
+            }
+        })
+    };
+    let decode = |s: &str, max: usize| -> Result<String, &'static str> {
+        if s.is_empty()
+            || s.len() > max * 2
+            || !s.len().is_multiple_of(2)
+            || !s.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err("Invalid relay field");
+        }
+        let bytes = (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect();
+        String::from_utf8(bytes).map_err(|_| "Invalid relay field")
+    };
+    let password = |s: &str| -> Result<RelayPassword, &'static str> {
+        if s == "-" {
+            return Ok(RelayPassword(None));
+        }
+        let p = decode(s, 64)?;
+        if !p.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+            return Err("Invalid relay password");
+        }
+        Ok(RelayPassword(Some(p)))
+    };
+    match words {
+        ["urelay", "scan"] => Ok(A::Scan),
+        ["urelay", "save", rev, saved, ssid, security, hidden @ ("0" | "1"), pass] => {
+            let ssid = decode(ssid, 32)?;
+            if ssid.chars().any(char::is_control) {
+                return Err("Invalid relay SSID");
+            }
+            let security = match *security {
+                "open" => Security::Open,
+                "wpa2" => Security::Wpa2,
+                "wpa3" => Security::Wpa3,
+                "wpa2_wpa3" => Security::Wpa2Wpa3,
+                _ => return Err("Invalid relay security"),
+            };
+            if security == Security::Open && *pass != "-" {
+                return Err("Open network needs no password");
+            }
+            Ok(A::Save {
+                revision: num(rev)?,
+                id: num(saved)?,
+                ssid,
+                security,
+                hidden: *hidden == "1",
+                password: password(pass)?,
+            })
+        }
+        ["urelay", "save-scan", rev, generation, row, saved, pass] => {
+            let row = num(row)?;
+            if row >= 60 {
+                return Err("Invalid relay scan index");
+            }
+            Ok(A::SaveScan {
+                revision: num(rev)?,
+                generation: num(generation)?,
+                index: row as usize,
+                id: num(saved)?,
+                password: password(pass)?,
+            })
+        }
+        ["urelay", "connect", rev, saved] => Ok(A::Connect {
+            revision: num(rev)?,
+            id: id(saved)?,
+        }),
+        ["urelay", "delete", rev, saved] => Ok(A::Delete {
+            revision: num(rev)?,
+            id: id(saved)?,
+        }),
+        ["urelay", "reconnect", rev] => Ok(A::Reconnect {
+            revision: num(rev)?,
+        }),
+        ["urelay", "disconnect", rev] => Ok(A::Disconnect {
+            revision: num(rev)?,
+        }),
+        _ => Err("Invalid relay action"),
+    }
+}
+
 /// Parses one line; every mutation carries the revision the panel displayed, except a
 /// subscription refresh (not revisioned) and node work (tied to the list generation).
 pub fn parse(line: &str) -> Result<Request, &'static str> {
+    // Bound before allocation. Existing non-relay verbs retain their legacy grammar.
+    if line.trim_start().starts_with("admin") {
+        let payload = line.strip_suffix('\n').unwrap_or(line);
+        if payload.len() > 96
+            || !payload.is_ascii()
+            || payload.bytes().any(|b| b.is_ascii_control())
+            || payload.trim() != payload
+        {
+            return Err("Invalid admin request");
+        }
+        let words: Vec<&str> = payload.split(' ').collect();
+        return match words.as_slice() {
+            ["admin", rev, service @ ("adb" | "ssh"), action @ ("runtime" | "boot"), enabled @ ("0" | "1")] =>
+            {
+                use crate::admin_services::{Action, Service, Update};
+                if rev.is_empty() || !rev.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err("Invalid revision");
+                }
+                Ok(Request::Job(Job::Admin(Update {
+                    revision: number(rev, "Invalid revision")?,
+                    service: if *service == "adb" {
+                        Service::Adb
+                    } else {
+                        Service::Ssh
+                    },
+                    action: if *action == "runtime" {
+                        Action::Runtime
+                    } else {
+                        Action::Boot
+                    },
+                    enabled: *enabled == "1",
+                })))
+            }
+            _ => Err("Invalid admin request"),
+        };
+    }
+    if line.trim_start().starts_with("urelay") {
+        let payload = line.strip_suffix('\n').unwrap_or(line);
+        if payload.len() > 320
+            || !payload.is_ascii()
+            || payload.bytes().any(|b| b.is_ascii_control())
+            || payload.trim() != payload
+        {
+            return Err("Invalid relay request");
+        }
+        return relay(&payload.split(' ').collect::<Vec<_>>()).map(|a| Request::Job(Job::Relay(a)));
+    }
     let words: Vec<&str> = line.split_whitespace().collect();
     let job = |j: Job| Ok(Request::Job(j));
     let revision = |w: &str| number(w, "Invalid revision");
@@ -176,12 +449,14 @@ pub fn parse(line: &str) -> Result<Request, &'static str> {
                 json!({"expected_revision":rev,"devices":devices(list)?}),
             ))
         }
-        ["backend", rev, target @ ("off" | "wireguard" | "clash")] => job(Job::Backend(
-            json!({"backend":target,"expected_revision":revision(rev)?}),
-        )),
-        ["backend", rev, "off", active @ ("wireguard" | "clash")] => job(Job::Backend(
-            json!({"backend":"off","expected_revision":revision(rev)?,"active":active}),
-        )),
+        ["backend", rev, target @ ("off" | "wireguard" | "clash" | "tailscale")] => job(
+            Job::Backend(json!({"backend":target,"expected_revision":revision(rev)?})),
+        ),
+        ["backend", rev, "off", active @ ("wireguard" | "clash" | "tailscale")] => {
+            job(Job::Backend(
+                json!({"backend":"off","expected_revision":revision(rev)?,"active":active}),
+            ))
+        }
         ["cmode", rev, mode @ ("rule" | "global" | "direct")] => job(Job::Clash(
             json!({"expected_revision":revision(rev)?,"proxy_mode":mode}),
         )),
@@ -223,6 +498,20 @@ pub fn parse(line: &str) -> Result<Request, &'static str> {
             generation: generation(g)?,
             index: index(i)?,
         })),
+        ["ts", rev, "connect"] => job(Job::Tailscale(Tailscale::Connect(revision(rev)?))),
+        ["ts", rev, "disconnect"] => job(Job::Tailscale(Tailscale::Disconnect(revision(rev)?))),
+        ["ts", rev, "clear"] => job(Job::Tailscale(Tailscale::Clear(revision(rev)?))),
+        ["ts", rev, "exit", g, i] => job(Job::Tailscale(Tailscale::Exit {
+            revision: revision(rev)?,
+            generation: generation(g)?,
+            index: index(i).and_then(|i| {
+                if i < 32 {
+                    Ok(i)
+                } else {
+                    Err("Invalid Tailscale exit index")
+                }
+            })?,
+        })),
         ["uplink", "login"] => job(Job::UplinkLogin),
         ["uplink", rev, value @ ("on" | "off")] => job(Job::Uplink {
             revision: revision(rev)?,
@@ -237,6 +526,23 @@ pub fn parse(line: &str) -> Result<Request, &'static str> {
         }
         ["tool", "usb_mode", mode @ ("rndis" | "ecm" | "ncm")] => job(Job::Tool(Tool::UsbMode {
             mode: (*mode).into(),
+        })),
+        ["tool", "wifi_power", v @ ("20" | "50" | "80" | "100")] => {
+            job(Job::Tool(Tool::WifiPower {
+                percent: v.parse().unwrap_or(100),
+            }))
+        }
+        ["tool", verb @ ("wifi_block" | "wifi_unblock"), mac] => {
+            if !crate::wifi::valid_mac(mac) {
+                return Err("Invalid MAC address");
+            }
+            job(Job::Tool(Tool::WifiBlock {
+                mac: mac.to_lowercase(),
+                blocked: *verb == "wifi_block",
+            }))
+        }
+        ["tool", "usb_lan", value @ ("0" | "1")] => job(Job::Tool(Tool::UsbLan {
+            enabled: *value == "1",
         })),
         ["tool", "net_mode", mode] => {
             if !crate::cell::NETWORK_MODES.iter().any(|(m, _)| m == mode) {
@@ -270,6 +576,23 @@ pub fn parse(line: &str) -> Result<Request, &'static str> {
         [_, _, _, _] | [_, _, _] | [_, _] | [_] => Err("Unsupported action"),
         _ => Err("Invalid action"),
     }
+}
+
+/// A v1: exactly twelve fields; no record when controller truth is unavailable.
+pub fn admin_record(s: &crate::admin_services::Snapshot) -> String {
+    format!(
+        "A\t1\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        s.revision,
+        s.stamp,
+        u8::from(s.busy),
+        u8::from(s.adb_running),
+        u8::from(s.adb_exposed),
+        u8::from(s.adb_boot),
+        u8::from(s.ssh_running),
+        u8::from(s.ssh_boot),
+        u8::from(s.adb_available),
+        u8::from(s.ssh_available)
+    )
 }
 
 /// Text for one tab-separated field: no control characters (tabs and newlines would
@@ -338,7 +661,7 @@ pub fn reason_code(reason: &Value) -> &'static str {
         "other"
     }
 }
-/// `B active conflict` then, for WireGuard and Clash: revision, ready, reason, error.
+/// `B active conflict` then WG, Clash and (when present) TS: revision, ready, reason, error.
 pub fn backend_record(v: &Value) -> String {
     let side = |id: &str| {
         let b = v["backends"]
@@ -355,10 +678,18 @@ pub fn backend_record(v: &Value) -> String {
     };
     let active = v["active"]
         .as_str()
-        .filter(|a| matches!(*a, "wireguard" | "clash"))
+        .filter(|a| matches!(*a, "wireguard" | "clash" | "tailscale"))
         .unwrap_or("off");
+    let extra = if v["backends"]
+        .as_array()
+        .is_some_and(|a| a.iter().any(|b| b["id"] == "tailscale"))
+    {
+        format!("\t{}", side("tailscale"))
+    } else {
+        String::new()
+    };
     format!(
-        "B\t{active}\t{}\t{}\t{}\n",
+        "B\t{active}\t{}\t{}\t{}{extra}\n",
         u8::from(v["conflict"] == true),
         side("wireguard"),
         side("clash")
@@ -610,7 +941,7 @@ pub fn diag_records(v: &Value) -> String {
     }
     out
 }
-/// `H\trssi\trsrp\trsrq\tsinr\tradio\tband\tnet_select\tlte_bands\tnr_bands\tpci\tkbps_down\tkbps_up\tcpu_pct\tmem_pct\ttemp_mc\tbloat_cnt\twifi_2g_on\twifi_5g_on\twifi_clients\twifi_ssid\tusb_mode\tusb_adb\tttl_val\tchg_enabled\tchg_limit_on\tchg_max\tchg_stop\tchg_start\tbatt_mv\tbatt_ma\tbatt_health`
+/// `H\trssi\trsrp\trsrq\tsinr\tradio\tband\tnet_select\tlte_bands\tnr_bands\tpci\tkbps_down\tkbps_up\tcpu_pct\tmem_pct\ttemp_mc\tbloat_cnt\twifi_2g_on\twifi_5g_on\twifi_clients\twifi_ssid\tusb_mode\tusb_adb\tttl_val\tchg_enabled\tchg_limit_on\tchg_max\tchg_stop\tchg_start\tbatt_mv\tbatt_ma\tbatt_health\tusb_lan_on\tusb_lan_state\tusb_lan_iface\twifi_pct_2g\twifi_pct_5g\twifi_dbm_2g\twifi_dbm_5g`
 /// Extended Pocket OS telemetry record for Signal, Wi-Fi, Power, Toolbox, and System subpages.
 pub fn toolbox_record(v: &Value) -> String {
     let i = |k: &str| v[k].as_i64().unwrap_or(0);
@@ -619,7 +950,7 @@ pub fn toolbox_record(v: &Value) -> String {
     let w = |k: &str, max: usize| word(v[k].as_str().unwrap_or(""), max);
     let t = |k: &str, max: usize| text_bytes(v[k].as_str().unwrap_or(""), max);
     format!(
-        "H\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        "H\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
         i("rssi"),
         i("rsrp"),
         i("rsrq"),
@@ -651,7 +982,50 @@ pub fn toolbox_record(v: &Value) -> String {
         u("batt_mv"),
         i("batt_ma"),
         w("batt_health", 16),
+        b("usb_lan_on"),
+        u("usb_lan_state"),
+        w("usb_lan_iface", 16),
+        u("wifi_pct_2g"),
+        u("wifi_pct_5g"),
+        u("wifi_dbm_2g"),
+        u("wifi_dbm_5g"),
     )
+}
+
+/// `I\tmac\tband\tsignal\tsecs\tip\tname` for each Wi-Fi station (band 2 or 5, signal
+/// dBm or 0), strongest first, at most 16; then `i\tmac\tname` for each blocked MAC.
+pub fn wifi_records(
+    clients: &[Value],
+    blocked: &[String],
+    names: &std::collections::HashMap<String, String>,
+) -> String {
+    let mut out = String::new();
+    let mut wifi: Vec<&Value> = clients
+        .iter()
+        .filter(|c| c["medium"] == "wifi")
+        .filter(|c| c["mac"].as_str().is_some_and(crate::wifi::valid_mac))
+        .collect();
+    wifi.sort_by_key(|c| std::cmp::Reverse(c["signal_dbm"].as_i64().unwrap_or(-200)));
+    for c in wifi.into_iter().take(16) {
+        out.push_str(&format!(
+            "I\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            c["mac"].as_str().unwrap_or("").to_lowercase(),
+            if c["wifi_band"] == "5 GHz" { 5 } else { 2 },
+            c["signal_dbm"].as_i64().unwrap_or(0),
+            c["connected_secs"].as_u64().unwrap_or(0),
+            word(c["ip"].as_str().unwrap_or(""), 15),
+            text_bytes(c["hostname"].as_str().unwrap_or(""), 48),
+        ));
+    }
+    for m in blocked
+        .iter()
+        .filter(|m| crate::wifi::valid_mac(m))
+        .take(32)
+    {
+        let name = names.get(m).map(String::as_str).unwrap_or("");
+        out.push_str(&format!("i\t{}\t{}\n", m, text_bytes(name, 48)));
+    }
+    out
 }
 
 /// The status reply: fixed records, then device rows while they fit, then the tail.
@@ -855,6 +1229,114 @@ mod tests {
             Ok(Request::Job(j)) => j,
             other => panic!("{line}: {other:?}"),
         }
+    }
+    #[test]
+    fn relay_parser_is_bounded_typed_and_password_debug_redacted() {
+        use crate::wifi_uplink::{RelayAction as A, RelayPassword, Security};
+        assert_eq!(
+            parse("urelay scan\n"),
+            Ok(Request::Job(Job::Relay(A::Scan)))
+        );
+        for line in [
+            "urelay connect 7 1",
+            "urelay reconnect 7",
+            "urelay disconnect 7",
+            "urelay delete 7 1",
+            "urelay save-scan 7 2 59 0 -",
+        ] {
+            assert!(matches!(parse(line), Ok(Request::Job(Job::Relay(_)))));
+        }
+        let request = parse("urelay save 7 1 436166c3a920 wpa2_wpa3 1 6162636465666768").unwrap();
+        assert!(!format!("{request:?}").contains("abcdefgh"));
+        assert!(!format!("{request:?}").contains("6162636465666768"));
+        assert_eq!(
+            request,
+            Request::Job(Job::Relay(A::Save {
+                revision: 7,
+                id: 1,
+                ssid: "Café ".into(),
+                security: Security::Wpa2Wpa3,
+                hidden: true,
+                password: RelayPassword(Some("abcdefgh".into()))
+            }))
+        );
+        assert!(parse("urelay save 7 1 61 wpa2 0 -").is_ok());
+        let largest = format!(
+            "urelay save {} {} {} wpa2_wpa3 1 {}",
+            u64::MAX,
+            u64::MAX,
+            "61".repeat(32),
+            "61".repeat(64)
+        );
+        assert!(largest.len() <= 320 && parse(&largest).is_ok());
+        for bad in [
+            "urelay scan now",
+            "urelay connect 1 0",
+            "urelay delete 1 0",
+            "urelay reconnect +1",
+            "urelay disconnect -1",
+            "urelay scan\nurelay reconnect 7",
+            "urelay\tscan",
+            " urelay scan",
+            "urelay  scan",
+            "urelay scan ",
+            "urelay save 1 0 61 unsupported 0 -",
+            "urelay save 1 0 61 open 2 -",
+            "urelay save 1 0 6 open 0 -",
+            "urelay save 1 0 gg open 0 -",
+            "urelay save 1 0 ff open 0 -",
+            "urelay save 1 0 0a open 0 -",
+            "urelay save 1 0 61 open 0 6162636465666768",
+            "urelay save 1 0 61 wpa2 0 00",
+            "urelay save-scan 1 1 60 0 -",
+            "urelay scan\r\n",
+            "urelay connect 18446744073709551616 1",
+            "urelay {}",
+            "urelay exec shell",
+        ] {
+            assert!(parse(bad).is_err());
+        }
+        assert!(parse(&format!("urelay save 1 0 {} open 0 -", "61".repeat(33))).is_err());
+        assert!(parse(&format!("urelay save 1 0 61 wpa2 0 {}", "61".repeat(65))).is_err());
+        assert!(parse(&format!("urelay {}", "x".repeat(321))).is_err());
+    }
+    #[test]
+    fn max_relay_catalog_keeps_fixed_records_inside_status_capacity() {
+        // Worst-width fields for all 8 saved and 60 scan rows, plus generously bounded
+        // other fixed records. Device rows alone are expendable, never relay records.
+        let mut relay = format!(
+            "L\t{}\t{}\tready\t{}\t8\t60\n",
+            u64::MAX,
+            u64::MAX,
+            u64::MAX
+        );
+        for i in 0..8 {
+            relay.push_str(&format!(
+                "l\t{}\t{}\twpa2_wpa3\t1\t1\t{}\n",
+                u64::MAX - i,
+                u8::from(i == 0),
+                "61".repeat(32)
+            ));
+        }
+        for i in 0..60 {
+            relay.push_str(&format!(
+                "w\t{i}\tunsupported\t{}\t{}\t{}\n",
+                i32::MIN,
+                u32::MAX,
+                "61".repeat(32)
+            ));
+        }
+        let others = "S\tbounded-other-fixed-records\n".repeat(512); // >14KiB, above existing fixed catalogs
+        let devices = vec!["D\tdevice\t1\t1\tname\n".to_owned(); 4000];
+        let snapshot = status(&[&others, &relay], &devices, "J 0 1 1 0 1\n.\n");
+        assert!(snapshot.len() <= STATUS_CAP && snapshot.len() < 48 * 1024);
+        assert!(snapshot.contains(&relay));
+        assert_eq!(snapshot.lines().filter(|l| l.starts_with("l\t")).count(), 8);
+        assert_eq!(
+            snapshot.lines().filter(|l| l.starts_with("w\t")).count(),
+            60
+        );
+        assert!(snapshot.ends_with("J 0 1 1 0 1\n.\n"));
     }
     #[test]
     fn verbs_are_narrow_and_carry_revisions() {
@@ -1380,6 +1862,43 @@ mod tests {
             Ok(Tool::UsbMode { mode: "ncm".into() })
         );
         assert!(tool("tool usb_mode mtp").is_err());
+        assert_eq!(tool("tool usb_lan 0"), Ok(Tool::UsbLan { enabled: false }));
+        assert_eq!(tool("tool usb_lan 1"), Ok(Tool::UsbLan { enabled: true }));
+        assert!(tool("tool usb_lan on").is_err());
+        assert_eq!(
+            tool("tool wifi_power 50"),
+            Ok(Tool::WifiPower { percent: 50 })
+        );
+        assert!(tool("tool wifi_power 55").is_err() && tool("tool wifi_power 0").is_err());
+        assert_eq!(
+            tool("tool wifi_block AA:bb:CC:00:11:22"),
+            Ok(Tool::WifiBlock {
+                mac: "aa:bb:cc:00:11:22".into(),
+                blocked: true
+            })
+        );
+        assert_eq!(
+            tool("tool wifi_unblock aa:bb:cc:00:11:22"),
+            Ok(Tool::WifiBlock {
+                mac: "aa:bb:cc:00:11:22".into(),
+                blocked: false
+            })
+        );
+        assert!(tool("tool wifi_block aa:bb:cc:00:11").is_err());
+        assert!(tool("tool wifi_block aa:bb:cc:00:11:2g").is_err());
+        let clients = vec![
+            json!({"mac":"aa:00:00:00:00:01","medium":"wifi","wifi_band":"5 GHz","signal_dbm":-60,"connected_secs":125,"ip":"192.168.0.5","hostname":"iPhone\tX"}),
+            json!({"mac":"aa:00:00:00:00:02","medium":"wifi","wifi_band":"2.4 GHz","signal_dbm":-40,"connected_secs":9,"ip":null,"hostname":null}),
+            json!({"mac":"aa:00:00:00:00:03","medium":"usb-c","ip":"192.168.0.9"}),
+        ];
+        let names = std::collections::HashMap::from([(
+            "bb:00:00:00:00:01".to_string(),
+            "Old TV".to_string(),
+        )]);
+        assert_eq!(
+            wifi_records(&clients, &["bb:00:00:00:00:01".into(), "bad".into()], &names),
+            "I\taa:00:00:00:00:02\t2\t-40\t9\t-\t-\nI\taa:00:00:00:00:01\t5\t-60\t125\t192.168.0.5\tiPhoneX\ni\tbb:00:00:00:00:01\tOld TV\n"
+        );
         assert_eq!(
             tool("tool net_mode Only_5G"),
             Ok(Tool::NetMode {
@@ -1432,11 +1951,145 @@ mod tests {
             "chg_start": 70,
             "batt_mv": 4120,
             "batt_ma": 850,
-            "batt_health": "Good"
+            "batt_health": "Good",
+            "usb_lan_on": true,
+            "usb_lan_state": 1,
+            "usb_lan_iface": "rndis0",
+            "wifi_pct_2g": 100,
+            "wifi_pct_5g": 50,
+            "wifi_dbm_2g": 19,
+            "wifi_dbm_5g": 15
         }));
         assert_eq!(
             h,
-            "H\t-65\t-92\t-10\t18\tNR5G-SA\tN78\t5g_sa_nsa\t1,3,8\t41,78\t105\t125000\t32000\t14\t42\t38500\t3\t1\t1\t5\tZTE-U60Pro\trndis\t1\t64\t1\t1\t80\t80\t70\t4120\t850\tGood\n"
+            "H\t-65\t-92\t-10\t18\tNR5G-SA\tN78\t5g_sa_nsa\t1,3,8\t41,78\t105\t125000\t32000\t14\t42\t38500\t3\t1\t1\t5\tZTE-U60Pro\trndis\t1\t64\t1\t1\t80\t80\t70\t4120\t850\tGood\t1\t1\trndis0\t100\t50\t19\t15\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod admin_tests {
+    use super::*;
+    use crate::admin_services::{Action, Service, Snapshot, Update};
+    #[test]
+    fn strict_admin_grammar_and_versioned_record() {
+        assert_eq!(
+            parse("admin 0 adb runtime 0"),
+            Ok(Request::Job(Job::Admin(Update {
+                revision: 0,
+                service: Service::Adb,
+                action: Action::Runtime,
+                enabled: false,
+            })))
+        );
+        assert!(parse("admin 9007199254740991 ssh boot 1\n").is_ok());
+        for bad in [
+            "admin -1 adb runtime 0",
+            "admin +0 adb runtime 0",
+            "admin 0 adb runtime true",
+            "admin 0 dropbear boot 1",
+            "admin 0 ssh enable 1",
+            "admin  0 ssh boot 1",
+            " admin 0 ssh boot 1",
+            "admin\t0 ssh boot 1",
+            "admin 0 ssh boot 1 ",
+            "admin 0 ssh boot 1\r\n",
+            "admin 0 ssh boot 1 extra",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        let s = Snapshot {
+            revision: 0,
+            stamp: 123,
+            busy: false,
+            adb_running: true,
+            adb_exposed: true,
+            adb_boot: false,
+            ssh_running: true,
+            ssh_boot: true,
+            adb_available: true,
+            ssh_available: false,
+        };
+        let record = admin_record(&s);
+        assert_eq!(record, "A\t1\t0\t123\t0\t1\t1\t0\t1\t1\t1\t0\n");
+        assert_eq!(record.trim_end().split('\t').count(), 12);
+    }
+}
+
+#[cfg(test)]
+mod tailscale_tests {
+    use super::*;
+    fn snapshot() -> Value {
+        json!({"revision":7,"enabled":true,"backend_state":"Running","error":null,
+            "selected_exit_node":"nSecret1","exit_nodes":[{"id":"nSecret1","name":"us-oracle-a1.tailnet.ts.net"},
+            {"id":"nSecret2","name":"hk-exit\t\n"}],"AuthURL":"secret-url","self":{"id":"identity"}})
+    }
+    #[test]
+    fn redacted_bounded_projection_and_revisioned_indices() {
+        let v = snapshot();
+        let r = tailscale_records(&v, 123);
+        assert!(r.contains("\tus-oracle-a1\t123\n"));
+        for secret in ["nSecret", "tailnet", "secret-url", "identity"] {
+            assert!(!r.contains(secret));
+        }
+        assert!(r.ends_with("t\t1\t0\thk-exit\n"));
+        let choice = Tailscale::Exit {
+            revision: 7,
+            generation: ts_generation(&v),
+            index: 1,
+        };
+        assert_eq!(
+            tailscale_body(&v, &choice).unwrap(),
+            json!({"action":"select_exit","expected_revision":7,"exit_node":"nSecret2"})
+        );
+        let mut changed = v.clone();
+        changed["exit_nodes"].as_array_mut().unwrap().reverse();
+        assert!(tailscale_body(&changed, &choice).is_err());
+        changed = v.clone();
+        changed["revision"] = json!(8);
+        assert!(tailscale_body(&changed, &Tailscale::Clear(7)).is_err());
+        assert_eq!(
+            tailscale_body(&v, &Tailscale::Clear(7)).unwrap()["exit_node"],
+            ""
+        );
+        assert!(tailscale_body(
+            &v,
+            &Tailscale::Exit {
+                revision: 7,
+                generation: ts_generation(&v),
+                index: 2
+            }
+        )
+        .is_err());
+        let mut many = v.clone();
+        many["exit_nodes"] = json!(vec![json!({"id":"n1","name":"short"}); 40]);
+        assert_eq!(tailscale_records(&many, 123).lines().count(), 33);
+    }
+    #[test]
+    fn fixed_commands_and_third_backend() {
+        assert_eq!(
+            parse("ts 7 connect"),
+            Ok(Request::Job(Job::Tailscale(Tailscale::Connect(7))))
+        );
+        assert_eq!(
+            parse("ts 7 disconnect"),
+            Ok(Request::Job(Job::Tailscale(Tailscale::Disconnect(7))))
+        );
+        assert!(parse("ts 7 exit 8 1").is_ok());
+        assert!(parse("backend 7 off tailscale").is_ok());
+        for bad in [
+            "ts 7 connect raw",
+            "ts 7 exit 8 us-oracle",
+            "ts 7 exit 8 32",
+            "ts 7 exit 8 100000",
+            "ts 7 login",
+            "ts -1 clear",
+        ] {
+            assert!(parse(bad).is_err());
+        }
+        assert!(backend_record(
+            &json!({"active":"tailscale","backends":[{"id":"tailscale","revision":7,"ready":true}]})
+        )
+        .starts_with("B\ttailscale\t"));
     }
 }

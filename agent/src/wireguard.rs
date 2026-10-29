@@ -469,6 +469,7 @@ fn apply(s: &Settings) -> Result<(), String> {
         }
         return Ok(());
     }
+    crate::tailscale::require_native_allowed()?;
     validate(s)?;
     if !Path::new("/sys/module/wireguard").exists() {
         return Err("Kernel WireGuard support is unavailable".into());
@@ -568,12 +569,20 @@ fn commit_change(
     release()
 }
 pub fn update(body: &[u8]) -> (u16, Value) {
+    let _transition = crate::transition::lock();
+    update_locked(body)
+}
+/// Caller holds the global transition lock, never the WireGuard lock.
+pub(crate) fn update_locked(body: &[u8]) -> (u16, Value) {
     let result = (|| -> Result<Value, String> {
         let u: Update = serde_json::from_slice(body).map_err(|_| "Invalid WireGuard request")?;
         let takeover = u.takeover == Some(true);
         let _guard = LOCK.lock().unwrap();
         let old = load()?;
         let next = edited(&old, u)?;
+        if next.enabled {
+            crate::tailscale::ensure_down()?;
+        }
         let clash_on = next.enabled && clash::stored_enabled();
         if clash_on && !takeover {
             return Err("Clash is on; turn it off or confirm switching to WireGuard".into());
@@ -696,6 +705,22 @@ pub(crate) fn summary() -> Result<Value, String> {
         "reason": reason, "error": ERROR.lock().unwrap().clone()}),
     )
 }
+/// Caller holds transition then WireGuard lock. No lock reentry.
+pub(crate) fn disable_for_tailscale() -> Result<(), String> {
+    let mut s = load()?;
+    let changed = s.enabled;
+    s.enabled = false;
+    apply(&s)?;
+    EGRESS.script(&EGRESS.release())?;
+    if changed {
+        s.revision = s
+            .revision
+            .checked_add(1)
+            .ok_or("Configuration revision exhausted")?;
+        persist(&s)?;
+    }
+    Ok(())
+}
 pub(crate) struct Suspended(Settings);
 /// Turns WireGuard off for a switch to Clash. The caller holds `lock()` and its own
 /// transition guard; `resume` restores WireGuard if that switch fails.
@@ -739,8 +764,11 @@ pub fn start() {
         let mut first = true;
         loop {
             {
+                let _transition = crate::transition::lock();
                 let _guard = LOCK.lock().unwrap();
-                if let Ok(s) = load() {
+                if !crate::tailscale::native_allowed() {
+                    // Tailscale reconciler owns cleanup; never resurrect a tunnel here.
+                } else if let Ok(s) = load() {
                     let conflict = s.enabled && clash::stored_enabled();
                     {
                         let mut error = ERROR.lock().unwrap();

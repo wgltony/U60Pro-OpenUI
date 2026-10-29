@@ -14,11 +14,12 @@ const FILE: &str = "/data/local/tmp/openui-devui/settings.json";
 /// the old four features again keeps them.
 const MIGRATED: &str = "/data/local/tmp/openui-devui/menu-v2";
 /// Features the screen menu can show, in menu order; at most nine at a time (up to a 3x3 Pocket OS grid).
-const MENU_ITEMS: [&str; 13] = [
+const MENU_ITEMS: [&str; 14] = [
     "overview",
     "proxy",
     "wireguard",
     "clash",
+    "tailscale",
     "esim",
     "uplink",
     "wifi",
@@ -143,10 +144,26 @@ impl Settings {
             "usb" => 11,
             "power" => 12,
             "booster" => 13,
+            "tailscale" => 14,
             _ => 2,
         };
         let mask = self.menu_items.iter().fold(0u32, |m, s| m | (1 << page(s)));
         let home = page(&self.home_page);
+        // F adds Tailscale; older Z readers must never receive its bit/home.
+        let ts = if mask & (1 << 14) != 0 {
+            format!(
+                "F {} {} {} {home} {mask} {} {}\n",
+                self.revision,
+                self.idle_seconds,
+                self.brightness,
+                self.language,
+                u8::from(self.idle_sleep)
+            )
+        } else {
+            String::new()
+        };
+        let mask = mask & !(1 << 14);
+        let home = if home == 14 { 2 } else { home };
         let without = |mask: u32, home: u32, pages: u32| {
             (
                 mask & pages,
@@ -172,7 +189,7 @@ impl Settings {
             )
         };
         let sleep = u8::from(self.idle_sleep);
-        if mask & !PRE_TOOLBOX_PAGES == 0 && home <= 8 {
+        let legacy = if mask & !PRE_TOOLBOX_PAGES == 0 && home <= 8 {
             format!(
                 "{}\n{}\n{} {sleep}\n{} {sleep}\n",
                 line('C', legacy_home, legacy),
@@ -189,7 +206,8 @@ impl Settings {
                 line('Y', y_home, y_mask),
                 line('Z', home, mask),
             )
-        }
+        };
+        legacy + &ts
     }
 }
 /// Settings saved with the old default menu showed every feature there was; they get the
@@ -613,5 +631,28 @@ mod tests {
                 .0,
             400
         );
+    }
+}
+
+#[cfg(test)]
+mod tailscale_settings_tests {
+    use super::*;
+    #[test]
+    fn explicit_opt_in_keeps_menus_and_legacy_records() {
+        let old = Settings::default();
+        assert!(!old.menu_items.iter().any(|s| s == "tailscale"));
+        let mut s = old.clone();
+        s.menu_items.push("tailscale".into());
+        s.home_page = "tailscale".into();
+        assert!(s.validate().is_ok());
+        let projection = s.projection();
+        assert!(projection.ends_with("F 1 120 128 14 16497 zh 1\n"));
+        assert!(projection
+            .lines()
+            .filter(|l| !l.starts_with("F "))
+            .all(|l| l.split(' ').nth(4) != Some("14")));
+        assert_eq!(old.menu_items, DEFAULT_MENU.to_vec());
+        s.menu_items = MENU_ITEMS.iter().take(10).map(|s| s.to_string()).collect();
+        assert!(s.validate().is_err());
     }
 }

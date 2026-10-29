@@ -4,6 +4,7 @@ use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,7 @@ const NCM_FUNC: &str = "/sys/kernel/config/usb_gadget/g1/functions/ncm.0";
 const ECM_GSI_FUNC: &str = "/sys/kernel/config/usb_gadget/g1/functions/gsi.ecm";
 const RNDIS_GSI_FUNC: &str = "/sys/kernel/config/usb_gadget/g1/functions/gsi.rndis";
 const MASS_STORAGE_FUNC: &str = "/sys/kernel/config/usb_gadget/g1/functions/mass_storage.0";
+const ADB_FUNC: &str = "/sys/kernel/config/usb_gadget/g1/functions/ffs.adb";
 const NCM_LAST_ERROR_PATH: &str = "/tmp/zte-agent-usb-ncm.last_error";
 const PERSIST_CONFIG_PATH: &str = "/data/local/tmp/usb_config.json";
 /// Legacy location: NCM persistence used to share the Wi-Fi snapshot file.
@@ -26,9 +28,9 @@ const PERSIST_CONFIG_PATH: &str = "/data/local/tmp/usb_config.json";
 const LEGACY_PERSIST_CONFIG_PATH: &str = "/data/local/tmp/wifi_config.json";
 const USB_DEFAULT_MODE_KEY: &str = "usb_default_mode";
 static USB_BUSY: AtomicBool = AtomicBool::new(false);
-struct SwitchGuard;
+pub(crate) struct SwitchGuard;
 impl SwitchGuard {
-    fn acquire() -> Result<Self, String> {
+    pub(crate) fn acquire() -> Result<Self, String> {
         USB_BUSY
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map(|_| Self)
@@ -44,6 +46,123 @@ impl Drop for SwitchGuard {
 // ---------------------------------------------------------------------------
 // Boot persistence
 // ---------------------------------------------------------------------------
+
+/// The firmware's own composition switcher, the one boot runs.
+const FIRMWARE_USB_SWITCH: &str = "/sbin/usb/compositions/usb_switch";
+/// Its compositions as boot sets them up: (mode, product id, functions). RNDIS is the
+/// boot default; `ffs` is ADB.
+const FIRMWARE_COMPOSITIONS: [(&str, &str, &str); 2] = [
+    (
+        "rndis",
+        "0x1404",
+        "rndis_gsi,diag,serial,modem,mass_storage,ffs,dpl,qdss",
+    ),
+    ("ecm", "0x1405", "ecm_gsi,mass_storage,ffs"),
+];
+
+/// B31: no `zwrt_bsp.usb set`, and a configfs rebuild leaves the gadget unbound (tested:
+/// the host saw no device until a reboot). Only the firmware's script switches cleanly.
+fn firmware_switch_only() -> bool {
+    !stock_usb_set_available() && Path::new(FIRMWARE_USB_SWITCH).exists()
+}
+
+/// The functions for `mode`. ADB (`ffs`) only with adbd running: FunctionFS without its
+/// daemon makes the controller bind fail, and the script tries only once.
+fn firmware_functions(mode: &str, adbd_running: bool) -> Option<(&'static str, String)> {
+    let &(_, pid, functions) = FIRMWARE_COMPOSITIONS.iter().find(|c| c.0 == mode)?;
+    let functions = functions
+        .split(',')
+        .filter(|f| adbd_running || *f != "ffs")
+        .collect::<Vec<_>>()
+        .join(",");
+    Some((pid, functions))
+}
+
+fn adbd_running() -> bool {
+    fs::read_dir("/proc").is_ok_and(|entries| {
+        entries.flatten().any(|e| {
+            fs::read_link(e.path().join("exe")).is_ok_and(|exe| exe == Path::new("/sbin/adbd"))
+        })
+    })
+}
+
+fn firmware_mode_set(mode: &str) -> (u16, Value) {
+    let Some((pid, functions)) = firmware_functions(mode, adbd_running()) else {
+        return (
+            400,
+            json!({"ok": false, "error": "This firmware supports RNDIS and ECM only"}),
+        );
+    };
+    if detect_active_usb_mode() == Some(mode) {
+        return (
+            200,
+            json!({"ok": true, "data": {"status": "unchanged", "mode": mode}}),
+        );
+    }
+    let guard = match SwitchGuard::acquire() {
+        Ok(guard) => guard,
+        Err(error) => return (409, json!({"ok": false, "error": error})),
+    };
+    // The same serial in every mode, so ADB keeps one device identity.
+    let serial = read_trimmed(&format!("{GADGET_DIR}/strings/0x409/serialnumber"))
+        .filter(|s| s.len() <= 32 && s.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or_else(|| "0123456789ABCDEF".into());
+    // After a second, so this reply (over USB too) leaves before USB drops.
+    thread::spawn(move || {
+        let _guard = guard;
+        thread::sleep(Duration::from_millis(1000));
+        // No timeout: killing the script between unbind and bind leaves USB dead.
+        let result = Command::new("sh")
+            .args([FIRMWARE_USB_SWITCH, "0x19d2", pid, &functions, &serial])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match result {
+            Ok(status) if status.success() => {
+                let _ = fs::remove_file(NCM_LAST_ERROR_PATH);
+            }
+            Ok(status) => {
+                let _ = fs::write(NCM_LAST_ERROR_PATH, format!("usb_switch exit {status}"));
+            }
+            Err(e) => {
+                let _ = fs::write(NCM_LAST_ERROR_PATH, format!("usb_switch: {e}"));
+            }
+        }
+    });
+    (
+        202,
+        json!({"ok": true, "data": {"status": "scheduled", "mode": mode, "delay_ms": 1000}}),
+    )
+}
+
+/// Whether the firmware's `zwrt_bsp.usb` offers `set` (B31 has only `list`).
+fn stock_usb_set_available() -> bool {
+    Command::new("ubus")
+        .args(["-v", "list", "zwrt_bsp.usb"])
+        .bounded_output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("\"set\""))
+}
+
+/// The boot composition (RNDIS with ADB and the firmware's diagnostic functions), kept
+/// for the first agent start of a boot so a later switch can return to it exactly.
+const BOOT_SNAPSHOT_PATH: &str = "/tmp/zte-agent-usb-boot.json";
+
+pub fn remember_boot_composition() {
+    if Path::new(BOOT_SNAPSHOT_PATH).exists() || detect_active_usb_mode() != Some("rndis") {
+        return;
+    }
+    if let Ok(snapshot) = GadgetSnapshot::capture() {
+        if let Ok(bytes) = serde_json::to_vec(&snapshot.to_json()) {
+            let _ = crate::storage::atomic_write(Path::new(BOOT_SNAPSHOT_PATH), &bytes);
+        }
+    }
+}
+
+fn load_boot_snapshot() -> Option<GadgetSnapshot> {
+    let text = fs::read_to_string(BOOT_SNAPSHOT_PATH).ok()?;
+    GadgetSnapshot::from_json(&serde_json::from_str(&text).ok()?)
+}
 
 pub fn enforce_usb_mode_on_boot() {
     if parse_usb_default_mode(&read_persisted_config()) != Some("ncm") {
@@ -291,7 +410,7 @@ fn set_usb_default_mode(mode: &str) -> Result<(), String> {
 
 fn supported_modes() -> Vec<&'static str> {
     let mut modes = vec!["rndis", "ecm"];
-    if Path::new(NCM_FUNC).exists() {
+    if Path::new(NCM_FUNC).exists() && !firmware_switch_only() {
         modes.push("ncm");
     }
     modes
@@ -437,6 +556,7 @@ pub fn usb_status(_state: &AppState) -> (u16, Value) {
     if let Some(link) = usb_link_info() {
         payload.insert("link".into(), link);
     }
+    payload.insert("lan".into(), usb_lan_json(&usb_lan_view()));
     (200, json!({"ok": true, "data": payload}))
 }
 
@@ -449,6 +569,9 @@ pub fn usb_mode_set(_state: &AppState, body: &[u8]) -> (u16, Value) {
         Some(v) => v,
         None => return (400, json!({"ok": false, "error": "mode is required"})),
     };
+    if firmware_switch_only() {
+        return firmware_mode_set(mode);
+    }
     if mode == "ncm" {
         let confirmed = parsed["confirm_experimental"].as_bool().unwrap_or(false);
         if !confirmed {
@@ -480,7 +603,12 @@ pub fn usb_mode_set(_state: &AppState, body: &[u8]) -> (u16, Value) {
             }),
         );
     }
-    if mode == "ecm" && current_composition_functions().iter().any(|f| f == "ncm.0") {
+    // ECM is always built through configfs (as NCM is), keeping exposed ADB: this
+    // firmware's zwrt_bsp.usb has no `set` method, so the stock path cannot switch.
+    if mode == "ecm"
+        && (current_composition_functions().iter().any(|f| f == "ncm.0")
+            || !stock_usb_set_available())
+    {
         if let Err(e) = preflight_ecm_switch() {
             return (400, json!({"ok": false, "error": e}));
         }
@@ -502,6 +630,28 @@ pub fn usb_mode_set(_state: &AppState, body: &[u8]) -> (u16, Value) {
 
     if !["ecm", "rndis"].contains(&mode) {
         return (400, json!({"ok": false, "error": "unsupported USB mode"}));
+    }
+    if mode == "rndis" && !stock_usb_set_available() {
+        if detect_active_usb_mode() == Some("rndis") {
+            return (
+                200,
+                json!({"ok": true, "data": {"status": "unchanged", "mode": "rndis"}}),
+            );
+        }
+        // RNDIS is the boot composition: going back means restoring what boot set up.
+        if load_boot_snapshot().is_none() {
+            return (
+                409,
+                json!({"ok": false, "error": "Restart the device to return to RNDIS"}),
+            );
+        }
+        if let Err(error) = schedule_switch("rndis") {
+            return (409, json!({"ok": false, "error": error}));
+        }
+        return (
+            202,
+            json!({"ok": true, "data": {"status": "scheduled", "mode": "rndis", "delay_ms": 1000}}),
+        );
     }
     let _guard = match SwitchGuard::acquire() {
         Ok(guard) => guard,
@@ -584,6 +734,177 @@ pub fn usb_powerbank_set(_state: &AppState, body: &[u8]) -> (u16, Value) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// USB LAN sharing
+// ---------------------------------------------------------------------------
+
+/// Whether the active USB network function is bridged into the LAN, so the USB host
+/// gets an address and internet. Off takes the interface out of `br-lan` and down; the
+/// USB composition (and ADB with it) stays as it is, so nothing re-enumerates. The
+/// choice is persisted and re-applied: the firmware re-bridges the interface on replug
+/// and the NCM switch bridges it itself.
+const USB_LAN_KEY: &str = "usb_lan_enabled";
+const LAN_BRIDGE: &str = "br-lan";
+const USB_LAN_ENFORCE_EVERY: Duration = Duration::from_secs(3);
+static USB_LAN_LOCK: Mutex<()> = Mutex::new(());
+
+fn parse_usb_lan_enabled(persisted: &Value) -> bool {
+    persisted
+        .get(USB_LAN_KEY)
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// The network interface of the active USB function, when it exists.
+fn usb_lan_interface() -> Option<String> {
+    let name = match detect_active_usb_mode()? {
+        "ncm" => return ncm_interface_name(),
+        "ecm" => "ecm0",
+        _ => "rndis0",
+    };
+    Path::new(&format!("/sys/class/net/{name}"))
+        .exists()
+        .then(|| name.to_string())
+}
+
+fn interface_up(ifname: &str) -> bool {
+    read_trimmed(&format!("/sys/class/net/{ifname}/flags"))
+        .and_then(|f| u32::from_str_radix(f.trim_start_matches("0x"), 16).ok())
+        .is_some_and(|flags| flags & 1 != 0)
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct UsbLan {
+    /// The saved choice.
+    pub enabled: bool,
+    /// The interface is up and bridged right now.
+    pub active: bool,
+    /// Active, and a USB host has the link (carrier); RNDIS on a Mac never gets one.
+    pub linked: bool,
+    pub interface: Option<String>,
+}
+
+pub(crate) fn usb_lan_view() -> UsbLan {
+    let enabled = parse_usb_lan_enabled(&read_persisted_config());
+    let interface = usb_lan_interface();
+    let active = interface.as_deref().is_some_and(|ifname| {
+        interface_up(ifname) && bridge_members(LAN_BRIDGE).iter().any(|m| m == ifname)
+    });
+    let linked = active
+        && interface
+            .as_deref()
+            .and_then(|ifname| read_trimmed(&format!("/sys/class/net/{ifname}/carrier")))
+            .is_some_and(|c| c == "1");
+    UsbLan {
+        enabled,
+        active,
+        linked,
+        interface,
+    }
+}
+
+fn usb_lan_json(view: &UsbLan) -> Value {
+    json!({
+        "enabled": view.enabled,
+        "active": view.active,
+        "linked": view.linked,
+        "interface": view.interface,
+        "mode": detect_active_usb_mode(),
+    })
+}
+
+/// Bring the active USB interface in line with `enabled`. No interface: nothing to do.
+fn apply_usb_lan(enabled: bool) -> Result<(), String> {
+    let Some(ifname) = usb_lan_interface() else {
+        return Ok(());
+    };
+    if enabled {
+        run_command("ip", &["link", "set", "dev", &ifname, "up"])?;
+        add_bridge_member(LAN_BRIDGE, &ifname)
+    } else {
+        remove_bridge_member(LAN_BRIDGE, &ifname)?;
+        run_command("ip", &["link", "set", "dev", &ifname, "down"])
+    }
+}
+
+/// Keeps a saved "off" applied. A USB mode switch in progress owns the bridge until it
+/// finishes, so the check waits for it.
+pub fn start_usb_lan_enforcer() {
+    thread::spawn(|| loop {
+        thread::sleep(USB_LAN_ENFORCE_EVERY);
+        if USB_BUSY.load(Ordering::Acquire) {
+            continue;
+        }
+        let Ok(_lock) = USB_LAN_LOCK.try_lock() else {
+            continue;
+        };
+        let view = usb_lan_view();
+        let shared = view.interface.as_deref().is_some_and(|ifname| {
+            interface_up(ifname) || bridge_members(LAN_BRIDGE).iter().any(|m| m == ifname)
+        });
+        if !view.enabled && shared {
+            if let Err(e) = apply_usb_lan(false) {
+                eprintln!("[usb] USB LAN off: {e}");
+            }
+        }
+    });
+}
+
+/// GET /api/usb/lan
+pub fn usb_lan_get() -> (u16, Value) {
+    (
+        200,
+        json!({"ok": true, "data": usb_lan_json(&usb_lan_view())}),
+    )
+}
+
+/// PUT /api/usb/lan `{"enabled": bool}`: save the choice and apply it now.
+pub fn usb_lan_set(body: &[u8]) -> (u16, Value) {
+    let enabled = match serde_json::from_slice::<Value>(body) {
+        Ok(Value::Object(m)) if m.len() == 1 => match m.get("enabled") {
+            Some(Value::Bool(b)) => *b,
+            _ => {
+                return (
+                    400,
+                    json!({"ok": false, "error": "enabled must be true or false"}),
+                )
+            }
+        },
+        _ => {
+            return (
+                400,
+                json!({"ok": false, "error": "expected {\"enabled\": bool}"}),
+            )
+        }
+    };
+    let _lock = USB_LAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = match SwitchGuard::acquire() {
+        Ok(guard) => guard,
+        Err(error) => return (409, json!({"ok": false, "error": error})),
+    };
+    let mut persisted = read_persisted_config();
+    if !persisted.is_object() {
+        persisted = json!({});
+    }
+    if let Some(obj) = persisted.as_object_mut() {
+        obj.insert(USB_LAN_KEY.into(), json!(enabled));
+    }
+    if let Err(e) = write_persisted_config(&persisted) {
+        return (500, json!({"ok": false, "error": e}));
+    }
+    if let Err(e) = apply_usb_lan(enabled) {
+        return (500, json!({"ok": false, "error": e}));
+    }
+    let view = usb_lan_view();
+    if view.interface.is_some() && view.active != enabled {
+        return (
+            500,
+            json!({"ok": false, "error": "USB LAN state did not change"}),
+        );
+    }
+    (200, json!({"ok": true, "data": usb_lan_json(&view)}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_usb_default_mode;
@@ -612,6 +933,18 @@ mod tests {
             parse_usb_default_mode(&json!({"usb_default_mode": true})),
             None
         );
+    }
+
+    #[test]
+    fn usb_lan_defaults_on_and_reads_only_booleans() {
+        use super::parse_usb_lan_enabled;
+        assert!(parse_usb_lan_enabled(&json!({})));
+        assert!(parse_usb_lan_enabled(&json!({"usb_lan_enabled": true})));
+        assert!(!parse_usb_lan_enabled(&json!({"usb_lan_enabled": false})));
+        assert!(parse_usb_lan_enabled(&json!({"usb_lan_enabled": "false"})));
+        assert!(!parse_usb_lan_enabled(
+            &json!({"usb_default_mode": "ncm", "usb_lan_enabled": false})
+        ));
     }
 
     #[test]
@@ -705,6 +1038,45 @@ struct GadgetSnapshot {
     bridge: Vec<String>,
 }
 impl GadgetSnapshot {
+    fn to_json(&self) -> Value {
+        json!({
+            "udc": self.udc,
+            "attributes": self.attributes,
+            "links": self.links.iter().map(|(p, t)| (p.to_string_lossy(), t.to_string_lossy())).collect::<Vec<_>>(),
+            "bridge": self.bridge,
+        })
+    }
+    fn from_json(v: &Value) -> Option<Self> {
+        let pairs = |key: &str| -> Option<Vec<(String, String)>> {
+            v[key]
+                .as_array()?
+                .iter()
+                .map(|p| Some((p[0].as_str()?.to_string(), p[1].as_str()?.to_string())))
+                .collect()
+        };
+        let links: Vec<(PathBuf, PathBuf)> = pairs("links")?
+            .into_iter()
+            .map(|(p, t)| (PathBuf::from(p), PathBuf::from(t)))
+            .collect();
+        // Only links inside this gadget's configuration are ever restored.
+        if links.is_empty() || !links.iter().all(|(p, _)| p.starts_with(CONFIG_DIR)) {
+            return None;
+        }
+        Some(Self {
+            udc: v["udc"].as_str().filter(|s| !s.is_empty())?.to_string(),
+            attributes: pairs("attributes")?
+                .into_iter()
+                .filter(|(p, _)| p.starts_with(GADGET_DIR))
+                .collect(),
+            links,
+            bridge: v["bridge"]
+                .as_array()?
+                .iter()
+                .filter_map(|m| m.as_str().map(str::to_string))
+                .filter(|m| is_usb_interface(m))
+                .collect(),
+        })
+    }
     fn capture() -> Result<Self, String> {
         let udc = fs::read_to_string(UDC_PATH).map_err(|e| format!("snapshot UDC: {e}"))?;
         let mut attributes = Vec::new();
@@ -807,6 +1179,9 @@ trait RestoreIo {
 struct RestoreHardware;
 impl RestoreIo for RestoreHardware {
     fn write(&self, path: &str, value: &str) -> Result<(), String> {
+        if path == UDC_PATH && !value.is_empty() {
+            return bind_udc(value).map_err(|e| format!("restore {e}"));
+        }
         fs::write(path, value).map_err(|e| format!("restore {path}: {e}"))
     }
     fn remove_links(&self) -> Result<(), String> {
@@ -848,21 +1223,81 @@ fn with_rollback(
         },
     }
 }
+/// Truth about existing exposure only, never a request to add a USB function.
+pub(crate) fn adb_exposed() -> bool {
+    if read_trimmed(UDC_PATH).is_none_or(|s| s.is_empty()) {
+        return false;
+    }
+    fs::read_dir(CONFIG_DIR).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry.file_name().to_string_lossy().starts_with('f')
+                && entry.file_type().is_ok_and(|t| t.is_symlink())
+                && fs::canonicalize(entry.path()).is_ok_and(|p| p == Path::new(ADB_FUNC))
+        })
+    })
+}
+/// Pure layout check. Preserve the original link name/target, never relocate it into
+/// a free slot. f1/f2 belong to the existing fixed network/mass-storage layout.
+fn adb_preservation_layout(
+    links: &[(PathBuf, PathBuf)],
+) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    let mut preserved = Vec::new();
+    for (path, target) in links {
+        if target.file_name().is_none_or(|name| name != "ffs.adb") {
+            continue;
+        }
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let number = name
+            .strip_prefix('f')
+            .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|s| s.parse::<u32>().ok());
+        if path.parent() != Some(Path::new(CONFIG_DIR)) || number.is_none_or(|n| n <= 2) {
+            return Err(
+                "existing ADB link conflicts with network layout; USB left unchanged".into(),
+            );
+        }
+        preserved.push((path.clone(), target.clone()));
+    }
+    if preserved.len() > 1 {
+        return Err("multiple ADB links; USB left unchanged".into());
+    }
+    Ok(preserved)
+}
+fn validated_adb_links(snapshot: &GadgetSnapshot) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    let preserved = adb_preservation_layout(&snapshot.links)?;
+    for (path, _) in &preserved {
+        if fs::canonicalize(path).map_err(|_| "existing ADB target unavailable")?
+            != Path::new(ADB_FUNC)
+        {
+            return Err("unexpected ADB target; USB left unchanged".into());
+        }
+    }
+    Ok(preserved)
+}
+fn restore_preserved_adb(links: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+    for (path, target) in links {
+        unix_fs::symlink(target, path).map_err(|e| format!("preserve existing ADB link: {e}"))?;
+    }
+    Ok(())
+}
 fn transactional_switch(mode: &str) -> Result<(), String> {
     let snapshot = GadgetSnapshot::capture()?;
+    // Validate collisions and canonical target BEFORE unbinding anything. No function
+    // is created; the successful rebuild carries forward only already exposed ADB.
+    let adb_links = validated_adb_links(&snapshot)?;
     with_rollback(
-        || {
-            if mode == "ncm" {
-                switch_to_ncm_now()
-            } else {
-                switch_to_ecm_now()
-            }
+        || match mode {
+            "ncm" => switch_to_ncm_now(&adb_links),
+            "rndis" => load_boot_snapshot()
+                .ok_or_else(|| "boot USB composition was not recorded".to_string())?
+                .restore(),
+            _ => switch_to_ecm_now(&adb_links),
         },
         || snapshot.restore(),
     )
 }
 
-fn switch_to_ncm_now() -> Result<(), String> {
+fn switch_to_ncm_now(adb_links: &[(PathBuf, PathBuf)]) -> Result<(), String> {
     preflight_ncm_switch()?;
     let udc = read_trimmed(UDC_PATH)
         .or_else(first_udc_name)
@@ -890,8 +1325,9 @@ fn switch_to_ncm_now() -> Result<(), String> {
         .map_err(|e| format!("link ncm.0: {e}"))?;
     unix_fs::symlink(MASS_STORAGE_FUNC, format!("{CONFIG_DIR}/f2"))
         .map_err(|e| format!("link mass_storage.0: {e}"))?;
+    restore_preserved_adb(adb_links)?;
 
-    fs::write(UDC_PATH, &udc).map_err(|e| format!("bind UDC {udc}: {e}"))?;
+    bind_udc(&udc)?;
     let ifname = wait_for_ncm_interface(Duration::from_secs(10))
         .ok_or_else(|| "NCM interface did not appear after binding".to_string())?;
     run_command("ifconfig", &[&ifname, "up"])?;
@@ -899,7 +1335,7 @@ fn switch_to_ncm_now() -> Result<(), String> {
     Ok(())
 }
 
-fn switch_to_ecm_now() -> Result<(), String> {
+fn switch_to_ecm_now(adb_links: &[(PathBuf, PathBuf)]) -> Result<(), String> {
     preflight_ecm_switch()?;
     let udc = read_trimmed(UDC_PATH)
         .or_else(first_udc_name)
@@ -932,8 +1368,9 @@ fn switch_to_ecm_now() -> Result<(), String> {
         .map_err(|e| format!("link gsi.ecm: {e}"))?;
     unix_fs::symlink(MASS_STORAGE_FUNC, format!("{CONFIG_DIR}/f2"))
         .map_err(|e| format!("link mass_storage.0: {e}"))?;
+    restore_preserved_adb(adb_links)?;
 
-    fs::write(UDC_PATH, &udc).map_err(|e| format!("bind UDC {udc}: {e}"))?;
+    bind_udc(&udc)?;
     wait_for_interface("ecm0", Duration::from_secs(10))
         .ok_or_else(|| "ECM interface did not appear after binding".to_string())?;
     run_command("ifconfig", &["ecm0", "up"])?;
@@ -944,6 +1381,20 @@ fn switch_to_ecm_now() -> Result<(), String> {
     Ok(())
 }
 
+/// Bind the gadget to its controller. Binding fails while a FunctionFS function (ADB)
+/// has no daemon ready; adbd reopens it after the unbind, so retry for a few seconds
+/// instead of failing the switch on the first attempt.
+fn bind_udc(udc: &str) -> Result<(), String> {
+    let mut last = String::new();
+    for _ in 0..20 {
+        match fs::write(UDC_PATH, udc) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = e.to_string(),
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err(format!("bind UDC {udc}: {last}"))
+}
 fn first_udc_name() -> Option<String> {
     fs::read_dir("/sys/class/udc")
         .ok()?
@@ -1048,6 +1499,83 @@ fn run_command(command: &str, args: &[&str]) -> Result<(), String> {
 mod safety_tests {
     use super::*;
 
+    #[test]
+    fn firmware_compositions_keep_adb_only_with_its_daemon() {
+        assert_eq!(
+            firmware_functions("ecm", true),
+            Some(("0x1405", "ecm_gsi,mass_storage,ffs".to_string()))
+        );
+        assert_eq!(
+            firmware_functions("ecm", false),
+            Some(("0x1405", "ecm_gsi,mass_storage".to_string()))
+        );
+        assert_eq!(
+            firmware_functions("rndis", true).unwrap().1,
+            "rndis_gsi,diag,serial,modem,mass_storage,ffs,dpl,qdss"
+        );
+        assert!(!firmware_functions("rndis", false)
+            .unwrap()
+            .1
+            .contains("ffs"));
+        assert_eq!(firmware_functions("ncm", true), None);
+    }
+
+    #[test]
+    fn boot_snapshot_round_trips_and_stays_inside_the_gadget() {
+        let snap = GadgetSnapshot {
+            udc: "a600000.dwc3".into(),
+            attributes: vec![(format!("{GADGET_DIR}/idProduct"), "0x1404".into())],
+            links: vec![
+                (
+                    Path::new(CONFIG_DIR).join("f1"),
+                    PathBuf::from(RNDIS_GSI_FUNC),
+                ),
+                (Path::new(CONFIG_DIR).join("f6"), PathBuf::from(ADB_FUNC)),
+            ],
+            bridge: vec!["rndis0".into()],
+        };
+        let back = GadgetSnapshot::from_json(&snap.to_json()).unwrap();
+        assert_eq!(
+            (back.udc.as_str(), back.links.len(), back.bridge.clone()),
+            ("a600000.dwc3", 2, vec!["rndis0".to_string()])
+        );
+        assert_eq!(back.attributes, snap.attributes);
+        let mut v = snap.to_json();
+        v["links"] = json!([["/etc/passwd", "x"]]);
+        assert!(GadgetSnapshot::from_json(&v).is_none());
+        let mut v = snap.to_json();
+        v["udc"] = json!("");
+        assert!(GadgetSnapshot::from_json(&v).is_none());
+        let mut v = snap.to_json();
+        v["attributes"] = json!([["/etc/shadow", "x"]]);
+        assert!(GadgetSnapshot::from_json(&v).unwrap().attributes.is_empty());
+    }
+
+    #[test]
+    fn preserve_only_existing_adb_without_layout_collisions() {
+        let link = |n: &str, target: &str| (Path::new(CONFIG_DIR).join(n), PathBuf::from(target));
+        let adb = link("f6", "../../functions/ffs.adb");
+        assert_eq!(
+            adb_preservation_layout(&[
+                link("f1", ECM_GSI_FUNC),
+                link("f2", MASS_STORAGE_FUNC),
+                adb.clone(),
+            ])
+            .unwrap(),
+            vec![adb.clone()]
+        );
+        assert!(adb_preservation_layout(&[link("f1", ADB_FUNC)]).is_err());
+        assert!(adb_preservation_layout(&[link("f2", ADB_FUNC)]).is_err());
+        assert!(adb_preservation_layout(&[link("f-1", ADB_FUNC)]).is_err());
+        assert!(adb_preservation_layout(&[link("f3", ADB_FUNC), adb]).is_err());
+        assert!(adb_preservation_layout(&[link("f1", ECM_GSI_FUNC)])
+            .unwrap()
+            .is_empty());
+        assert!(
+            adb_preservation_layout(&[(PathBuf::from("/tmp/f6"), PathBuf::from(ADB_FUNC))])
+                .is_err()
+        );
+    }
     #[test]
     fn restoration_attempts_exact_composition_and_bridge_after_each_failure() {
         use std::cell::RefCell;

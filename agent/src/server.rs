@@ -342,6 +342,8 @@ pub fn route(
         (&Method::Delete, "/api/screen") => screen::close(),
         (&Method::Get, "/api/wireguard") => wireguard::get(),
         (&Method::Put, "/api/wireguard") => wireguard::update(body),
+        (&Method::Get, "/api/tailscale") => crate::tailscale::get(),
+        (&Method::Put, "/api/tailscale") => crate::tailscale::update(body),
         (&Method::Get, "/api/proxy") => proxy::get(),
         (&Method::Put, "/api/proxy") => proxy::set(body),
         (&Method::Get, "/api/clash") => clash::get(),
@@ -376,6 +378,9 @@ pub fn route(
         // WiFi
         (&Method::Get, "/api/wifi/status") => wifi::wifi_status(state),
         (&Method::Put, "/api/wifi/settings") => wifi::wifi_set(state, body),
+        (&Method::Get, "/api/system/logs") => crate::agent_log::get(),
+        (&Method::Get, "/api/wifi/blocked") => wifi::blocked_get(),
+        (&Method::Put, "/api/wifi/blocked") => wifi::blocked_set(body),
         (&Method::Get, "/api/wifi/uplink") => wifi_uplink::get(),
         (&Method::Put, "/api/wifi/uplink") => wifi_uplink::update(body),
         (&Method::Post, "/api/wifi/uplink/scan") => wifi_uplink::scan(),
@@ -418,11 +423,16 @@ pub fn route(
         (&Method::Post, "/api/router/apn/profiles/activate") => {
             router::router_apn_profiles_activate(state, body)
         }
+        // Owned native services: normal authenticated dispatch, no login exemptions.
+        (&Method::Get, "/api/admin/services") => crate::admin_services::get(),
+        (&Method::Put, "/api/admin/services") => crate::admin_services::put(body),
         // USB
         (&Method::Get, "/api/usb/status") => usb::usb_status(state),
         (&Method::Put, "/api/usb/mode") => usb::usb_mode_set(state, body),
         (&Method::Put, "/api/usb/default") => usb::usb_default_set(state, body),
         (&Method::Put, "/api/usb/powerbank") => usb::usb_powerbank_set(state, body),
+        (&Method::Get, "/api/usb/lan") => usb::usb_lan_get(),
+        (&Method::Put, "/api/usb/lan") => usb::usb_lan_set(body),
         // TTL clamping
         (&Method::Get, "/api/ttl/status") => ttl_status(),
         (&Method::Put, "/api/ttl/set") => ttl_set(body),

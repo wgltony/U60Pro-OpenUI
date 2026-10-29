@@ -95,6 +95,10 @@ struct Parts {
     esim: String,
     /// `H` (Pocket OS toolbox telemetry)
     toolbox: String,
+    /// `I` and `i`: Wi-Fi stations and blocked MACs, read with `H`.
+    wifi: String,
+    tailscale: String,
+    tailscale_pass: u64,
     /// The pass that read `B`, `K`/`U` and `X`/`x`, and the one that read `M`.
     proxy_pass: u64,
     core_pass: u64,
@@ -113,7 +117,10 @@ impl Parts {
             core: String::new(),
             diagnostics: String::new(),
             esim: String::new(),
+            wifi: String::new(),
             toolbox: String::new(),
+            tailscale: String::new(),
+            tailscale_pass: 0,
             proxy_pass: 0,
             core_pass: 0,
         }
@@ -403,13 +410,16 @@ fn refresh_system(state: &AppState) {
     );
     PARTS.lock().unwrap().system = o_line;
     if !toolbox_wanted() {
-        PARTS.lock().unwrap().toolbox.clear();
+        let mut parts = PARTS.lock().unwrap();
+        parts.toolbox.clear();
+        parts.wifi.clear();
     } else if now().saturating_sub(TOOLBOX_AT.load(Ordering::Relaxed)) >= TOOLBOX_EVERY {
         refresh_toolbox(state, false);
     }
 }
-/// Menu features that read the `H` record; without one of them it is never read.
-const TOOLBOX_PAGES: [&str; 5] = ["wifi", "signal", "usb", "power", "booster"];
+/// Menu features that read the `H` record (Overview for its USB LAN switch); without one
+/// of them it is never read.
+const TOOLBOX_PAGES: [&str; 6] = ["overview", "wifi", "signal", "usb", "power", "booster"];
 fn toolbox_wanted() -> bool {
     let s = crate::screen_settings::current();
     s.menu_items
@@ -427,6 +437,30 @@ static TOOLBOX_AT: AtomicU64 = AtomicU64::new(0);
 const TTL_EVERY: u64 = 60;
 static TTL: Mutex<(u64, u64)> = Mutex::new((0, 0));
 /// `H`: signal, traffic, Wi-Fi, USB, TTL and charging for the toolbox pages.
+/// One signal field as text; absent, empty and `--` are unset.
+fn reading(sig: &Value, key: &str) -> Option<String> {
+    sig.get(key)
+        .and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+                .or_else(|| v.as_f64().map(|n| n.to_string()))
+        })
+        .filter(|s| !matches!(s.trim(), "" | "--"))
+}
+/// The firmware reports NR fields on 5G and LTE fields on 4G; take whichever is set. On
+/// LTE it leaves the NR fields at 0 rather than empty (right after boot, `nr5g_rsrp: 0`
+/// next to `lte_rsrp: -77`), so a zero NR reading does not count as set.
+fn nr_or_lte(sig: &Value, nr: &str, lte: &str) -> Option<String> {
+    reading(sig, nr)
+        .filter(|s| s.trim().parse::<f64>() != Ok(0.0))
+        .or_else(|| reading(sig, lte))
+}
+fn uci_u64(map: &std::collections::HashMap<String, String>, key: &str) -> u64 {
+    map.get(key)
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
+}
 fn refresh_toolbox(state: &AppState, force: bool) {
     TOOLBOX_AT.store(now(), Ordering::Relaxed);
     let speed = state.speed.sample();
@@ -467,17 +501,8 @@ fn refresh_toolbox(state: &AppState, force: bool) {
     let (_, bat_v) = crate::device_ext::device_battery_detail(state);
     let bat_d = &bat_v["data"];
     let top = state.proc_tracker.sample();
-    // The firmware reports NR fields on 5G and LTE fields on 4G; take whichever is set.
-    let text = |k: &str| {
-        sig.get(k)
-            .and_then(|v| {
-                v.as_str()
-                    .map(str::to_string)
-                    .or_else(|| v.as_i64().map(|n| n.to_string()))
-            })
-            .filter(|s| !s.trim().is_empty())
-    };
-    let either = |nr: &str, lte: &str| text(nr).or_else(|| text(lte));
+    let text = |k: &str| reading(sig, k);
+    let either = |nr: &str, lte: &str| nr_or_lte(sig, nr, lte);
     let num = |nr: &str, lte: &str| {
         either(nr, lte)
             .and_then(|s| s.trim().parse::<f64>().ok())
@@ -485,6 +510,7 @@ fn refresh_toolbox(state: &AppState, force: bool) {
     };
     let word = |s: Option<String>| s.unwrap_or_else(|| "-".into());
     let limit = chg_d["charge_limit"].as_u64().unwrap_or(100);
+    let usb_lan = crate::usb::usb_lan_view();
     let hysteresis = chg_d["hysteresis"].as_u64().unwrap_or(5);
     let h_line = ipc::toolbox_record(&json!({
         "rssi": num("nr5g_rssi", "lte_rssi"),
@@ -518,8 +544,26 @@ fn refresh_toolbox(state: &AppState, force: bool) {
         "batt_mv": bat_d["voltage_mv"].as_i64().unwrap_or(0).max(0) as u64,
         "batt_ma": bat_d["current_ma"].as_i64().unwrap_or(0),
         "batt_health": bat_d["health"].as_str().unwrap_or("-"),
+        "usb_lan_on": usb_lan.enabled,
+        // 0 not shared, 1 bridged and waiting for a USB host, 2 a host is linked.
+        "usb_lan_state": u8::from(usb_lan.active) + u8::from(usb_lan.linked),
+        "usb_lan_iface": usb_lan.interface.as_deref().unwrap_or("-"),
+        "wifi_pct_2g": uci_u64(&wireless, "wifi0.txpowerpercent"),
+        "wifi_pct_5g": uci_u64(&wireless, "wifi1.txpowerpercent"),
+        "wifi_dbm_2g": uci_u64(&wireless, "wifi0.txpower"),
+        "wifi_dbm_5g": uci_u64(&wireless, "wifi1.txpower"),
     }));
-    PARTS.lock().unwrap().toolbox = h_line;
+    let wifi = {
+        let clients = CLIENTS.lock().unwrap();
+        ipc::wifi_records(
+            &clients,
+            &crate::wifi::blocked_macs(),
+            &crate::wifi::blocked_names(),
+        )
+    };
+    let mut parts = PARTS.lock().unwrap();
+    parts.toolbox = h_line;
+    parts.wifi = wifi;
 }
 /// `B`, `K`/`U`, `X`/`x`, `Q`/`q` and `M`: quick reads that never take the WireGuard lock. The
 /// periodic refresher and the job thread both run this. `M` is stored after the others:
@@ -535,6 +579,18 @@ fn refresh_proxy_parts() {
     };
     let diagnostics = ipc::diag_records(&clash_diag::get().1["data"]);
     let esim = ipc::esim_records(&crate::esim::status());
+    let (code, ts) = crate::tailscale::get();
+    let ts = if code == 200 {
+        ipc::tailscale_records(&ts["data"], now())
+    } else {
+        String::new()
+    };
+    {
+        let mut p = PARTS.lock().unwrap();
+        if newest(&mut p.tailscale_pass, pass) {
+            p.tailscale = ts;
+        }
+    }
     store_proxy_parts(pass, [backend, clash, diagnostics, esim]);
     let (code, v) = core_status();
     store_core(pass, ipc::core_record(code, &v));
@@ -581,6 +637,10 @@ fn status() -> String {
     let (done, result) = *RESULT.lock().unwrap();
     let failure = FAILURE.lock().unwrap().clone();
     let mut tail = crate::screen_settings::current().projection();
+    // Cached projection only; the dedicated native-service worker never blocks this socket.
+    if let Some(s) = crate::admin_services::snapshot() {
+        tail.push_str(&ipc::admin_record(&s));
+    }
     if result != 0 && failure.0 == done {
         tail.push_str(&format!("E\t{done}\t{}\n", failure.1));
     }
@@ -593,9 +653,8 @@ fn status() -> String {
         FRESH.load(Ordering::Acquire)
     ));
     // Read fresh: a saved file and the supervisor's snapshot, no lock held for long.
-    let uplink = crate::wifi_uplink::summary()
-        .map(|u| ipc::uplink_record(&u))
-        .unwrap_or_default();
+    let (uplink, relay) = crate::wifi_uplink::screen_view();
+    let uplink = uplink.map(|u| ipc::uplink_record(&u)).unwrap_or_default();
     let p = PARTS.lock().unwrap();
     ipc::status(
         &[
@@ -607,7 +666,10 @@ fn status() -> String {
             &p.diagnostics,
             &p.esim,
             &uplink,
+            &relay,
             &p.toolbox,
+            &p.wifi,
+            &p.tailscale,
         ],
         &p.devices,
         &tail,
@@ -627,6 +689,9 @@ enum Work {
     Reboot,
     Uplink { revision: u64, enabled: bool },
     UplinkLogin,
+    Relay(crate::wifi_uplink::RelayAction),
+    Tailscale(ipc::Tailscale),
+    Admin(crate::admin_services::Update),
     Tool(Tool),
 }
 fn work(job: Job) -> Result<Work, &'static str> {
@@ -656,6 +721,9 @@ fn work(job: Job) -> Result<Work, &'static str> {
         Job::Esim(Esim::Reboot) => return Err("No restart is needed"),
         Job::Uplink { revision, enabled } => Work::Uplink { revision, enabled },
         Job::UplinkLogin => Work::UplinkLogin,
+        Job::Relay(a) => Work::Relay(a),
+        Job::Tailscale(t) => Work::Tailscale(t),
+        Job::Admin(u) => Work::Admin(u),
         Job::Tool(t) => Work::Tool(t),
     })
 }
@@ -683,6 +751,35 @@ fn run_tool(t: &Tool) -> (u16, Value) {
             state,
             &body(&json!({"mode": mode, "confirm_experimental": mode == "ncm"})),
         ),
+        // Only txpowerpercent changes: the firmware's reconf applies it with `iw` and
+        // keeps hostapd (and its stations) running.
+        Tool::WifiPower { percent } => crate::wifi::wifi_set(
+            state,
+            &body(&json!({"txpower_2g": percent.to_string(), "txpower_5g": percent.to_string()})),
+        ),
+        Tool::WifiBlock { mac, blocked } => {
+            let name = CLIENTS
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|c| {
+                    c["mac"]
+                        .as_str()
+                        .is_some_and(|m| m.eq_ignore_ascii_case(mac))
+                })
+                .and_then(|c| c["hostname"].as_str().map(str::to_string));
+            let reply = crate::wifi::set_blocked(mac, *blocked, name.as_deref());
+            // Off the list at once; the next client read would only drop it in 10 s.
+            if *blocked && reply.0 == 200 {
+                CLIENTS.lock().unwrap().retain(|c| {
+                    !c["mac"]
+                        .as_str()
+                        .is_some_and(|m| m.eq_ignore_ascii_case(mac))
+                });
+            }
+            reply
+        }
+        Tool::UsbLan { enabled } => crate::usb::usb_lan_set(&body(&json!({"enabled": enabled}))),
         Tool::NetMode { mode } => {
             let reply =
                 crate::cell::modem_network_mode_set(state, &body(&json!({"net_select": mode})));
@@ -718,7 +815,20 @@ fn run(work: &Work) -> (u16, Value) {
     match work {
         Work::Wireguard(v) => wireguard::update(&body(v)),
         // The switch turns the other backend off in the same transaction.
-        Work::Backend(v) => proxy::set(&body(v)),
+        Work::Backend(v) => {
+            let ts = v["backend"] == "tailscale"
+                || v["active"] == "tailscale"
+                || crate::tailscale::summary().is_ok_and(|s| s["enabled"] == true);
+            let (code, reply) = proxy::set(&body(v));
+            if ts && code != 200 {
+                (
+                    code,
+                    json!({"ok":false,"error":"Tailscale switch failed; reload status in OpenUI."}),
+                )
+            } else {
+                (code, reply)
+            }
+        }
         Work::Clash(v) => clash::update(&body(v)),
         Work::Refresh(v) => clash::refresh(&body(v)),
         Work::Select(v) => clash::select(&body(v)),
@@ -742,6 +852,29 @@ fn run(work: &Work) -> (u16, Value) {
             Ok(()) => (200, json!({"ok":true})),
             Err(e) => (400, json!({"ok":false,"error":e})),
         },
+        Work::Relay(a) => crate::wifi_uplink::relay_action(a),
+        Work::Tailscale(t) => {
+            let _transition = crate::transition::lock();
+            let (code, fresh) = crate::tailscale::get();
+            if code != 200 {
+                return (code, json!({"ok":false,"error":"Tailscale unavailable"}));
+            }
+            match ipc::tailscale_body(&fresh["data"], t) {
+                Ok(v) => {
+                    let (code, reply) = crate::tailscale::update_locked(&body(&v));
+                    if code != 200 {
+                        (
+                            code,
+                            json!({"ok":false,"error":"Tailscale change failed; reload status in OpenUI."}),
+                        )
+                    } else {
+                        (code, reply)
+                    }
+                }
+                Err(e) => (409, json!({"ok":false,"error":e})),
+            }
+        }
+        Work::Admin(u) => crate::admin_services::apply(*u),
         Work::Tool(t) => run_tool(t),
     }
 }
@@ -803,12 +936,25 @@ fn start_job(job: Job) -> String {
             }
             _ => {}
         }
+        if matches!(work, Work::Admin(_)) {
+            // apply() has already published the verified service snapshot (or omitted
+            // it on unknown outcome). Publish Jdone immediately, not after unrelated
+            // proxy/diagnostic work which may take many seconds.
+            end.result = match code {
+                200 => 0,
+                409 => 1,
+                _ => 2,
+            };
+            end.message = ipc::text_bytes(reply["error"].as_str().unwrap_or(""), 96);
+            return;
+        }
         if matches!(work, Work::Select(_) | Work::Delay(_)) || proxies_wanted() {
             refresh_proxies();
         }
         refresh_proxy_parts();
         end.result = match code {
-            200 => 0,
+            // 202: accepted and carried out right after (the NCM/ECM USB switches).
+            200 | 202 => 0,
             409 => 1,
             _ => 2,
         };
@@ -953,6 +1099,53 @@ pub fn start(state: Arc<AppState>) {
         }
     });
 }
+#[cfg(test)]
+mod signal_tests {
+    use super::*;
+
+    #[test]
+    fn zero_nr_fields_fall_back_to_lte() {
+        // LTE camp right after boot: NR fields are 0, not empty.
+        let lte = json!({"network_type": "LTE", "nr5g_rsrp": 0, "lte_rsrp": -77, "nr5g_rssi": "0",
+            "lte_rssi": "-46", "nr5g_pci": 0, "lte_pci": 254, "nr5g_action_band": "", "wan_active_band": "LTE BAND 66"});
+        assert_eq!(
+            nr_or_lte(&lte, "nr5g_rsrp", "lte_rsrp").as_deref(),
+            Some("-77")
+        );
+        assert_eq!(
+            nr_or_lte(&lte, "nr5g_rssi", "lte_rssi").as_deref(),
+            Some("-46")
+        );
+        assert_eq!(
+            nr_or_lte(&lte, "nr5g_pci", "lte_pci").as_deref(),
+            Some("254")
+        );
+        assert_eq!(
+            nr_or_lte(&lte, "nr5g_action_band", "wan_active_band").as_deref(),
+            Some("LTE BAND 66")
+        );
+        // On 5G the NR reading wins; text bands are not numbers and still count.
+        let nr = json!({"nr5g_rsrp": -95, "lte_rsrp": -80, "nr5g_action_band": "n41", "wan_active_band": "LTE BAND 2"});
+        assert_eq!(
+            nr_or_lte(&nr, "nr5g_rsrp", "lte_rsrp").as_deref(),
+            Some("-95")
+        );
+        assert_eq!(
+            nr_or_lte(&nr, "nr5g_action_band", "wan_active_band").as_deref(),
+            Some("n41")
+        );
+        // Neither set: unset, so the record shows 0 / "-" as before.
+        assert_eq!(
+            nr_or_lte(
+                &json!({"nr5g_rsrp": "--", "lte_rsrp": ""}),
+                "nr5g_rsrp",
+                "lte_rsrp"
+            ),
+            None
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

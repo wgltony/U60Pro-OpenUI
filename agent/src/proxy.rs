@@ -12,6 +12,7 @@ enum Backend {
     Off,
     Wireguard,
     Clash,
+    Tailscale,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,8 +48,20 @@ fn compose(wireguard: Result<Value, String>, clash: Result<Value, String>) -> Va
     };
     json!({"active": active, "conflict": on(0) && on(1), "backends": backends})
 }
+fn compose_tailscale(mut v: Value, tailscale: Result<Value, String>) -> Value {
+    let ts = entry("tailscale", tailscale);
+    if ts["enabled"] == true {
+        v["conflict"] = json!(v["active"] != "off");
+        v["active"] = json!("tailscale");
+    }
+    v["backends"].as_array_mut().unwrap().push(ts);
+    v
+}
 fn status() -> Value {
-    compose(wireguard::summary(), clash::summary())
+    compose_tailscale(
+        compose(wireguard::summary(), clash::summary()),
+        crate::tailscale::summary(),
+    )
 }
 pub fn get() -> (u16, Value) {
     (200, json!({"ok": true, "data": status()}))
@@ -91,14 +104,60 @@ fn stale_off(switch: &Switch, wireguard_on: bool, clash_on: bool) -> bool {
     switch.backend == Backend::Off && switch.active.is_some_and(|a| a != on)
 }
 pub fn set(body: &[u8]) -> (u16, Value) {
+    let _transition = crate::transition::lock();
     let Ok(switch) = serde_json::from_slice::<Switch>(body) else {
         return (400, json!({"ok": false, "error": "Invalid proxy request"}));
     };
+    let ts_on = crate::tailscale::summary().is_ok_and(|s| s["enabled"] == true);
+    if switch.backend == Backend::Tailscale || (switch.backend == Backend::Off && ts_on) {
+        if switch.backend == Backend::Off && switch.active.is_some_and(|a| a != Backend::Tailscale)
+        {
+            return (
+                409,
+                json!({"ok":false,"error":"Configuration changed; refresh before saving"}),
+            );
+        }
+        let action = if switch.backend == Backend::Tailscale {
+            "connect"
+        } else {
+            "disconnect"
+        };
+        let body = serde_json::to_vec(
+            &json!({"action":action,"expected_revision":switch.expected_revision}),
+        )
+        .unwrap();
+        let (code, reply) = crate::tailscale::update_locked(&body);
+        if code != 200 {
+            return (code, reply);
+        }
+        if switch.backend == Backend::Off {
+            if let Err(e) = crate::tailscale::native_off() {
+                return (400, json!({"ok":false,"error":e}));
+            }
+        }
+        return get();
+    }
     let state = |s: Result<Value, String>| {
         s.map(|v| (v["enabled"] == true, v["revision"].as_u64().unwrap_or(0)))
             .unwrap_or((false, 0))
     };
     let (wireguard, clash) = (state(wireguard::summary()), state(clash::summary()));
+    if ts_on && matches!(switch.backend, Backend::Wireguard | Backend::Clash) {
+        let revision = if switch.backend == Backend::Wireguard {
+            wireguard.1
+        } else {
+            clash.1
+        };
+        if revision != switch.expected_revision {
+            return (
+                409,
+                json!({"ok":false,"error":"Configuration changed; refresh before saving"}),
+            );
+        }
+        if let Err(e) = crate::tailscale::ensure_down() {
+            return (400, json!({"ok":false,"error":e}));
+        }
+    }
     if stale_off(&switch, wireguard.0, clash.0) {
         return (
             409,
@@ -108,8 +167,8 @@ pub fn set(body: &[u8]) -> (u16, Value) {
     for (backend, update) in requests(&switch, wireguard, clash) {
         let body = serde_json::to_vec(&update).unwrap();
         let (code, reply) = match backend {
-            Backend::Clash => clash::update(&body),
-            _ => wireguard::update(&body),
+            Backend::Clash => clash::update_locked(&body),
+            _ => wireguard::update_locked(&body),
         };
         if code != 200 {
             return (code, reply);
@@ -123,6 +182,23 @@ mod tests {
     use super::*;
     fn summary(enabled: bool) -> Result<Value, String> {
         Ok(json!({"enabled": enabled, "revision": 3, "ready": true, "reason": null, "error": null}))
+    }
+    #[test]
+    fn tailscale_mode_is_explicit_and_conflicts_are_visible() {
+        let only_ts = compose_tailscale(compose(summary(false), summary(false)), summary(true));
+        assert_eq!(only_ts["active"], "tailscale");
+        assert_eq!(only_ts["conflict"], false);
+        assert_eq!(only_ts["backends"].as_array().unwrap().len(), 3);
+        let conflict = compose_tailscale(compose(summary(true), summary(false)), summary(true));
+        assert_eq!(conflict["conflict"], true);
+        assert!(
+            serde_json::from_str::<Switch>(r#"{"backend":"tailscale","expected_revision":0}"#)
+                .is_ok()
+        );
+        assert!(serde_json::from_str::<Switch>(
+            r#"{"backend":"tailscale","expected_revision":0,"command":"up"}"#
+        )
+        .is_err());
     }
     #[test]
     fn the_active_backend_follows_the_saved_state() {
