@@ -1,8 +1,8 @@
 name: Desktop installer
 
 on:
-  push:
-    tags: ['v*']
+  # This fork does not ship the desktop installer (it installs upstream's packages);
+  # release tags do not build it. Run it by hand if you maintain one.
   workflow_dispatch:
     inputs:
       release_tag:
