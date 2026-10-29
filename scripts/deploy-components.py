@@ -254,7 +254,8 @@ def current_credentials(transport):
 
 # Where each component is installed; --skip-unchanged leaves alone those already there.
 INSTALLED = {'agent': '/data/zte-agent', 'wg': '/data/bin/wg', 'openui-screen': '/data/bin/openui-screen',
-             'mihomo': '/data/bin/mihomo', 'lpac': '/data/bin/lpac'}
+             'mihomo': '/data/bin/mihomo', 'lpac': '/data/bin/lpac',
+             'tailscale': '/data/bin/tailscale', 'tailscaled': '/data/bin/tailscaled'}
 
 
 def skip_unchanged(transport, prepared, programs):
@@ -455,7 +456,8 @@ def prepare_geodata(directory):
 def deploy(args):
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]{0,252}', args.gateway): raise ValueError('Invalid gateway')
     if not any((args.agent, args.dashboard, args.harden, getattr(args, 'screen', None), getattr(args, 'wireguard_tools', None),
-                getattr(args, 'mihomo', None), getattr(args, 'mihomo_geodata', None), getattr(args, 'lpac', None))):
+                getattr(args, 'mihomo', None), getattr(args, 'mihomo_geodata', None), getattr(args, 'lpac', None),
+                getattr(args, 'tailscale', None))):
         raise ValueError('Select at least one component')
     # Finish all local preparation before contacting or mutating a device.
     prepared = {}
@@ -482,6 +484,13 @@ def deploy(args):
         if len(wg) < 64 or wg[:6] != b'\x7fELF\x02\x01' or int.from_bytes(wg[18:20], 'little') != 183:
             raise ValueError('WireGuard tool must be an aarch64 ELF64 executable')
         programs['wg'] = wg
+    if getattr(args, 'tailscale', None):
+        # tailscale and tailscaled from scripts/prepare-tailscale.py (static, pinned).
+        for name in ('tailscale', 'tailscaled'):
+            binary = read_limited(Path(args.tailscale) / name)
+            if len(binary) < 64 or binary[:6] != b'\x7fELF\x02\x01' or int.from_bytes(binary[18:20], 'little') != 183:
+                raise ValueError(f'{name} must be an aarch64 ELF64 executable')
+            programs[name] = binary
     if getattr(args, 'screen', None):
         panel = read_limited(args.screen)
         if len(panel) < 64 or panel[:6] != b'\x7fELF\x02\x01' or int.from_bytes(panel[18:20], 'little') != 183:
@@ -552,6 +561,17 @@ def deploy(args):
             transport.shell('mkdir -p /data/bin')
             transport.push(programs['wg'], '/data/bin/wg.staged', True)
             transport.shell('set -e; /data/bin/wg.staged --version >/dev/null; mv /data/bin/wg.staged /data/bin/wg')
+        if 'tailscale' in programs or 'tailscaled' in programs:
+            transport.shell('mkdir -p /data/bin')
+            for name in ('tailscale', 'tailscaled'):
+                if name in programs:
+                    transport.push(programs[name], f'/data/bin/{name}.staged', True)
+                    transport.shell(f'set -e; /data/bin/{name}.staged --version >/dev/null; mv /data/bin/{name}.staged /data/bin/{name}')
+            # The agent starts nothing itself: its startup script starts this service at boot.
+            transport.push(device_script('openui-tailscale.init'), '/etc/init.d/openui-tailscale', True)
+            transport.shell('set -e; chmod 755 /etc/init.d/openui-tailscale; /etc/init.d/openui-tailscale restart; '
+                            'n=0; while [ ! -S /var/run/tailscale/tailscaled.sock ] && [ $n -lt 15 ]; do sleep 1; n=$((n+1)); done; '
+                            'test -S /var/run/tailscale/tailscaled.sock')
         if 'openui-screen' in programs:
             transport.shell('test ! -e /tmp/openui-screen/owner; mkdir -p /data/bin /data/local/tmp/openui-screen-licenses')
             transport.push(programs['openui-screen'], '/data/bin/openui-screen.staged', True)
@@ -582,6 +602,10 @@ def deploy(args):
             # Complete and hash-check both staged files before stopping the process.
             transport.push(prepared['agent'], '/data/zte-agent.staged', True)
             transport.push(prepared['startup'], '/data/local/tmp/start_zte_agent.sh.staged', True)
+            # The relay band guard ships with the agent (the Wi-Fi relay is an agent feature).
+            transport.push(device_script('relay-band-guard.sh'), '/data/bin/relay-band-guard.sh.staged', True)
+            transport.shell('set -e; sh -n /data/bin/relay-band-guard.sh.staged; chmod 755 /data/bin/relay-band-guard.sh.staged; '
+                            'mv /data/bin/relay-band-guard.sh.staged /data/bin/relay-band-guard.sh')
             transport.shell('set -e; sh -n /data/local/tmp/start_zte_agent.sh.staged; killall zte-agent 2>/dev/null || true')
             transport.shell('set -e; mv /data/zte-agent.staged /data/zte-agent; mv /data/local/tmp/start_zte_agent.sh.staged /data/local/tmp/start_zte_agent.sh')
             transport.push(device_script('update-rc-local.sh'), '/data/local/tmp/open-u60-rc-update.sh', True)
@@ -604,6 +628,9 @@ def deploy(args):
                             'rm -f /data/local/tmp/dashboard-dist.tar.gz')
             # Deploy the root-pointer-aware service script with the dashboard.
             transport.push(device_script('start-dashboard.sh'), '/data/local/tmp/start_dashboard.sh', True)
+            # Without --harden nothing else adds the boot entry: the dashboard would stay down after a reboot.
+            transport.push(device_script('update-rc-local.sh'), '/data/local/tmp/open-u60-rc-update.sh', True)
+            transport.shell("sh /data/local/tmp/open-u60-rc-update.sh 'sh /data/local/tmp/start_dashboard.sh'")
             transport.shell('sh /data/local/tmp/start_dashboard.sh')
             time.sleep(1)
             transport.shell("/usr/bin/curl --fail --silent --show-error --connect-timeout 5 --max-time 10 http://127.0.0.1:8080/ | grep -q '<div id=\"root\"></div>'")
@@ -631,6 +658,7 @@ def main():
     parser.add_argument('--skip-unchanged', action='store_true', help='leave out components the modem already has at the same checksum')
     parser.add_argument('--screen', help='aarch64 openui-screen binary; web entry remains gated until recovery verification')
     parser.add_argument('--wireguard-tools', help='Verified aarch64 wg binary to include in the deployment snapshot')
+    parser.add_argument('--tailscale', help='Directory with tailscale and tailscaled from scripts/prepare-tailscale.py')
     parser.add_argument('--mihomo', help='aarch64 Clash core built by scripts/prepare-mihomo.py')
     parser.add_argument('--mihomo-geodata', help='Geo data directory prepared by scripts/prepare-geodata.py')
     parser.add_argument('--allow-unpinned-mihomo', action='store_true', help='accept a core whose checksum differs from the pinned build')

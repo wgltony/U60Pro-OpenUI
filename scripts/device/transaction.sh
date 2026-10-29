@@ -34,7 +34,11 @@ data/bin/openui-screen
 data/local/tmp/openui-screen-verified
 data/local/tmp/openui-screen-licenses
 data/bin/lpac
-data/local/tmp/openui-lpac-licenses"
+data/local/tmp/openui-lpac-licenses
+data/bin/tailscale
+data/bin/tailscaled
+data/bin/relay-band-guard.sh
+etc/init.d/openui-tailscale"
 
 case "$action" in
 begin)

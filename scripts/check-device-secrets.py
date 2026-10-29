@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Reject device identity values and backup-key material in tracked files."""
+"""Reject device identity values, backup-key material and personal data in tracked files.
+
+Personal names, SSIDs, accounts or hosts that must never be published go in
+.git/info/personal-patterns, one case-insensitive literal per line ('#' starts a
+comment). The file lives inside .git, so the list itself is never committed.
+"""
 
 from __future__ import annotations
 
@@ -25,6 +30,21 @@ TOKEN = re.compile(
 )
 
 
+# A real WireGuard private key (a 32-byte base64 value), not a placeholder.
+WIREGUARD_KEY = re.compile(rb"(?im)^\s*PrivateKey\s*=\s*[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=")
+# Tailscale auth/API/OAuth keys: tskey-<kind>-<id>CNTRL-<secret>.
+TAILSCALE_KEY = re.compile(rb"tskey-(?:auth|api|client|webhook)-[A-Za-z0-9]{6,}-[A-Za-z0-9]{16,}")
+PERSONAL = ROOT / ".git/info/personal-patterns"
+
+
+def personal_patterns() -> list[bytes]:
+    try:
+        lines = PERSONAL.read_bytes().splitlines()
+    except FileNotFoundError:
+        return []
+    return [line.strip().lower() for line in lines if line.strip() and not line.lstrip().startswith(b"#")]
+
+
 def candidate_files() -> list[Path]:
     result = subprocess.run(
         ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
@@ -37,6 +57,7 @@ def candidate_files() -> list[Path]:
 
 def main() -> int:
     failures: list[str] = []
+    personal = personal_patterns()
     for path in candidate_files():
         try:
             data = path.read_bytes()
@@ -54,6 +75,14 @@ def main() -> int:
             failures.append(f"{path.relative_to(ROOT)}: private key material")
         if TOKEN.search(data):
             failures.append(f"{path.relative_to(ROOT)}: credential-like token")
+        if WIREGUARD_KEY.search(data):
+            failures.append(f"{path.relative_to(ROOT)}: WireGuard private key")
+        if TAILSCALE_KEY.search(data):
+            failures.append(f"{path.relative_to(ROOT)}: Tailscale key")
+        lowered = data.lower()
+        # Only the file is named: printing the match would publish it in CI logs.
+        if any(pattern in lowered for pattern in personal):
+            failures.append(f"{path.relative_to(ROOT)}: matches .git/info/personal-patterns")
 
     if failures:
         print("Device-secret audit failed:")
@@ -61,7 +90,8 @@ def main() -> int:
             print(f"  {failure}")
         return 1
 
-    print("OK: no tracked device identities, ZTE backup suffixes, private keys, or credential tokens")
+    extra = f", or any of {len(personal)} personal patterns" if personal else ""
+    print(f"OK: no tracked device identities, ZTE backup suffixes, private keys, credential tokens, WireGuard or Tailscale keys{extra}")
     return 0
 
 

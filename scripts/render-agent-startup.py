@@ -20,7 +20,13 @@ def render(password: str, pin: str = "") -> str:
     lines.append(f"export ZTE_AGENT_PIN={shlex.quote(pin)}" if pin else "unset ZTE_AGENT_PIN")
     # Ignore HUP before forking: legacy ADB can close before nohup executes.
     lines.append("trap '' HUP")
-    lines.append("nohup sh -c '/data/zte-agent 2>&1 | logger -t zte-agent' >/dev/null 2>&1 </dev/null &")
+    # Optional services, started only when deployed; a second start of either is a no-op.
+    # This firmware's procd ignores custom /etc/rc.d links, so boot starts them here.
+    lines.append("[ -x /etc/init.d/openui-tailscale ] && /etc/init.d/openui-tailscale start >/dev/null 2>&1")
+    lines.append("[ -x /data/bin/relay-band-guard.sh ] && nohup /data/bin/relay-band-guard.sh >/dev/null 2>&1 </dev/null &")
+    # The firmware's syslogd keeps only local0: the agent keeps its own rotating log
+    # in /data/local/tmp/openui-logs (shown under System -> Tools).
+    lines.append("nohup sh -c '/data/zte-agent 2>&1 | /data/zte-agent log-writer' >/dev/null 2>&1 </dev/null &")
     return "\n".join(lines) + "\n"
 
 
