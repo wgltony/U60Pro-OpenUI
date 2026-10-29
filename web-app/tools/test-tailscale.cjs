@@ -49,7 +49,7 @@ test('exit choices exclude offline peers and duplicates; clear uses an empty str
     { ...fixture.exit_nodes[0] }, { id: '', name: 'Invalid', ip: '', online: true },
   ] }
   assert.deepEqual(plain(eligibleExitNodes(status)), fixture.exit_nodes)
-  assert.equal(eligibleExitNodes(status)[0].name, 'us-oracle-a1')
+  assert.equal(eligibleExitNodes(status)[0].name, 'us-west-exit')
   assert.equal(eligibleExitNodes(status)[0].hostname, 'instance-demo')
   assert.deepEqual(plain(tailscaleUpdate(status, 'select_exit', '')), { expected_revision: 7, action: 'select_exit', exit_node: '' })
   assert.deepEqual(plain(tailscaleUpdate(status, 'select_exit', 'peer-exit-demo')), { expected_revision: 7, action: 'select_exit', exit_node: 'peer-exit-demo' })

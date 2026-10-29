@@ -2021,14 +2021,14 @@ mod tailscale_tests {
     use super::*;
     fn snapshot() -> Value {
         json!({"revision":7,"enabled":true,"backend_state":"Running","error":null,
-            "selected_exit_node":"nSecret1","exit_nodes":[{"id":"nSecret1","name":"us-oracle-a1.tailnet.ts.net"},
+            "selected_exit_node":"nSecret1","exit_nodes":[{"id":"nSecret1","name":"us-west-exit.tailnet.ts.net"},
             {"id":"nSecret2","name":"hk-exit\t\n"}],"AuthURL":"secret-url","self":{"id":"identity"}})
     }
     #[test]
     fn redacted_bounded_projection_and_revisioned_indices() {
         let v = snapshot();
         let r = tailscale_records(&v, 123);
-        assert!(r.contains("\tus-oracle-a1\t123\n"));
+        assert!(r.contains("\tus-west-exit\t123\n"));
         for secret in ["nSecret", "tailnet", "secret-url", "identity"] {
             assert!(!r.contains(secret));
         }
@@ -2079,7 +2079,7 @@ mod tailscale_tests {
         assert!(parse("backend 7 off tailscale").is_ok());
         for bad in [
             "ts 7 connect raw",
-            "ts 7 exit 8 us-oracle",
+            "ts 7 exit 8 us-west",
             "ts 7 exit 8 32",
             "ts 7 exit 8 100000",
             "ts 7 login",

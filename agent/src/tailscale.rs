@@ -1479,20 +1479,20 @@ mod tests {
     }
     #[test]
     fn custom_assigned_dns_label_is_primary_without_tailnet_domain() {
-        let mut peer = json!({"ID":"n1","HostName":"instance-original","DNSName":"us-oracle-a1.tailnet.ts.net.",
+        let mut peer = json!({"ID":"n1","HostName":"instance-example","DNSName":"us-west-exit.tailnet.ts.net.",
             "Online":true,"ExitNodeOption":true,"TailscaleIPs":["100.64.0.1"]});
         let exit = eligible_peer(&peer).unwrap();
-        assert_eq!(exit["name"], "us-oracle-a1");
-        assert_eq!(exit["hostname"], "instance-original");
+        assert_eq!(exit["name"], "us-west-exit");
+        assert_eq!(exit["hostname"], "instance-example");
         let own = sanitized(&Settings::default(), &json!({"Self":peer.clone()}), None);
-        assert_eq!(own["self"]["name"], "us-oracle-a1");
-        assert_eq!(own["self"]["hostname"], "instance-original");
+        assert_eq!(own["self"]["name"], "us-west-exit");
+        assert_eq!(own["self"]["hostname"], "instance-example");
         assert!(!own.to_string().contains("tailnet.ts.net"));
         assert!(!exit.to_string().contains("tailnet.ts.net"));
         peer.as_object_mut().unwrap().remove("DNSName");
-        assert_eq!(eligible_peer(&peer).unwrap()["name"], "instance-original");
+        assert_eq!(eligible_peer(&peer).unwrap()["name"], "instance-example");
         peer["DNSName"] = json!(".");
-        assert_eq!(display_name(&peer, "Exit node"), "instance-original");
+        assert_eq!(display_name(&peer, "Exit node"), "instance-example");
     }
     #[test]
     fn strict_requests_and_revision() {

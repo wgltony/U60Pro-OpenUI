@@ -1903,8 +1903,8 @@ static void tailscale_tests(struct drm_buf *b,const char *dir) {
   snprintf(fixture,sizeof(fixture),
       "S 7 1 0 0 0 0 0 0 1 %llu\n"
       "B\ttailscale\t0\t7\t1\t-\t0\t12\t1\t-\t0\t9\t1\t-\t0\n"
-      "T\t9\t42\t1\tRunning\t0\tus-oracle-a1\t%llu\n"
-      "t\t0\t1\tus-oracle-a1\nt\t1\t0\thk-exit\nt\t2\t0\tjp-exit\nt\t3\t0\tsg-exit\n"
+      "T\t9\t42\t1\tRunning\t0\tus-west-exit\t%llu\n"
+      "t\t0\t1\tus-west-exit\nt\t1\t0\thk-exit\nt\t2\t0\tjp-exit\nt\t3\t0\tsg-exit\n"
       "C 200 120 128 2 27 en\nY 200 120 128 2 113 en 1\n"
       "F 200 120 128 14 16497 en 1\nJ 0 0 0 0 0\n.\n",now,now);
   struct snapshot s;assert(parse_snapshot(fixture,&s));
@@ -1914,7 +1914,7 @@ static void tailscale_tests(struct drm_buf *b,const char *dir) {
   reset_job();stub_job="OK 1\n";page=MENU;dialog=0;dirty=0;capture_both(b,dir,"menu-tailscale");
   assert(strstr(html,"act:tailscale")&&strstr(html,"Tailscale"));
   press_id(b,"tailscale");assert(page==TAILSCALE);capture_both(b,dir,"tailscale");
-  assert(strstr(html,"Status != forwarding")&&strstr(html,"us-oracle-a1"));
+  assert(strstr(html,"Status != forwarding")&&strstr(html,"us-west-exit"));
   press_id(b,"ts1");assert(dialog==5&&confirm_what==CF_TS);
   capture_both(b,dir,"tailscale-confirm");press_id(b,"confirm");expect_request("ts 9 exit 42 1\n");reset_job();
   press_id(b,"tsnext");assert(ts_offset==3);press_id(b,"ts0");press_id(b,"confirm");expect_request("ts 9 exit 42 3\n");reset_job();

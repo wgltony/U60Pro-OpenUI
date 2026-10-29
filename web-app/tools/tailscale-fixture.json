@@ -4,7 +4,7 @@
   "backend_state": "Running",
   "self": { "id": "self-demo", "name": "openui-demo", "ips": ["100.64.0.10"], "online": true },
   "exit_nodes": [
-    { "id": "peer-exit-demo", "name": "us-oracle-a1", "hostname": "instance-demo", "ip": "100.64.0.20", "online": true }
+    { "id": "peer-exit-demo", "name": "us-west-exit", "hostname": "instance-demo", "ip": "100.64.0.20", "online": true }
   ],
   "selected_exit_node": "",
   "error": null
