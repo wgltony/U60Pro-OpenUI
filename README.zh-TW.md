@@ -64,7 +64,7 @@ bash install.sh               # 安裝；加 --with-tailscale 同時安裝 Tails
 | --- | --- | --- | --- |
 | ![主選單](docs/images/readme/zh/screen-menu.png)<br>主選單（九宮格） | ![無線中繼](docs/images/readme/zh/screen-relay.png)<br>無線中繼 | ![鍵盤](docs/images/readme/zh/screen-keyboard.png)<br>螢幕鍵盤輸入密碼 | ![已連線裝置](docs/images/readme/zh/screen-wifi-devices.png)<br>已連線裝置與踢出 |
 | ![Tailscale](docs/images/readme/zh/screen-tailscale.png)<br>Tailscale 出口節點 | ![Clash](docs/images/readme/zh/screen-clash.png)<br>Clash 模式與節點 | ![WireGuard](docs/images/readme/zh/screen-wireguard.png)<br>WireGuard | ![eSIM](docs/images/readme/zh/screen-esim.png)<br>eSIM 切換 |
-| ![訊號](docs/images/readme/zh/screen-signal.png)<br>訊號與網路模式 | ![電池](docs/images/readme/zh/screen-battery.png)<br>電池與充電上限 | ![概覽](docs/images/readme/zh/screen-overview.png)<br>概覽與 USB 網路共享 | ![電源選單](docs/images/readme/zh/screen-power-menu.png)<br>長按電源鍵選單 |
+| ![訊號](docs/images/readme/zh/screen-signal.png)<br>訊號、網路模式與速率曲線 | ![電池](docs/images/readme/zh/screen-battery.png)<br>電池與充電上限 | ![概覽](docs/images/readme/zh/screen-overview.png)<br>概覽與 USB 網路共享 | ![電源選單](docs/images/readme/zh/screen-power-menu.png)<br>長按電源鍵選單 |
 
 ## 功能
 
@@ -79,7 +79,7 @@ bash install.sh               # 安裝；加 --with-tailscale 同時安裝 Tails
   本分支為規避已觀察到的 AP/STA 衝突，中繼時由守護暫停與上游同頻段的熱點，保留另一頻段；這是目前策略，不是對所有韌體或硬體能力的絕對結論。守護會提交 UCI，並在 `/data` 留持久復原標記；開啟前準備另一頻段或 USB 備用管理通道。
   見 [Wi-Fi 中繼文件](docs/WIFI-UPLINK.md)。
 - **Wi-Fi 與用戶端**：2.4G / 5G 開關、發射功率；檢視已連線裝置，在網頁或觸控螢幕上封鎖 / 解除封鎖（依裝置名稱識別隨機 MAC）。
-- **訊號與行動網路**：載波和基地台詳情、網路模式、頻段與基地台鎖定、APN、簡訊、流量統計、TTL。
+- **訊號與行動網路**：載波和基地台詳情、網路模式、頻段與基地台鎖定、APN、簡訊、流量統計、TTL（預設值或自訂 1–255）。
 - **eSIM**：管理 SIM 卡槽中可插拔 eUICC 卡（9eSIM、5ber、eSTK.me 等）上的設定檔，功能對標 Android 上的 EasyEUICC：
   網頁上切換、重新命名、刪除，用啟用碼或 QR 碼圖片下載，處理通知；觸控螢幕上切換。基於 lpac。見 [eSIM 文件](docs/ESIM.md)。
 - **電池與系統**：充電上限、溫度與資源監控、停止廠商服務與釋放記憶體、關機與重新開機。

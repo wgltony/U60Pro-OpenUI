@@ -15,7 +15,7 @@ export default {
   '2.4 GHz & 5 GHz radio switches, SSID and connected client count': '2.4 GHz 与 5 GHz 频段开关、SSID 及在线终端数',
   'Live RSRP / SINR / band metrics and 5G SA / NSA / 4G mode switch': '实时 RSRP / SINR / 频段指标与 5G SA / NSA / 4G 制式切换',
   'USB & TTL': 'USB 与 TTL',
-  'RNDIS / NCM / ECM USB mode and TTL 64 / 65 / 128': 'RNDIS / NCM / ECM USB 模式及 TTL 64 / 65 / 128',
+  'RNDIS / NCM / ECM USB mode and TTL presets or a custom value': 'RNDIS / NCM / ECM USB 模式及 TTL 预设或自定义值',
   'Battery & Charge': '电池与充电',
   'Real-time voltage / current / health and 70% / 80% / 90% / 100% charge limits': '实时电压 / 电流 / 健康度与 70% / 80% / 90% / 100% 充电上限',
   'Booster': '加速清理',

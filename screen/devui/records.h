@@ -283,6 +283,25 @@ static void parse_uplink(char **f, int n, struct uplink_info *u) {
   u->saved = atoi(f[12]);
   u->has = 1;
 }
+/* G step down up: recent speed for the Signal page's chart, kbit/s per `step` seconds as
+ * comma lists, oldest first. n stays 0 with an older agent. */
+#define CHART_POINTS 60
+struct speed_chart { int n, step; unsigned down[CHART_POINTS], up[CHART_POINTS]; };
+static int csv_u32(const char *s, unsigned *out, int max) {
+  int n=0;
+  while(*s&&n<max) {
+    char *end;unsigned long v=strtoul(s,&end,10);
+    if(end==s||(*end&&*end!=','))return -1;
+    out[n++]=v>4000000000UL?4000000000U:(unsigned)v;
+    s=*end?end+1:end;
+  }
+  return *s?-1:n;
+}
+static void parse_speed_chart(char **f, int n, struct speed_chart *c) {
+  if(n<4)return;
+  int step=atoi(f[1]),nd=csv_u32(f[2],c->down,CHART_POINTS),nu=csv_u32(f[3],c->up,CHART_POINTS);
+  c->n=step>0&&step<=60&&nd>0&&nd==nu?nd:0;c->step=c->n?step:0;
+}
 /* I mac band signal secs ip name: a Wi-Fi station. i mac name: a blocked MAC. */
 struct wifi_sta { char mac[18], ip[16], name[49]; int band; long long signal; unsigned long long secs; };
 struct wifi_blocked { char mac[18], name[49]; };

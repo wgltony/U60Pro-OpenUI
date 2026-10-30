@@ -81,6 +81,7 @@ struct snapshot {
   struct relay_catalog relay;
   struct tailscale_info tailscale;
   struct toolbox_info toolbox;
+  struct speed_chart chart;
   struct wifi_sta wsta[16];
   struct wifi_blocked wblk[32];
   int nwsta, nwblk;
@@ -144,6 +145,8 @@ enum { JOB_WG = 1, JOB_BACKEND, JOB_MODE, JOB_SUB, JOB_REFRESH, JOB_SELECT, JOB_
 static int pending_kind;
 /* USB page: the mode picked but not applied yet (-1: none). */
 static int usb_draft = -1;
+/* USB page: a custom TTL being dialed with -/+ but not applied yet (-1: none, use presets). */
+static int ttl_draft = -1;
 /* Wi-Fi page: 0 bands, 1 connected devices, 2 blocked devices; first row shown; the
  * device a kick confirmation names. */
 static int wifi_view, wifi_offset;
@@ -322,7 +325,7 @@ static int parse_snapshot(char *buf, struct snapshot *out) {
     else if (line[0] == 'J')
       /* fresh, the newest job the records already show, is absent from older agents. */
       s.has_fresh = sscanf(line, "J %d %llu %llu %d %llu", &s.busy, &s.job, &s.done, &s.result, &s.fresh) == 5;
-    else if (line[0] && strchr("ABKUMXxEQqRHTtLlwIi", line[0]) && line[1] == '\t') {
+    else if (line[0] && strchr("ABKUMXxEQqRHGTtLlwIi", line[0]) && line[1] == '\t') {
       char *f[48]; /* H has 39 fields */
       int n = split_tabs(line, f, 48);
       switch (f[0][0]) {
@@ -343,6 +346,7 @@ static int parse_snapshot(char *buf, struct snapshot *out) {
       case 'l': parse_relay_saved(f,n,&s.relay);break;
       case 'w': parse_relay_scan(f,n,&s.relay);break;
       case 'H': parse_toolbox(f, n, &s.toolbox); break;
+      case 'G': parse_speed_chart(f, n, &s.chart); break;
       case 'I': if (s.nwsta < 16 && parse_wifi_sta(f, n, &s.wsta[s.nwsta])) s.nwsta++; break;
       case 'i': if (s.nwblk < 32 && parse_wifi_blocked(f, n, &s.wblk[s.nwblk])) s.nwblk++; break;
       }
@@ -2055,11 +2059,42 @@ static void toolbox_tests(struct drm_buf *b, const char *dir) {
   press_id(b,"w2");expect_request("tool wifi_toggle 2g 0\n");assert(pending_kind==JOB_TOOL);reset_job();
   press_id(b,"back");assert(page==MENU);
   press_id(b,"signal");assert(page==SIGNAL_PAGE);capture_both(b,dir,"toolbox-signal");
-  assert(strstr(html,"5G Auto"));
+  assert(strstr(html,"5G Auto")&&strstr(html,"Collecting speed")&&strstr(html,"256M"));
+  /* G: the speed chart. Malformed lists leave it empty; a good one draws one column per
+   * point on a 1/2/5 scale, and the speed row takes the newest point over H's. */
+  {
+    char g[2048],bad[]="G\t2\t1,2\t3\n",down[1024]="",up[1024]="";
+    char *f[8];int n=split_tabs(bad,f,8);struct speed_chart c={0};
+    parse_speed_chart(f,n,&c);assert(c.n==0);
+    for(int i=0;i<45;i++){
+      char d[16],u[16];
+      snprintf(d,sizeof(d),"%s%d",i?",":"",i<30?i*11000:340000-(i-30)*20000);
+      snprintf(u,sizeof(u),"%s%d",i?",":"",i*400);
+      strcat(down,d);strcat(up,u);
+    }
+    snprintf(g,sizeof(g),"G\t2\t%s\t%s",down,up);
+    n=split_tabs(g,f,8);parse_speed_chart(f,n,&data.chart);
+    assert(data.chart.n==45&&data.chart.step==2&&data.chart.down[29]==319000&&chart_scale(&data.chart)==500000);
+    build_html();assert(strstr(html,">500M<")&&strstr(html,"↓ 60.0M")&&!strstr(html,"正在收集速率")&&!strstr(html,"Collecting speed"));
+    capture_both(b,dir,"toolbox-signal-chart");
+  }
   press_id(b,"net1");expect_request("tool net_mode Only_5G\n");reset_job();
   press_id(b,"back");assert(page==MENU);
   press_id(b,"usb");assert(page==USB_PAGE);capture_both(b,dir,"toolbox-usb");
   press_id(b,"ttl65");expect_request("tool ttl 65\n");reset_job();
+  press_id(b,"ttl117");expect_request("tool ttl 117\n");reset_job();
+  /* Custom TTL: -/+ build a draft from the live value (64), Set applies it, and a preset
+   * or leaving the page clears the draft. */
+  press_id(b,"ttlp");assert(ttl_draft==65&&!test_request[0]);
+  press_id(b,"ttlp");assert(ttl_draft==66);
+  press_id(b,"ttlm");assert(ttl_draft==65);
+  press_id(b,"ttlp");press_id(b,"ttlp");assert(ttl_draft==67);
+  press_id(b,"ttlset");expect_request("tool ttl 67\n");assert(ttl_draft==-1);reset_job();
+  press_id(b,"ttlp");assert(ttl_draft==65);
+  press_id(b,"ttl64");expect_request("tool ttl 64\n");assert(ttl_draft==-1);reset_job();
+  press_id(b,"ttlp");assert(ttl_draft==65);
+  press_id(b,"back");assert(page==MENU);
+  press_id(b,"usb");assert(page==USB_PAGE&&ttl_draft==-1);capture_both(b,dir,"toolbox-usb");
   /* Picking only marks a mode; Apply sends it, and re-picking the active one disables Apply. */
   press_id(b,"usb1");assert(usb_draft==1&&!test_request[0]);capture_both(b,dir,"toolbox-usb-picked");
   press_id(b,"usbapply");expect_request("tool usb_mode ecm\n");assert(usb_draft==-1);reset_job();

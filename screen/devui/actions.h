@@ -35,7 +35,7 @@ static void refresh_page(void) {
 static void go(int p) {
   if(p!=UPLINK){relay_editor_clear();relay_view=RV_STATUS;}
   page=p;notice[0]=0;need_draw=1;
-  if(p==USB_PAGE)usb_draft=-1;
+  if(p==USB_PAGE){usb_draft=-1;ttl_draft=-1;}
   if(p==WIFI_PAGE){wifi_view=0;wifi_offset=0;}
   if(p==NODES)fetch_groups();
   /* Reading the card changes nothing: done on entry until the card has been read once. */
@@ -346,10 +346,20 @@ static void tap(int x,int y) {
     } else if(!strcmp(a,"usbapply")&&pick>=0&&pick!=cur) {
       char req[64];snprintf(req,sizeof(req),"tool usb_mode %s\n",usb_modes[pick]);
       usb_draft=-1;send_job(req,JOB_TOOL,0);
-    } else if(!strcmp(a,"ttl0"))send_job("tool ttl 0\n",JOB_TOOL,0);
-    else if(!strcmp(a,"ttl64"))send_job("tool ttl 64\n",JOB_TOOL,0);
-    else if(!strcmp(a,"ttl65"))send_job("tool ttl 65\n",JOB_TOOL,0);
-    else if(!strcmp(a,"ttl128"))send_job("tool ttl 128\n",JOB_TOOL,0);
+    } else if(!strcmp(a,"ttl0")){ttl_draft=-1;send_job("tool ttl 0\n",JOB_TOOL,0);}
+    else if(!strcmp(a,"ttl64")){ttl_draft=-1;send_job("tool ttl 64\n",JOB_TOOL,0);}
+    else if(!strcmp(a,"ttl65")){ttl_draft=-1;send_job("tool ttl 65\n",JOB_TOOL,0);}
+    else if(!strcmp(a,"ttl117")){ttl_draft=-1;send_job("tool ttl 117\n",JOB_TOOL,0);}
+    else if(!strcmp(a,"ttl128")){ttl_draft=-1;send_job("tool ttl 128\n",JOB_TOOL,0);}
+    /* Custom TTL: -/+ build a draft from the live value, Set applies it (1..255). */
+    else if(!strcmp(a,"ttlm")||!strcmp(a,"ttlp")) {
+      int base=(ttl_draft>0?ttl_draft:(data.toolbox.ttl_val?(int)data.toolbox.ttl_val:64))+(a[3]=='p'?1:-1);
+      if(base<1)base=1;else if(base>255)base=255;
+      ttl_draft=base;need_draw=1;
+    } else if(!strcmp(a,"ttlset")&&ttl_draft>0&&(unsigned long long)ttl_draft!=data.toolbox.ttl_val) {
+      char req[32];snprintf(req,sizeof(req),"tool ttl %d\n",ttl_draft);
+      ttl_draft=-1;send_job(req,JOB_TOOL,0);
+    }
   } else if(page==POWER_PAGE&&!blocked()&&data.toolbox.has) {
     if(!strcmp(a,"chgon"))send_job("tool charge_switch 1\n",JOB_TOOL,0);
     else if(!strcmp(a,"chgoff"))send_job("tool charge_switch 0\n",JOB_TOOL,0);

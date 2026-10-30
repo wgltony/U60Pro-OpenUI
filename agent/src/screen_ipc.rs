@@ -102,7 +102,8 @@ pub enum Tool {
     UsbLan { enabled: bool },
     /// Switch the preferred network mode to one of the firmware's `net_select` values.
     NetMode { mode: String },
-    /// Set IPv4/IPv6 hop limit / TTL (`0` clears TTL mangling, `64`/`65`/`128` applies it).
+    /// Set IPv4/IPv6 hop limit / TTL (`0` clears TTL mangling, any `1..=255` applies it;
+    /// 64/65/128 are the common presets, but DevUI can dial a custom value).
     Ttl { value: u16 },
     /// Toggle charging (`true` resumes, `false` pauses).
     ChargeSwitch { enabled: bool },
@@ -553,8 +554,9 @@ pub fn parse(line: &str) -> Result<Request, &'static str> {
             }))
         }
         ["tool", "ttl", val] => {
+            // 0 clears TTL mangling; 1..=255 is a valid hop limit (presets or custom).
             let v = number(val, "Invalid TTL")?;
-            if !matches!(v, 0 | 64 | 65 | 128) {
+            if v > 255 {
                 return Err("Invalid TTL");
             }
             job(Job::Tool(Tool::Ttl { value: v as u16 }))
@@ -943,6 +945,22 @@ pub fn diag_records(v: &Value) -> String {
 }
 /// `H\trssi\trsrp\trsrq\tsinr\tradio\tband\tnet_select\tlte_bands\tnr_bands\tpci\tkbps_down\tkbps_up\tcpu_pct\tmem_pct\ttemp_mc\tbloat_cnt\twifi_2g_on\twifi_5g_on\twifi_clients\twifi_ssid\tusb_mode\tusb_adb\tttl_val\tchg_enabled\tchg_limit_on\tchg_max\tchg_stop\tchg_start\tbatt_mv\tbatt_ma\tbatt_health\tusb_lan_on\tusb_lan_state\tusb_lan_iface\twifi_pct_2g\twifi_pct_5g\twifi_dbm_2g\twifi_dbm_5g`
 /// Extended Pocket OS telemetry record for Signal, Wi-Fi, Power, Toolbox, and System subpages.
+/// `G step down up`: the Signal page's speed chart, kbit/s per `step` seconds as comma
+/// lists, oldest first. Empty until the sampler has its first point.
+pub fn speed_record(step: u32, points: &[(u32, u32)]) -> String {
+    if points.is_empty() {
+        return String::new();
+    }
+    let list = |pick: fn(&(u32, u32)) -> u32| {
+        points
+            .iter()
+            .map(|p| pick(p).to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    format!("G\t{step}\t{}\t{}\n", list(|p| p.0), list(|p| p.1))
+}
+
 pub fn toolbox_record(v: &Value) -> String {
     let i = |k: &str| v[k].as_i64().unwrap_or(0);
     let u = |k: &str| v[k].as_u64().unwrap_or(0);
@@ -1907,7 +1925,12 @@ mod tests {
         );
         assert!(tool("tool net_mode 5G_SA").is_err());
         assert_eq!(tool("tool ttl 64"), Ok(Tool::Ttl { value: 64 }));
-        assert!(tool("tool ttl 99").is_err());
+        assert_eq!(tool("tool ttl 0"), Ok(Tool::Ttl { value: 0 }));
+        assert_eq!(tool("tool ttl 1"), Ok(Tool::Ttl { value: 1 }));
+        assert_eq!(tool("tool ttl 117"), Ok(Tool::Ttl { value: 117 }));
+        assert_eq!(tool("tool ttl 255"), Ok(Tool::Ttl { value: 255 }));
+        assert!(tool("tool ttl 256").is_err());
+        assert!(tool("tool ttl 999").is_err());
         assert_eq!(
             tool("tool charge_switch 0"),
             Ok(Tool::ChargeSwitch { enabled: false })
@@ -1920,6 +1943,11 @@ mod tests {
         assert_eq!(tool("tool kill_bloat"), Ok(Tool::KillBloat));
         assert_eq!(tool("tool drop_caches"), Ok(Tool::DropCaches));
         assert!(tool("tool").is_err() && tool("wifi 5g 1").is_err());
+        assert_eq!(speed_record(2, &[]), "");
+        assert_eq!(
+            speed_record(2, &[(350_000, 12_000), (0, 5)]),
+            "G\t2\t350000,0\t12000,5\n"
+        );
         let h = toolbox_record(&json!({
             "rssi": -65,
             "rsrp": -92,

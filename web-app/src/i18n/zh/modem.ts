@@ -102,6 +102,12 @@ export default {
   'Update': '更新',
   'Disable': '停用',
   'Enable clamping': '启用 TTL 修改',
+  'Presets': '预设值',
+  'Custom value': '自定义',
+  'Recommended': '推荐',
+  'Standard': '标准',
+  'Windows': 'Windows',
+  'Some carriers': '部分运营商',
 
   // eSIM
   'Reading the card': '读取卡片',

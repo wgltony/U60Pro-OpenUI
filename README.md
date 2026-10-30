@@ -63,7 +63,7 @@ bash install.sh               # 安装；加 --with-tailscale 同时安装 Tails
 | --- | --- | --- | --- |
 | ![主菜单](docs/images/readme/zh/screen-menu.png)<br>主菜单（九宫格） | ![无线中继](docs/images/readme/zh/screen-relay.png)<br>无线中继 | ![键盘](docs/images/readme/zh/screen-keyboard.png)<br>屏幕键盘输入密码 | ![已连接设备](docs/images/readme/zh/screen-wifi-devices.png)<br>已连接设备与踢出 |
 | ![Tailscale](docs/images/readme/zh/screen-tailscale.png)<br>Tailscale 出口节点 | ![Clash](docs/images/readme/zh/screen-clash.png)<br>Clash 模式与节点 | ![WireGuard](docs/images/readme/zh/screen-wireguard.png)<br>WireGuard | ![eSIM](docs/images/readme/zh/screen-esim.png)<br>eSIM 切换 |
-| ![信号](docs/images/readme/zh/screen-signal.png)<br>信号与网络制式 | ![电池](docs/images/readme/zh/screen-battery.png)<br>电池与充电上限 | ![概览](docs/images/readme/zh/screen-overview.png)<br>概览与 USB 网络共享 | ![电源菜单](docs/images/readme/zh/screen-power-menu.png)<br>长按电源键菜单 |
+| ![信号](docs/images/readme/zh/screen-signal.png)<br>信号、网络制式与速率曲线 | ![电池](docs/images/readme/zh/screen-battery.png)<br>电池与充电上限 | ![概览](docs/images/readme/zh/screen-overview.png)<br>概览与 USB 网络共享 | ![电源菜单](docs/images/readme/zh/screen-power-menu.png)<br>长按电源键菜单 |
 
 ## 功能
 
@@ -78,7 +78,7 @@ bash install.sh               # 安装；加 --with-tailscale 同时安装 Tails
   本分支为规避已观测到的 AP/STA 冲突，中继时由守护暂停与上游同频段的热点，保留另一频段；这是当前策略，不是对所有固件或硬件能力的绝对结论。守护会提交 UCI，并在 `/data` 留持久恢复标记；开启前准备另一频段或 USB 备用管理通道。
   见 [Wi-Fi 中继文档](docs/WIFI-UPLINK.md)。
 - **Wi-Fi 与客户端**：2.4G / 5G 开关、发射功率；查看已连接设备，在网页或触摸屏上拉黑 / 解除拉黑（按设备名识别随机 MAC）。
-- **信号与蜂窝**：载波和小区详情、网络制式、频段与小区锁定、APN、短信、流量统计、TTL。
+- **信号与蜂窝**：载波和小区详情、网络制式、频段与小区锁定、APN、短信、流量统计、TTL（预设值或自定义 1–255）。
 - **eSIM**：管理 SIM 卡槽里可插拔 eUICC 卡（9eSIM、5ber、eSTK.me 等）上的配置文件，功能对标 Android 上的 EasyEUICC：
   网页上切换、重命名、删除，用激活码或二维码图片下载，处理通知；触摸屏上切换。基于 lpac。见 [eSIM 文档](docs/ESIM.md)。
 - **电池与系统**：充电上限、温度和资源监控、清理厂商服务和释放内存、关机和重启。

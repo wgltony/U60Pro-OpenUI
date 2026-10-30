@@ -81,7 +81,7 @@ struct Parts {
     wireguard_at: u64,
     wireguard_data: Value,
     wireguard_pass: u64,
-    /// `O`
+    /// `O`, and `G` when the Signal page is in the menu
     system: String,
     /// `B`
     backend: String,
@@ -408,7 +408,14 @@ fn refresh_system(state: &AppState) {
         memory.as_ref().map_or(-1.0, |m| m.usage_pct),
         cpu.overall
     );
-    PARTS.lock().unwrap().system = o_line;
+    // The chart is a copy of the sampler's ring: no extra reads, sent only when the
+    // Signal page can be opened.
+    let g_line = if signal_wanted() {
+        ipc::speed_record(system::HISTORY_STEP, &state.speed.history())
+    } else {
+        String::new()
+    };
+    PARTS.lock().unwrap().system = o_line + &g_line;
     if !toolbox_wanted() {
         let mut parts = PARTS.lock().unwrap();
         parts.toolbox.clear();
@@ -426,6 +433,10 @@ fn toolbox_wanted() -> bool {
         .iter()
         .chain(std::iter::once(&s.home_page))
         .any(|p| TOOLBOX_PAGES.contains(&p.as_str()))
+}
+fn signal_wanted() -> bool {
+    let s = crate::screen_settings::current();
+    s.home_page == "signal" || s.menu_items.iter().any(|p| p == "signal")
 }
 /// How often the `H` record is read: it costs a dozen firmware and system calls, so it
 /// follows the panel's two-second status only every ten seconds (and right after an

@@ -839,12 +839,39 @@ static void render_wifi(void) {
   footer(422,48,pending&&pending_kind==JOB_TOOL?L("Applying Wi-Fi changes...","正在应用 Wi-Fi 设置..."):
          L("Lower = less range and interference. No disconnects.","降低功率覆盖变小、干扰更少；设置时设备不会断开。"),pending?"warn":"muted");
 }
+/* The chart's full height: the smallest 1/2/5 step at or above the peak, at least 1 Mbit/s. */
+static unsigned long long chart_scale(const struct speed_chart *c) {
+  unsigned long long peak=0,base=1000;
+  for(int i=0;i<c->n;i++){if(c->down[i]>peak)peak=c->down[i];if(c->up[i]>peak)peak=c->up[i];}
+  for(;;base*=10) {
+    if(base>=peak)return base;
+    if(base*2>=peak)return base*2;
+    if(base*5>=peak)return base*5;
+  }
+}
+/* Recent speed as bars: download green, upload a blue tick at its level; newest on the
+ * right, one column per point. Plain boxes, so it costs a page redraw and nothing else. */
+static void draw_speed_chart(int x, int y, int w, int h) {
+  const struct speed_chart *c=&data.chart;
+  unsigned long long scale=chart_scale(c);
+  char tmp[24];
+  rect(x,y+h,w,1,"line",NULL);
+  for(int i=0;i<c->n;i++) {
+    int col=CHART_POINTS-c->n+i,x0=x+col*w/CHART_POINTS,cw=x+(col+1)*w/CHART_POINTS-x0-1;
+    int dh=(int)((unsigned long long)c->down[i]*h/scale),uh=(int)((unsigned long long)c->up[i]*h/scale);
+    if(dh>0)rect(x0,y+h-dh,cw,dh,"",c->down[i]*2>scale?"#4cc97a":"#2f8a55");
+    if(uh>0)rect(x0,y+h-(uh<2?2:uh),cw,2,"","#4c9eeb");
+  }
+  snprintf(tmp,sizeof(tmp),"%lluM",scale/1000);
+  box(x,y-2,w,20,"faint right",tmp);
+}
 static void render_signal(void) {
   const struct toolbox_info *h=&data.toolbox;
+  const struct speed_chart *c=&data.chart;
   char tmp[128],d_rate[24],u_rate[24];
   int can=!blocked()&&h->has;
   header(L("Signal","信号"));
-  add("<div class=\"box card\" style=\"left:12px;top:72px;width:296px;height:132px\"></div>");
+  add("<div class=\"box card\" style=\"left:12px;top:72px;width:296px;height:108px\"></div>");
   snprintf(tmp,sizeof(tmp),"%s · %s",h->radio[0]?h->radio:"--",h->band[0]?h->band:"--");
   kv_row(80,L("Network","网络"),tmp,"accent");
   if(h->rsrp==NO_FIGURE)snprintf(tmp,sizeof(tmp),"--");
@@ -852,21 +879,26 @@ static void render_signal(void) {
   kv_row(104,"RSRP / SINR",tmp,h->rsrp==NO_FIGURE?"":h->rsrp>-95?"good":h->rsrp>-110?"warn":"bad");
   snprintf(tmp,sizeof(tmp),"%lld dB · PCI %s",h->rsrq,h->pci[0]?h->pci:"-");
   kv_row(128,"RSRQ / PCI",tmp,"");
-  format_rate(d_rate,sizeof(d_rate),h->kbps_down);format_rate(u_rate,sizeof(u_rate),h->kbps_up);
-  snprintf(tmp,sizeof(tmp),"↓ %s  ↑ %s",d_rate,u_rate);
-  kv_row(152,L("Speed","实时速率"),tmp,"");
   snprintf(tmp,sizeof(tmp),"LTE %s · NR %s",h->lte_bands[0]?h->lte_bands:"-",h->nr_bands[0]?h->nr_bands:"-");
-  kv_row(176,L("Carriers","载波"),tmp,"");
-  section(216,L("Network mode","网络制式"));
+  kv_row(152,L("Carriers","载波"),tmp,"");
+  /* The chart's newest point is two seconds old at most; H's speed is up to ten. */
+  add("<div class=\"box card\" style=\"left:12px;top:188px;width:296px;height:104px\"></div>");
+  format_rate(d_rate,sizeof(d_rate),c->n?c->down[c->n-1]:h->kbps_down);
+  format_rate(u_rate,sizeof(u_rate),c->n?c->up[c->n-1]:h->kbps_up);
+  snprintf(tmp,sizeof(tmp),"↓ %s  ↑ %s",d_rate,u_rate);
+  kv_row(196,L("Speed","实时速率"),tmp,"");
+  if(c->n)draw_speed_chart(24,222,272,60);
+  else box(28,240,264,20,"faint center",L("Collecting speed...","正在收集速率..."));
+  section(300,L("Network mode","网络制式"));
   int is_sa=!strcmp(h->net_select,"Only_5G");
   int is_nsa=!strcmp(h->net_select,"LTE_AND_5G");
   int is_4g=!strcmp(h->net_select,"Only_LTE");
   int is_auto=!is_sa&&!is_nsa&&!is_4g;
-  linkbox(12,240,142,52,"net0",L("5G Auto","5G 自动"),can,is_auto?CHOSEN:PLAIN);
-  linkbox(166,240,142,52,"net1",L("5G SA only","仅 5G SA"),can,is_sa?CHOSEN:PLAIN);
-  linkbox(12,300,142,52,"net2","5G NSA",can,is_nsa?CHOSEN:PLAIN);
-  linkbox(166,300,142,52,"net3",L("4G only","仅 4G"),can,is_4g?CHOSEN:PLAIN);
-  footer(368,40,pending&&pending_kind==JOB_TOOL?L("Switching the network mode...","正在切换网络制式..."):
+  linkbox(12,322,142,48,"net0",L("5G Auto","5G 自动"),can,is_auto?CHOSEN:PLAIN);
+  linkbox(166,322,142,48,"net1",L("5G SA only","仅 5G SA"),can,is_sa?CHOSEN:PLAIN);
+  linkbox(12,378,142,48,"net2","5G NSA",can,is_nsa?CHOSEN:PLAIN);
+  linkbox(166,378,142,48,"net3",L("4G only","仅 4G"),can,is_4g?CHOSEN:PLAIN);
+  footer(434,40,pending&&pending_kind==JOB_TOOL?L("Switching the network mode...","正在切换网络制式..."):
          L("Band and cell locking are in OpenUI.","锁频段与锁小区请在 OpenUI 中操作。"),pending?"warn":"muted");
 }
 /* One USB mode to pick: name (and "now" on the active one), what it is for, a radio mark.
@@ -897,14 +929,28 @@ static void render_usb(void) {
           can&&pick>=0&&pick!=cur,PRIMARY);
   if(h->ttl_val)snprintf(tmp,sizeof(tmp),L("TTL for shared devices · %llu","共享设备的 TTL · %llu"),h->ttl_val);
   else snprintf(tmp,sizeof(tmp),"%s",L("TTL for shared devices · off","共享设备的 TTL · 关"));
-  section(272,tmp);
-  linkbox(12,294,68,48,"ttl0",L("Off","关"),can,h->ttl_val==0?CHOSEN:PLAIN);
-  linkbox(88,294,68,48,"ttl64","64",can,h->ttl_val==64?CHOSEN:PLAIN);
-  linkbox(164,294,68,48,"ttl65","65",can,h->ttl_val==65?CHOSEN:PLAIN);
-  linkbox(240,294,68,48,"ttl128","128",can,h->ttl_val==128?CHOSEN:PLAIN);
-  footer(356,100,pending&&pending_kind==JOB_TOOL?L("Applying… USB drops for a few seconds, then reconnects with ADB.","正在应用… USB 会断开几秒，随后连同 ADB 一起恢复。"):
+  section(258,tmp);
+  /* Presets are highlighted only against the applied value; while a custom value is being
+   * dialed the stepper box below carries the current choice instead. */
+  int sel=ttl_draft<0?(int)h->ttl_val:-1;
+  linkbox(12,280,52,48,"ttl0",L("Off","关"),can,sel==0?CHOSEN:PLAIN);
+  linkbox(73,280,52,48,"ttl64","64",can,sel==64?CHOSEN:PLAIN);
+  linkbox(134,280,52,48,"ttl65","65",can,sel==65?CHOSEN:PLAIN);
+  linkbox(195,280,52,48,"ttl117","117",can,sel==117?CHOSEN:PLAIN);
+  linkbox(256,280,52,48,"ttl128","128",can,sel==128?CHOSEN:PLAIN);
+  /* Custom value: -/+ nudge a draft, the middle box shows it, Set applies. */
+  int shown=ttl_draft>0?ttl_draft:(int)h->ttl_val;
+  char num[12];
+  if(shown>0)snprintf(num,sizeof(num),"%d",shown);
+  else snprintf(num,sizeof(num),"%s",L("Off","关"));
+  linkbox(12,334,52,48,"ttlm","−",can,PLAIN);
+  linkbox(72,334,78,48,"ttlval",num,can,CHOSEN);
+  linkbox(158,334,52,48,"ttlp","+",can,PLAIN);
+  linkbox(218,334,90,48,"ttlset",pending&&pending_kind==JOB_TOOL?L("Setting","应用中"):L("Set","设定"),
+          can&&ttl_draft>0&&(unsigned long long)ttl_draft!=h->ttl_val,PRIMARY);
+  footer(390,80,pending&&pending_kind==JOB_TOOL?L("Applying… USB drops for a few seconds, then reconnects with ADB.","正在应用… USB 会断开几秒，随后连同 ADB 一起恢复。"):
          pick>=0&&pick!=cur?L("Apply switches the USB mode: USB drops for a few seconds and comes back with ADB. A reboot returns to RNDIS.","点「应用」切换：USB 断开几秒后恢复，ADB 保持可用。重启后回到 RNDIS。"):
-         L("Tap a mode, then Apply. A fixed TTL makes shared devices look like the router.","先选模式再点「应用」。固定 TTL 可让共享设备看起来与本机相同。"),pending?"warn":"muted");
+         L("Tap a preset, or dial a custom TTL with − / + and Set. A fixed TTL makes shared devices look like the router.","点预设，或用 − / + 调出自定义 TTL 再点「设定」。固定 TTL 可让共享设备看起来与本机相同。"),pending?"warn":"muted");
 }
 static void render_power(void) {
   const struct toolbox_info *h=&data.toolbox;

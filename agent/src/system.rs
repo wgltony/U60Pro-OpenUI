@@ -313,8 +313,41 @@ pub struct SpeedSnapshot {
     pub elapsed_ms: u64,
 }
 
+/// Points kept for the panel's speed chart, one every `HISTORY_STEP` seconds: two minutes.
+pub const HISTORY_LEN: usize = 60;
+pub const HISTORY_STEP: u32 = 2;
+
+/// Recent throughput in kbit/s, newest last. Each point is the mean of the 1 s samples
+/// in its step, so the chart costs no reads beyond the sampler's own.
+#[derive(Default)]
+struct SpeedHistory {
+    points: VecDeque<(u32, u32)>,
+    sum: (f64, f64),
+    count: u32,
+}
+
+impl SpeedHistory {
+    /// One sample in bytes/s.
+    fn push(&mut self, rx_speed: f64, tx_speed: f64) {
+        self.sum.0 += rx_speed;
+        self.sum.1 += tx_speed;
+        self.count += 1;
+        if self.count < HISTORY_STEP {
+            return;
+        }
+        let kbps = |bytes: f64| (bytes / f64::from(self.count) * 8.0 / 1000.0).round() as u32;
+        if self.points.len() >= HISTORY_LEN {
+            self.points.pop_front();
+        }
+        self.points.push_back((kbps(self.sum.0), kbps(self.sum.1)));
+        self.sum = (0.0, 0.0);
+        self.count = 0;
+    }
+}
+
 pub struct SpeedTracker {
     latest: Arc<Mutex<SpeedSnapshot>>,
+    history: Arc<Mutex<SpeedHistory>>,
 }
 
 impl SpeedTracker {
@@ -338,11 +371,43 @@ impl SpeedTracker {
             time: Instant::now(),
         });
 
+        let history = Arc::new(Mutex::new(SpeedHistory::default()));
+
         // Background sampler thread
         let ring_c = Arc::clone(&ring);
         let latest_c = Arc::clone(&latest);
+        let history_c = Arc::clone(&history);
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_secs(1));
+
+            // Preferred source: the modem's own WWAN counters. They include the
+            // IPA-hardware-offloaded forwarded traffic that the AP-side rmnet netdev
+            // counters miss, and the modem already reports an instantaneous speed, so
+            // the reading is both accurate at high rates and responsive (no long
+            // rolling window flattening the peaks).
+            if let Some(w) = read_wwan_modem() {
+                // Keep the fallback ring clean so a later source switch starts fresh.
+                ring_c.safe_lock().clear();
+                let mut latest = latest_c.safe_lock();
+                let max_rx_speed = latest.max_rx_speed.max(w.rx_speed);
+                let max_tx_speed = latest.max_tx_speed.max(w.tx_speed);
+                *latest = SpeedSnapshot {
+                    rx_bytes: w.rx_bytes,
+                    tx_bytes: w.tx_bytes,
+                    rx_speed: w.rx_speed,
+                    tx_speed: w.tx_speed,
+                    max_rx_speed,
+                    max_tx_speed,
+                    elapsed_ms: 1000,
+                };
+                drop(latest);
+                history_c.safe_lock().push(w.rx_speed, w.tx_speed);
+                continue;
+            }
+
+            // Fallback: derive the rate from the AP-side rmnet byte counters over a
+            // rolling window. This undercounts hardware-offloaded forwarded traffic,
+            // but still tracks the device's own and non-offloaded traffic.
             let (rx, tx) = read_rmnet_bytes();
             let now = Instant::now();
             let mut buf = ring_c.safe_lock();
@@ -375,46 +440,94 @@ impl SpeedTracker {
                         max_tx_speed,
                         elapsed_ms: (secs * 1000.0) as u64,
                     };
+                    drop(latest);
+                    history_c.safe_lock().push(rx_speed, tx_speed);
                 }
             }
         });
 
-        Self { latest }
+        Self { latest, history }
     }
 
     pub fn sample(&self) -> SpeedSnapshot {
         self.latest.safe_lock().clone()
     }
+
+    /// Down and up kbit/s for the last `HISTORY_LEN` steps, oldest first.
+    pub fn history(&self) -> Vec<(u32, u32)> {
+        self.history.safe_lock().points.iter().copied().collect()
+    }
 }
 
 fn read_rmnet_bytes() -> (u64, u64) {
-    let mut rx_total: u64 = 0;
-    let mut tx_total: u64 = 0;
+    // `rmnet_data0` is the default-route WAN child (`rmnet_data0@rmnet_ipa0`) and carries
+    // the full per-flow byte count; the `rmnet_ipa0` parent only counts a partial subset,
+    // so summing the two double-counts. Take the data interface, and fall back to the
+    // parent only if the data interface reports nothing.
     for iface in &["rmnet_data0", "rmnet_ipa0"] {
         let base = format!("/sys/class/net/{iface}/statistics");
         if let (Some(rx), Some(tx)) = (
             read_sysfs_u64(&format!("{base}/rx_bytes")),
             read_sysfs_u64(&format!("{base}/tx_bytes")),
         ) {
-            rx_total += rx;
-            tx_total += tx;
+            if rx > 0 || tx > 0 {
+                return (rx, tx);
+            }
         }
     }
-    if rx_total > 0 || tx_total > 0 {
-        return (rx_total, tx_total);
-    }
-    // Fallback: parse both from /proc/net/dev
-    for iface in read_network_traffic() {
-        if iface.name == "rmnet_data0" || iface.name == "rmnet_ipa0" {
-            rx_total += iface.rx_bytes;
-            tx_total += iface.tx_bytes;
+    // Fallback: parse from /proc/net/dev, same interface preference.
+    let traffic = read_network_traffic();
+    for name in ["rmnet_data0", "rmnet_ipa0"] {
+        for iface in &traffic {
+            if iface.name.as_str() == name && (iface.rx_bytes > 0 || iface.tx_bytes > 0) {
+                return (iface.rx_bytes, iface.tx_bytes);
+            }
         }
     }
-    (rx_total, tx_total)
+    (0, 0)
 }
 
 fn read_sysfs_u64(path: &str) -> Option<u64> {
     fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Live WWAN throughput read from the modem's own counters. The modem counts every
+/// byte it sends/receives over the air, so unlike the AP-side `rmnet` netdev counters
+/// it also sees IPA-hardware-offloaded forwarded (hotspot) traffic — the WAN↔WLAN path
+/// that bypasses the host CPU entirely and therefore never increments the netdev stats.
+struct WwanLive {
+    rx_bytes: u64,
+    tx_bytes: u64,
+    rx_speed: f64,
+    tx_speed: f64,
+}
+
+/// Extract the live counters from a `zwrt_data get_wwandst` reply. `real_*` is the
+/// current connection's running total and instantaneous speed (bytes and bytes/s).
+fn parse_wwan_live(v: &serde_json::Value) -> Option<WwanLive> {
+    let num = |k: &str| -> Option<f64> {
+        match v.get(k)? {
+            serde_json::Value::Number(n) => n.as_f64(),
+            serde_json::Value::String(s) => s.parse::<f64>().ok(),
+            _ => None,
+        }
+    };
+    Some(WwanLive {
+        rx_bytes: num("real_rx_bytes")?.max(0.0) as u64,
+        tx_bytes: num("real_tx_bytes")?.max(0.0) as u64,
+        rx_speed: num("real_rx_speed").unwrap_or(0.0).max(0.0),
+        tx_speed: num("real_tx_speed").unwrap_or(0.0).max(0.0),
+    })
+}
+
+fn read_wwan_modem() -> Option<WwanLive> {
+    let v = crate::ubus::call(
+        "zwrt_data",
+        "get_wwandst",
+        Some(r#"{"source_module":"web","cid":1,"type":4}"#),
+    )
+    .ok()?;
+    parse_wwan_live(&v)
 }
 
 // -- Process monitor --
@@ -801,6 +914,49 @@ mod tests {
         let mut k: Vec<String> = v.as_object().expect("object").keys().cloned().collect();
         k.sort();
         k
+    }
+
+    #[test]
+    fn parse_wwan_live_reads_real_counters() {
+        // A trimmed real `zwrt_data get_wwandst` reply (bytes and bytes/s).
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"real_time":37065,"real_tx_bytes":125189857,"real_rx_bytes":3378185002,
+                "real_tx_speed":12415,"real_rx_speed":13758866,"real_max_rx_speed":101052012,
+                "month_rx_bytes":9589457020}"#,
+        )
+        .unwrap();
+        let w = parse_wwan_live(&v).expect("parsed");
+        assert_eq!(w.rx_bytes, 3_378_185_002);
+        assert_eq!(w.tx_bytes, 125_189_857);
+        assert_eq!(w.rx_speed, 13_758_866.0);
+        assert_eq!(w.tx_speed, 12_415.0);
+    }
+
+    #[test]
+    fn speed_history_averages_each_step_and_keeps_the_newest() {
+        let mut h = SpeedHistory::default();
+        // 10 MB/s then 20 MB/s down: one 120 Mbit/s point after the second sample.
+        h.push(10_000_000.0, 1_000_000.0);
+        assert!(h.points.is_empty());
+        h.push(20_000_000.0, 3_000_000.0);
+        assert_eq!(h.points, [(120_000, 16_000)]);
+        for i in 0..(HISTORY_LEN as u32 + 5) * HISTORY_STEP {
+            h.push(f64::from(i / HISTORY_STEP) * 125.0, 0.0);
+        }
+        assert_eq!(h.points.len(), HISTORY_LEN);
+        assert_eq!(h.points.back(), Some(&(HISTORY_LEN as u32 + 4, 0)));
+    }
+
+    #[test]
+    fn parse_wwan_live_accepts_string_numbers_and_defaults_speed() {
+        // Some firmware returns counters as strings; speed may be absent.
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"real_rx_bytes":"100","real_tx_bytes":"40"}"#).unwrap();
+        let w = parse_wwan_live(&v).expect("parsed");
+        assert_eq!((w.rx_bytes, w.tx_bytes), (100, 40));
+        assert_eq!((w.rx_speed, w.tx_speed), (0.0, 0.0));
+        // Missing the running totals means we cannot trust the sample.
+        assert!(parse_wwan_live(&serde_json::json!({"real_rx_speed": 5})).is_none());
     }
 
     #[test]

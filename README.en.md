@@ -81,7 +81,7 @@ the touchscreen preview build); none show a real device.
 | --- | --- | --- | --- |
 | ![Main menu](docs/images/readme/en/screen-menu.png)<br>Main menu (3×3) | ![Wi-Fi relay](docs/images/readme/en/screen-relay.png)<br>Wi-Fi relay | ![Keyboard](docs/images/readme/en/screen-keyboard.png)<br>On-screen keyboard | ![Connected devices](docs/images/readme/en/screen-wifi-devices.png)<br>Connected devices, kick |
 | ![Tailscale](docs/images/readme/en/screen-tailscale.png)<br>Tailscale exit nodes | ![Clash](docs/images/readme/en/screen-clash.png)<br>Clash mode and nodes | ![WireGuard](docs/images/readme/en/screen-wireguard.png)<br>WireGuard | ![eSIM](docs/images/readme/en/screen-esim.png)<br>eSIM switching |
-| ![Signal](docs/images/readme/en/screen-signal.png)<br>Signal and network mode | ![Battery](docs/images/readme/en/screen-battery.png)<br>Battery and charge limit | ![Overview](docs/images/readme/en/screen-overview.png)<br>Overview and USB LAN | ![Power menu](docs/images/readme/en/screen-power-menu.png)<br>Power-button menu |
+| ![Signal](docs/images/readme/en/screen-signal.png)<br>Signal, network mode and speed chart | ![Battery](docs/images/readme/en/screen-battery.png)<br>Battery and charge limit | ![Overview](docs/images/readme/en/screen-overview.png)<br>Overview and USB LAN | ![Power menu](docs/images/readme/en/screen-power-menu.png)<br>Power-button menu |
 
 ## Features
 
@@ -108,7 +108,7 @@ the touchscreen preview build); none show a real device.
 - **Wi-Fi and clients**: 2.4 / 5 GHz switches and transmit power; connected devices, with
   block / unblock on the web page and the touchscreen (random MACs matched by name).
 - **Signal and cellular**: carrier and cell details, network mode, band and cell locks,
-  APN, SMS, data usage and TTL.
+  APN, SMS, data usage and TTL (presets or a custom 1–255 value).
 - **eSIM**: manage the profiles on a removable eUICC card (9eSIM, 5ber, eSTK.me and
   similar), as EasyEUICC does on Android: switch, rename, delete, download from an
   activation code or a QR image and handle notifications on the web page; switch on the
