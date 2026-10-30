@@ -34,6 +34,7 @@ static void refresh_page(void) {
 }
 static void go(int p) {
   if(p!=UPLINK){relay_editor_clear();relay_view=RV_STATUS;}
+  if(p!=IMEI_PAGE) {imei_clear();if(page==IMEI_PAGE){relay_wipe(html,sizeof(html));relay_wipe(drawn_html,sizeof(drawn_html));drawn_valid=0;}}
   page=p;notice[0]=0;need_draw=1;
   if(p==USB_PAGE)usb_draft=-1;
   if(p==WIFI_PAGE){wifi_view=0;wifi_offset=0;}
@@ -43,6 +44,7 @@ static void go(int p) {
 }
 static int parent(int p) {
   switch(p) {
+  case IMEI_PAGE: return SIGNAL_PAGE;
   case PROFILES: case DEVICES: return visible_page(WG)?WG:MENU;
   case NODES: case SUBS: case CORE: return CLASH;
   case GROUP: return NODES;
@@ -82,7 +84,7 @@ static int digit_id(const char *a, char c, char max) { return a[0]==c&&a[1]>='0'
  * the device is already going down. */
 static void power_menu(void) {
   if(dialog==DLG_POWERING)return;
-  relay_editor_clear();relay_view=RV_STATUS;
+  relay_editor_clear();relay_view=RV_STATUS;imei_clear();
   dialog=DLG_POWER;power_error[0]=0;need_draw=1;
 }
 /* The agent restores the stock UI and then restarts or shuts the device down; this panel
@@ -143,6 +145,7 @@ static void dialog_tap(const char *a) {
     send_job(req,JOB_REFRESH,0);
   } else if(!strcmp(a,"back"))dialog=0;
 }
+#include "imei_actions.h"
 static void tap(int x,int y) {
   char action[96];
   snprintf(action,sizeof(action),"%s",html_view_click((float)x,(float)y));
@@ -151,7 +154,9 @@ static void tap(int x,int y) {
   if(!strcmp(a,"none"))return;
   need_draw=1;
   if(dialog){dialog_tap(a);return;}
-  if(!strcmp(a,"stock")) { relay_editor_clear();quitting=1;return; }
+  if(!strcmp(a,"stock")) { imei_clear();relay_editor_clear();quitting=1;return; }
+  if(imei_tap(a))return;
+  if(!strcmp(a,"imei")&&page==SIGNAL_PAGE){go(IMEI_PAGE);return;}
   if(relay_tap(a))return;
   /* The Wi-Fi page's device lists step back to the list above them, not the menu. */
   if(page==WIFI_PAGE&&wifi_view&&!strcmp(a,"back")) { wifi_view=wifi_view==2?1:0;wifi_offset=0;return; }

@@ -559,7 +559,7 @@ def deploy(args):
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]{0,252}', args.gateway): raise ValueError('Invalid gateway')
     if not any((args.agent, args.dashboard, args.harden, getattr(args, 'screen', None), getattr(args, 'wireguard_tools', None),
                 getattr(args, 'mihomo', None), getattr(args, 'mihomo_geodata', None), getattr(args, 'lpac', None),
-                getattr(args, 'tailscale', None))):
+                getattr(args, 'tailscale', None), getattr(args, 'imei_dir', None))):
         raise ValueError('Select at least one component')
     # Finish all local preparation before contacting or mutating a device.
     prepared = {}
@@ -604,6 +604,9 @@ def deploy(args):
         programs.update(prepare_geodata(args.mihomo_geodata))
     if getattr(args, 'lpac', None):
         programs['lpac'], lpac_version = prepare_lpac(args.lpac, getattr(args, 'allow_unpinned_lpac', False))
+    if getattr(args, 'imei_dir', None):
+        helpers = load_script('prepare-imei-helpers').validate(args.imei_dir)
+        prepared.update({'imei/' + name: data for name, data in helpers.items()})
     if args.auto_adb and not args.adb_serial:
         devices = [line.split()[0] for line in run(['adb', 'devices']).splitlines()[1:] if line.endswith('\tdevice')]
         if len(devices) > 1: raise RuntimeError('Multiple ADB devices connected; select one with --adb-serial')
@@ -631,13 +634,13 @@ def deploy(args):
     if 'openui-screen' in programs and transport.shell('test -e /tmp/openui-screen/owner && echo active || true') == 'active':
         raise RuntimeError('The touchscreen is running OpenUI; return it to the stock screen before replacing the screen program')
     # Count snapshot plus rollback-copy space, including legacy dashboard files.
-    preflight = transport.shell("set -e; for tool in sh sha256sum tar cp mv readlink awk df du sync ubus uci lua sed tr grep cut od stat; do command -v \"$tool\" >/dev/null; done; "
+    preflight = transport.shell("set -e; for tool in sh sha256sum tar cp mv readlink awk df du sync ubus uci lua sed tr grep cut od stat flock; do command -v \"$tool\" >/dev/null; done; "
                                 "lua -e 'assert(require(\"luci.jsonc\"))'; test -r /proc/self/stat; test -r /proc/self/cmdline; "
                                 "test -x /usr/bin/curl; sh -n /etc/rc.local; test -w /data; test -w /etc; "
                                 "test ! -e /data/local/tmp/open-u60-transactions/active; test ! -d /data/local/tmp/open-u60-transactions/lock; "
                                 "df -Pk /data | awk 'END {print $4}'; "
                                 "df -Pk /tmp | awk 'END {print $4}'; df -Pk /etc | awk 'END {print $4}'; "
-                                "(du -sk /data/zte-agent /data/www /data/www.current /data/bin /data/share/mihomo /data/dropbear /data/local/tmp/start_*.sh /etc/dropbear /etc/rc.local /etc/config/uhttpd /etc/config/zwrt_zte_dm /etc/config/wireless /data/local/tmp/relay-band-guard.disabled 2>/dev/null || true) | awk '{n+=$1} END {print n+0}'")
+                                "(du -sk /data/zte-agent /data/www /data/www.current /data/bin /data/share/mihomo /data/dropbear /data/local/tmp/start_*.sh /etc/dropbear /etc/rc.local /etc/config/uhttpd /etc/config/zwrt_zte_dm /etc/config/wireless /data/local/tmp/relay-band-guard.disabled /data/local/tmp/openui-imei-helpers 2>/dev/null || true) | awk '{n+=$1} END {print n+0}'")
     free, tmp_free, etc_free, backup = map(int, preflight.splitlines())
     payload = sum(map(len, prepared.values())) + sum(map(len, programs.values()))
     required = payload + expanded + 2 * backup * 1024 + 16 * 1024 * 1024
@@ -703,6 +706,18 @@ def deploy(args):
             # (the egress kill-switch holds client traffic meanwhile).
             transport.shell("pid=$(cat /data/local/tmp/openui-clash/mihomo.pid 2>/dev/null) || exit 0; "
                             "case \"$(readlink /proc/$pid/exe 2>/dev/null)\" in /data/bin/mihomo*) kill \"$pid\" 2>/dev/null || true;; esac")
+        imei_files = {name[5:]: data for name, data in prepared.items() if name.startswith('imei/')}
+        if imei_files:
+            helper_root = '/data/local/tmp/openui-imei-helpers'
+            for directory in (helper_root, helper_root + '/licenses'):
+                transport.shell(f'set -e; test ! -L {q(directory)}; '
+                                f'if test -e {q(directory)}; then test -d {q(directory)}; '
+                                f'test "$(stat -c \'%u:%a\' {q(directory)})" = 0:700; '
+                                f'else mkdir -m 700 {q(directory)}; fi')
+            # Push bytes and verify hashes only. Even read-only helper commands
+            # open DIAG sessions, so never invoke --version or capability probes.
+            for name, data in imei_files.items():
+                transport.push(data, helper_root + '/' + name, name in ('zte_nv', 'zte_config', 'zte_config_read'))
         if args.agent:
             # The journal quiesced the owned agent and sidecars before replacement.
             transport.push(prepared['agent'], '/data/zte-agent.staged', True)
@@ -763,6 +778,7 @@ def main():
     parser.add_argument('--keep-credentials', action='store_true', help="keep the installed agent's password and PIN instead of entering them")
     parser.add_argument('--skip-unchanged', action='store_true', help='leave out components the modem already has at the same checksum')
     parser.add_argument('--screen', help='aarch64 openui-screen binary; web entry remains gated until recovery verification')
+    parser.add_argument('--imei-dir', help='Optional pinned IMEI helper build directory; hashes checked, no helper executed')
     parser.add_argument('--wireguard-tools', help='Verified aarch64 wg binary to include in the deployment snapshot')
     parser.add_argument('--tailscale', help='Directory with tailscale and tailscaled from scripts/prepare-tailscale.py')
     parser.add_argument('--mihomo', help='aarch64 Clash core built by scripts/prepare-mihomo.py')

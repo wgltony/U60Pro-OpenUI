@@ -641,6 +641,8 @@ fn status() -> String {
     if let Some(s) = crate::admin_services::snapshot() {
         tail.push_str(&ipc::admin_record(&s));
     }
+    // Cached private projection only. Polling never opens a diagnostic session.
+    tail.push_str(&crate::imei::screen_records());
     if result != 0 && failure.0 == done {
         tail.push_str(&format!("E\t{done}\t{}\n", failure.1));
     }
@@ -724,6 +726,7 @@ fn work(job: Job) -> Result<Work, &'static str> {
         Job::Relay(a) => Work::Relay(a),
         Job::Tailscale(t) => Work::Tailscale(t),
         Job::Admin(u) => Work::Admin(u),
+        Job::Imei(_) => return Err("IMEI uses the shared controller queue"),
         Job::Tool(t) => Work::Tool(t),
     })
 }
@@ -910,6 +913,17 @@ impl Drop for JobEnd {
     }
 }
 fn start_job(job: Job) -> String {
+    // The IMEI controller reserves its own cross-Web/native queue synchronously.
+    // No generic J/job success is reported: this ACK means accepted, never verified.
+    let job = match job {
+        Job::Imei(action) => {
+            return match crate::imei::submit(action) {
+                Ok(_) => "OK IMEI\n".into(),
+                Err(_) => "ERR imei_request_failed\n".into(),
+            }
+        }
+        other => other,
+    };
     let work = match work(job) {
         Ok(w) => w,
         Err(e) => return format!("ERR {e}\n"),

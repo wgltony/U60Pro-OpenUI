@@ -197,6 +197,7 @@ static void dialog_card(int y, int h) {
   add("<div class=\"box card\" style=\"left:12px;top:%dpx;width:296px;height:%dpx\"></div>",y,h);
 }
 #include "pages.h"
+#include "imei_pages.h"
 /* Main menu features: their names (shorter on a tile), marks, row details and the word
  * or two a tile shows. */
 static const char *menu_title(int p, int tile) {
@@ -494,6 +495,7 @@ static void build_html(void) {
   else if(page==UPLINK) render_uplink();
   else if(page==WIFI_PAGE) render_wifi();
   else if(page==SIGNAL_PAGE) render_signal();
+  else if(page==IMEI_PAGE) render_imei();
   else if(page==USB_PAGE) render_usb();
   else if(page==POWER_PAGE) render_power();
   else if(page==BOOSTER_PAGE) render_booster();

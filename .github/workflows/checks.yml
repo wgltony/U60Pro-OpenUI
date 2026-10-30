@@ -30,6 +30,9 @@ jobs:
       - run: cargo test -p zte-agent -p process-runner --locked
       - run: cargo clippy -p zte-agent -p process-runner --all-targets --locked -- -D warnings
       - run: python3 -m unittest discover -s tests -v
+      # Host-Clang fake-DIAG + provenance tests; never load a device library or
+      # execute a production helper. Real ABI/write/reboot acceptance is separate.
+      - run: python3 tools/imei-native/tests/run_all.py
       - run: python3 -m unittest discover -s scripts/offline-adb -t scripts/offline-adb -v
       - run: python3 scripts/check-api-contract.py
       - run: python3 scripts/check-device-secrets.py

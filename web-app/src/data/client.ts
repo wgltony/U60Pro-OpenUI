@@ -43,6 +43,7 @@ export async function req(
   timeoutMs = 15_000,
   base = API_BASE,
   sendToken = true,
+  responseShape: 'envelope' | 'bare' = 'envelope',
 ): Promise<Record<string, unknown>> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
@@ -75,10 +76,10 @@ export async function req(
     if (res.status === 401 && sendToken && base === API_BASE && path !== '/api/auth/login') {
       emitAuthExpired()
     }
-    if (!res.ok || !json.ok) {
+    if (!res.ok || (responseShape === 'envelope' && !json.ok)) {
       throw new ApiError(json.error ?? `request failed (${res.status})`, res.status) // i18n-ignore
     }
-    return (json.data ?? {}) as Record<string, unknown>
+    return (responseShape === 'bare' ? json : json.data ?? {}) as Record<string, unknown>
   } finally {
     clearTimeout(timeout)
   }

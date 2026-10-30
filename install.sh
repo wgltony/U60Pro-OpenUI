@@ -21,6 +21,8 @@ Usage: bash install.sh [options]
   --update             Update an existing install: keep its password and PIN,
                        skip unchanged parts, no unlock and no SSH hardening
   --with-tailscale     Also install Tailscale (official static build, ~60 MB)
+  --with-imei          Build/install optional protected IMEI helpers; requires
+                       --from-source. Installation never opens DIAG or writes NV.
   --skip-screen        Leave the touchscreen program as it is
   --from-source        Build agent, dashboard, screen, lpac and the Clash core here
                        (Rust, Zig, Node; Go or Docker for the core) instead of
@@ -39,12 +41,13 @@ ROUTER_PW and ZTE_BACKUP_SUFFIX (only for the unlock of a locked device).
 EOF
 }
 
-UPDATE=0 TAILSCALE=0 SCREEN=1 SOURCE=0 DRY=0 ACK_USB=0 TAG='' REPO='' SERIAL=''
+UPDATE=0 TAILSCALE=0 IMEI=0 SCREEN=1 SOURCE=0 DRY=0 ACK_USB=0 TAG='' REPO='' SERIAL=''
 GATEWAY="${ZTE_GATEWAY:-192.168.0.1}"
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--update) UPDATE=1 ;;
 		--with-tailscale) TAILSCALE=1 ;;
+		--with-imei) IMEI=1 ;;
 		--skip-screen) SCREEN=0 ;;
 		--from-source) SOURCE=1 ;;
 		--release) TAG=${2:?--release needs a tag}; shift ;;
@@ -58,6 +61,7 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
+[ "$IMEI" = 0 ] || [ "$SOURCE" = 1 ] || fail '--with-imei requires --from-source; there is no prebuilt feature release yet.'
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -110,6 +114,11 @@ if [ "$SOURCE" = 1 ]; then
 		info 'Building the touchscreen UI…'
 		ZIG=${ZIG:-zig} sh screen/build.sh
 		cp build/screen/openui-screen "$WORK/openui-screen"
+	fi
+	if [ "$IMEI" = 1 ]; then
+		info 'Building optional IMEI helpers (metadata checks only; no DIAG access)…'
+		ZIG=${ZIG:-zig} python3 tools/imei-native/build.py
+		python3 scripts/prepare-imei-helpers.py tools/imei-native/build
 	fi
 	info 'Building the eSIM tool (lpac)…'
 	ZIG=${ZIG:-zig} python3 scripts/prepare-lpac.py --output "$WORK/lpac"
@@ -202,6 +211,7 @@ ARGS=(--gateway "$GATEWAY" --agent "$WORK/zte-agent" --dashboard "$WORK/dashboar
 [ -f "$WORK/mihomo" ] && ARGS+=(--mihomo "$WORK/mihomo" --mihomo-geodata "$WORK/geo")
 [ "$SCREEN" = 1 ] && ARGS+=(--screen "$WORK/openui-screen")
 [ "$TAILSCALE" = 1 ] && ARGS+=(--tailscale "$WORK/tailscale")
+[ "$IMEI" = 1 ] && ARGS+=(--imei-dir tools/imei-native/build)
 if [ "$UPDATE" = 1 ]; then
 	ARGS+=(--keep-credentials --skip-unchanged)
 else

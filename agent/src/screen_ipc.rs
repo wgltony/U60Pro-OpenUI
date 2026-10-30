@@ -81,6 +81,8 @@ pub enum Job {
     Tailscale(Tailscale),
     /// Shared, strict native-service controller; no shell text.
     Admin(crate::admin_services::Update),
+    /// Shared private controller; Debug must redact target strings.
+    Imei(crate::imei::Action),
     /// Pocket OS toolbox actions: stock UI switch, Wi-Fi/USB/Network/TTL/Power/System controls.
     Tool(Tool),
 }
@@ -369,6 +371,12 @@ fn relay(words: &[&str]) -> Result<crate::wifi_uplink::RelayAction, &'static str
 /// Parses one line; every mutation carries the revision the panel displayed, except a
 /// subscription refresh (not revisioned) and node work (tied to the list generation).
 pub fn parse(line: &str) -> Result<Request, &'static str> {
+    if line.trim_start().starts_with("uimei") {
+        // read_line retains the frame delimiter. Remove exactly one LF, not
+        // trim(): embedded newlines, CRLF and extra whitespace stay invalid.
+        let payload = line.strip_suffix('\n').unwrap_or(line);
+        return crate::imei::parse_screen(payload).map(|action| Request::Job(Job::Imei(action)));
+    }
     // Bound before allocation. Existing non-relay verbs retain their legacy grammar.
     if line.trim_start().starts_with("admin") {
         let payload = line.strip_suffix('\n').unwrap_or(line);
@@ -1228,6 +1236,37 @@ mod tests {
         match parse(line) {
             Ok(Request::Job(j)) => j,
             other => panic!("{line}: {other:?}"),
+        }
+    }
+    #[test]
+    fn imei_actual_lf_framing_is_strict_for_all_eight_actions() {
+        let id = "a".repeat(32);
+        for payload in [
+            "uimei check 1".to_owned(),
+            "uimei preview 1 - -".to_owned(),
+            format!("uimei begin 1 {id} 1"),
+            format!("uimei continue 1 {id} 1"),
+            format!("uimei verify 1 {id}"),
+            format!("uimei restore 1 {id} 1"),
+            format!("uimei reboot 1 {id} 1"),
+            format!("uimei cancel 1 {id} 1"),
+        ] {
+            // Preview's unchanged targets are rejected later against a source,
+            // not by transport syntax validation.
+            assert!(matches!(
+                parse(&format!("{payload}\n")),
+                Ok(Request::Job(Job::Imei(_)))
+            ));
+        }
+        for invalid in [
+            "uimei check 1\r\n",
+            "uimei check 1\n\n",
+            " uimei check 1\n",
+            "uimei check 1 \n",
+            "uimei check 1\nuimei check 1\n",
+            "uimei\tcheck 1\n",
+        ] {
+            assert!(parse(invalid).is_err());
         }
     }
     #[test]
