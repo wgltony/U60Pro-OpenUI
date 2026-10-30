@@ -199,7 +199,7 @@ check(type(instance.running) == "boolean")
 if instance.running then
  check(type(instance.pid) == "number" and instance.pid > 1 and instance.pid % 1 == 0)
  print("running " .. instance.pid .. " " .. bin .. " " .. state)
-else print("stopped") end'
+else print("stopped") end' < "$transaction/procd.json"
     fi
 }
 

@@ -287,13 +287,16 @@ impl Store {
         }
         self.ancestors()?;
         self.directory(&self.root, true)?;
-        self.directory(&self.root.join("operations"), true)?;
         let path = self.root.join("current.json");
         match fs::symlink_metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err("state_unavailable"),
             Ok(_) => {}
         }
+        // The software deployment lock may precede the first explicit action.
+        // No current journal means idle, without requiring or creating history.
+        // Once a journal exists, missing/unsafe history still fails closed.
+        self.directory(&self.root.join("operations"), true)?;
         let bytes = self.read(&path, MAX_FILE)?;
         let j: Journal = serde_json::from_slice(&bytes).map_err(|_| "journal_invalid")?;
         j.validate()?;

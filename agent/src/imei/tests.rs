@@ -946,6 +946,131 @@ fn malformed_journal_stage_cannot_skip_reboot_or_authorize_recovery() {
     assert!(j.validate().is_err());
 }
 #[test]
+fn deployment_lock_only_root_starts_idle_without_creating_state() {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let f = Fixture::new(1);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&f.root)
+        .unwrap();
+    let lock = f.root.join("controller.lock");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&lock)
+        .unwrap();
+    let before = std::fs::symlink_metadata(&lock).unwrap();
+    for _ in 0..3 {
+        let c = Controller::new(f.fake.clone(), Store::testing(f.root.clone()));
+        assert_eq!(c.status()["phase"], "idle");
+        assert_eq!(c.status()["code"], "not_checked");
+        assert!(c.store.load().unwrap().is_none());
+    }
+    let after = std::fs::symlink_metadata(&lock).unwrap();
+    assert_eq!(
+        (before.ino(), before.len(), before.permissions().mode()),
+        (after.ino(), after.len(), after.permissions().mode())
+    );
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 1);
+    assert!(!f.root.join("operations").exists());
+    assert!(!f.root.join("current.json").exists());
+    assert_eq!(f.fake.inspects.load(Ordering::SeqCst), 0);
+    assert!(f.fake.calls().is_empty());
+}
+#[test]
+fn no_current_journal_does_not_skip_root_safety_or_repair_it() {
+    use std::os::unix::fs::DirBuilderExt;
+    let f = Fixture::new(1);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&f.root)
+        .unwrap();
+    std::fs::set_permissions(&f.root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(f.controller.store.load().err(), Some("unsafe_state_path"));
+    assert_eq!(
+        std::fs::symlink_metadata(&f.root)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+    let alias = f.root.join("alias");
+    std::os::unix::fs::symlink(&f.root, &alias).unwrap();
+    assert_eq!(
+        Store::testing(alias).load().err(),
+        Some("unsafe_state_path")
+    );
+    assert!(f.fake.calls().is_empty());
+}
+#[test]
+fn current_journal_still_requires_safe_operations_without_repair() {
+    use std::os::unix::fs::DirBuilderExt;
+    let source = Fixture::started(1);
+    let journal = source
+        .controller
+        .state
+        .lock()
+        .unwrap()
+        .journal
+        .clone()
+        .unwrap();
+    let bytes = serde_json::to_vec(&journal).unwrap();
+    for kind in 0..4 {
+        let f = Fixture::new(1);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&f.root)
+            .unwrap();
+        let current = f.root.join("current.json");
+        std::fs::write(&current, &bytes).unwrap();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let operations = f.root.join("operations");
+        match kind {
+            0 => {}
+            1 => std::fs::write(&operations, b"not a directory").unwrap(),
+            2 => std::os::unix::fs::symlink(&f.root, &operations).unwrap(),
+            _ => {
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&operations)
+                    .unwrap();
+                std::fs::set_permissions(&operations, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+        }
+        let expected = if kind == 0 {
+            "state_unavailable"
+        } else {
+            "unsafe_state_path"
+        };
+        assert_eq!(f.controller.store.load().err(), Some(expected));
+        let c = Controller::new(f.fake.clone(), Store::testing(f.root.clone()));
+        assert_eq!(c.status()["phase"], "recovery_required");
+        assert_eq!(std::fs::read(&current).unwrap(), bytes);
+        match kind {
+            0 => assert!(!operations.exists()),
+            1 => assert_eq!(std::fs::read(&operations).unwrap(), b"not a directory"),
+            2 => assert!(std::fs::symlink_metadata(&operations)
+                .unwrap()
+                .file_type()
+                .is_symlink()),
+            _ => assert_eq!(
+                std::fs::symlink_metadata(&operations)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            ),
+        }
+        assert_eq!(f.fake.inspects.load(Ordering::SeqCst), 0);
+        assert!(f.fake.calls().is_empty());
+    }
+}
+#[test]
 fn secure_store_rejects_symlinks_hardlinks_and_permissions() {
     let f = Fixture::started(1);
     let j = f.controller.state.lock().unwrap().journal.clone().unwrap();
