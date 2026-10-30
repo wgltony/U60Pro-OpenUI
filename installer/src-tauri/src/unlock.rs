@@ -200,6 +200,10 @@ fn decrypt_backup(data: &[u8], password: &str) -> Result<Vec<u8>, InstallerError
 fn encrypt_backup(data: &[u8], password: &str) -> Vec<u8> {
     let mut salt = [0_u8; 8];
     rand::thread_rng().fill_bytes(&mut salt);
+    encrypt_backup_with_salt(data, password, salt)
+}
+
+fn encrypt_backup_with_salt(data: &[u8], password: &str, salt: [u8; 8]) -> Vec<u8> {
     let (key, iv) = evp_bytes_to_key(password.as_bytes(), &salt);
     let encrypted =
         Encryptor::<TdesEde3>::new(&key.into(), &iv.into()).encrypt_padded_vec_mut::<Pkcs7>(data);
@@ -523,7 +527,11 @@ mod tests {
         let plain = b"configuration payload";
         let encrypted = encrypt_backup(plain, "test-password");
         assert_eq!(decrypt_backup(&encrypted, "test-password").unwrap(), plain);
-        assert!(decrypt_backup(&encrypted, "wrong-password").is_err());
+        // A wrong key still ends in valid PKCS#7 padding about once in 256 salts, so the
+        // rejection is checked against a fixed salt rather than a random one.
+        let fixed = encrypt_backup_with_salt(plain, "test-password", *b"saltsalt");
+        assert_eq!(decrypt_backup(&fixed, "test-password").unwrap(), plain);
+        assert!(decrypt_backup(&fixed, "wrong-password").is_err());
     }
 
     #[test]
