@@ -116,15 +116,21 @@ static void header(const char *title) {
 static void dot(int x, int y, const char *color) {
   add("<div class=\"box\" style=\"left:%dpx;top:%dpx;width:10px;height:10px;border-radius:5px;background:%s\"></div>",x,y,color);
 }
+/* The battery: outline, tip, fill and level. Charging, it is green whatever the level, a
+ * dimmer fill climbs from the level to full frame by frame, and a bolt follows the small level. */
 static void battery_badge(int x, int y, int large) {
   int percent = data.battery < 0 ? 0 : data.battery > 100 ? 100 : data.battery;
-  const char *color = data.battery < 0 ? "#9aa1ac" : percent <= 20 ? "#f06a6a" : "#4cc97a";
-  int w=large?62:30, h=large?30:16;
+  int charging = data.battery >= 0 && data.charging == 1, plugged = data.battery >= 0 && data.charging;
+  const char *color = data.battery < 0 ? "#9aa1ac" : percent <= 20 && !charging ? "#f06a6a" : "#4cc97a";
+  int w=large?62:30, h=large?30:16, inner=w-8;
   add("<div class=\"box\" style=\"left:%dpx;top:%dpx;width:%dpx;height:%dpx;border:2px solid %s;border-radius:%dpx\"></div>",x,y,w,h,color,large?6:3);
   add("<div class=\"box\" style=\"left:%dpx;top:%dpx;width:3px;height:%dpx;background:%s\"></div>",x+w+1,y+h/3,h-2*(h/3),color);
-  add("<div class=\"box\" style=\"left:%dpx;top:%dpx;width:%dpx;height:%dpx;background:%s;border-radius:%dpx\"></div>",x+4,y+4,(w-8)*percent/100,h-8,color,large?3:1);
+  int climb=charging&&percent<100?inner*(percent+(100-percent)*charge_frame/(CHARGE_FRAMES-1))/100:0;
+  if(climb>inner*percent/100)
+    add("<div class=\"box\" style=\"left:%dpx;top:%dpx;width:%dpx;height:%dpx;background:#2f8a55;border-radius:%dpx\"></div>",x+4,y+4,climb,h-8,large?3:1);
+  add("<div class=\"box\" style=\"left:%dpx;top:%dpx;width:%dpx;height:%dpx;background:%s;border-radius:%dpx\"></div>",x+4,y+4,inner*percent/100,h-8,color,large?3:1);
   char label[24];
-  if(data.battery<0)snprintf(label,sizeof(label),"--%%");else snprintf(label,sizeof(label),"%d%%",percent);
+  if(data.battery<0)snprintf(label,sizeof(label),"--%%");else snprintf(label,sizeof(label),plugged&&!large?"%d%%⚡":"%d%%",percent);
   if(large)box(x+w+14,y-3,120,36,"big",label);else box(x+w+10,y-2,60,20,"head",label);
 }
 /* Label, right-aligned value and an optional usage bar (percent < 0: no bar). */
@@ -470,9 +476,13 @@ static void build_html(void) {
     /* Compact cards leave y=214..262 for USB LAN; the four admin rows keep their places. */
     add("<div class=\"box card\" style=\"left:12px;top:68px;width:296px;height:48px\"></div>");
     battery_badge(28,77,1);
-    if(data.temperature!=-999)snprintf(tmp,sizeof(tmp),"%s · %.1f °C",L("Battery","电池"),data.temperature/10.0);
-    else snprintf(tmp,sizeof(tmp),"%s · -- °C",L("Battery","电池"));
-    box(160,82,134,20,"muted right",tmp);
+    /* State over temperature, right of the level: two short lines clear even "100%". The
+     * large level leaves no room for the bolt, so it leads the state instead. */
+    box(196,72,98,18,data.charging==1?"good right":"muted right",
+        data.charging==1?L("⚡Charging","⚡充电中"):data.charging==2?L("⚡Full","⚡已充满"):L("Battery","电池"));
+    if(data.temperature!=-999)snprintf(tmp,sizeof(tmp),"%.1f °C",data.temperature/10.0);
+    else snprintf(tmp,sizeof(tmp),"-- °C");
+    box(196,92,98,18,"muted right",tmp);
     add("<div class=\"box card\" style=\"left:12px;top:122px;width:296px;height:86px\"></div>");
     if(data.uptime>=86400)snprintf(tmp,sizeof(tmp),L("%llud %lluh %llum","%llu 天 %llu 时 %llu 分"),data.uptime/86400,data.uptime/3600%24,data.uptime/60%60);
     else snprintf(tmp,sizeof(tmp),L("%lluh %llum","%llu 时 %llu 分"),data.uptime/3600,data.uptime/60%60);

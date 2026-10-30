@@ -149,18 +149,22 @@ export function Meter({
   pct,
   tone = 'bg-accent',
   className = '',
+  charging = false,
 }: {
   pct: number
   tone?: string
   className?: string
+  /** Animates the empty part filling towards full (battery meters). */
+  charging?: boolean
 }) {
   const clamped = Math.max(0, Math.min(100, pct))
   return (
-    <div className={`h-1.5 overflow-hidden rounded-full bg-surface2 ${className}`}>
+    <div className={`flex h-1.5 overflow-hidden rounded-full bg-surface2 ${className}`}>
       <div
-        className={`h-full rounded-full transition-[width] duration-500 ${tone}`}
+        className={`h-full shrink-0 rounded-full transition-[width] duration-500 ${tone}`}
         style={{ width: `${clamped}%` }}
       />
+      {charging && clamped < 100 && <div className={`charge-climb h-full flex-1 rounded-full ${tone}`} />}
     </div>
   )
 }

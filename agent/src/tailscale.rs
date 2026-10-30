@@ -372,6 +372,70 @@ fn set_ssh_forward(on: bool) -> Result<(), String> {
     }
     Ok(())
 }
+/// The dashboard (port 8080) answers on every address but the agent only on the LAN one, so
+/// http://<tailnet IP>:8080 loaded and then could not reach its API. While Tailscale runs,
+/// tailnet port 9090 is forwarded to the agent, as port 22 is to SSH.
+const API_PORT: &str = "9090";
+static OWN_IPV4: Mutex<Option<String>> = Mutex::new(None);
+static API_FORWARD_FAILED: AtomicBool = AtomicBool::new(false);
+/// The router's own tailnet IPv4, for the agent's origin check.
+pub(crate) fn own_ipv4() -> Option<String> {
+    OWN_IPV4.lock().unwrap().clone()
+}
+#[cfg(test)]
+pub(crate) fn set_own_ipv4(ip: Option<&str>) {
+    *OWN_IPV4.lock().unwrap() = ip.map(str::to_string);
+}
+/// Whether tailnet port 9090 needs (re)pointing at `target`: when free, or when it is our
+/// forward to an older LAN address. Any other rule there is left alone.
+fn api_forward_stale(cfg: &Value, target: &str) -> bool {
+    let handler = &cfg["TCP"][API_PORT];
+    handler.is_null()
+        || handler.as_object().is_some_and(|h| {
+            h.len() == 1
+                && h.get("TCPForward")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| t != target && t.ends_with(":9090"))
+        })
+}
+fn sync_api_access(v: &Value) {
+    *OWN_IPV4.lock().unwrap() = v["Self"]["TailscaleIPs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .find(|ip| tailnet_ip(ip))
+        .map(str::to_string);
+    if v["BackendState"] != "Running" {
+        return;
+    }
+    let (Some(lan), Ok(cfg)) = (lan_ip(), serve_config()) else {
+        return;
+    };
+    let target = format!("{lan}:{API_PORT}");
+    if !api_forward_stale(&cfg, &target) {
+        return;
+    }
+    let ok = Command::new(cli_path())
+        .arg(format!("--socket={SOCKET}"))
+        .args([
+            "serve",
+            "--bg",
+            "--tcp",
+            API_PORT,
+            &format!("tcp://{target}"),
+        ])
+        .bounded_output()
+        .is_ok_and(|o| o.status.success());
+    // A failing forward is retried every pass but logged once.
+    let was_failing = API_FORWARD_FAILED.swap(!ok, Ordering::Relaxed);
+    if ok || !was_failing {
+        eprintln!(
+            "[tailscale] {} tailnet port {API_PORT} to the agent",
+            if ok { "forwarding" } else { "cannot forward" }
+        );
+    }
+}
 fn tailnet_ip(s: &str) -> bool {
     s.parse::<Ipv4Addr>().is_ok_and(|a| {
         let b = a.octets();
@@ -1371,7 +1435,11 @@ pub fn start() {
                 *error = next;
                 drop(error);
                 // The daemon's own state (signed out, offline…), logged when it changes.
-                let now = status()
+                let state = status();
+                if let Ok(v) = &state {
+                    sync_api_access(v);
+                }
+                let now = state
                     .map(|v| {
                         format!(
                             "{} {}",
@@ -1396,6 +1464,31 @@ pub fn start() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn api_forward_takes_only_a_free_port_or_its_own_rule() {
+        let t = "192.168.0.1:9090";
+        assert!(api_forward_stale(&Value::Null, t));
+        assert!(api_forward_stale(
+            &json!({"TCP":{"22":{"TCPForward":"127.0.0.1:22"}}}),
+            t
+        ));
+        assert!(!api_forward_stale(
+            &json!({"TCP":{"9090":{"TCPForward":t}}}),
+            t
+        ));
+        // Ours, still pointing at an old LAN address.
+        assert!(api_forward_stale(
+            &json!({"TCP":{"9090":{"TCPForward":"192.168.1.1:9090"}}}),
+            t
+        ));
+        for other in [
+            json!({"TCP":{"9090":{"HTTPS":true}}}),
+            json!({"TCP":{"9090":{"TCPForward":"127.0.0.1:3000"}}}),
+            json!({"TCP":{"9090":{"TCPForward":"192.168.1.1:9090","TerminateTLS":"x"}}}),
+        ] {
+            assert!(!api_forward_stale(&other, t), "{other}");
+        }
+    }
     #[test]
     fn remote_ssh_reads_only_its_own_serve_rule() {
         assert_eq!(ssh_forward(&Value::Null), Some(false));

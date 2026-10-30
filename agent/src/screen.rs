@@ -400,13 +400,20 @@ fn refresh_system(state: &AppState) {
     let device = system::read_device_info();
     let memory = system::read_meminfo();
     let cpu = state.cpu.sample();
+    // Last field: 1 charging, 2 full on the charger, 0 otherwise; older panels read five.
+    let charging = match battery.as_ref().map(|b| b.status.as_str()) {
+        Some("Charging") => 1,
+        Some("Full") => 2,
+        _ => 0,
+    };
     let o_line = format!(
-        "O {} {} {} {:.1} {:.1}\n",
+        "O {} {} {} {:.1} {:.1} {}\n",
         battery.as_ref().map_or(-1, |b| b.capacity),
         battery.as_ref().map_or(-999, |b| b.temperature),
         device.uptime_secs,
         memory.as_ref().map_or(-1.0, |m| m.usage_pct),
-        cpu.overall
+        cpu.overall,
+        charging
     );
     // The chart is a copy of the sampler's ring: no extra reads, sent only when the
     // Signal page can be opened.

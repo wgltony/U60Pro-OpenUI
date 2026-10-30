@@ -103,7 +103,7 @@ function StatusStrip({ onNavigate, className = '' }: { onNavigate: (g: Group) =>
       )}
       {batt && (
         <StatusChip onClick={() => onNavigate('system')} title={t('Battery')}>
-          {batt.charging ? <IBolt size={14} className="text-ok" /> : <IBattery size={14} />}
+          {batt.charging ? <IBolt size={14} className="charge-breathe text-ok" /> : <IBattery size={14} />}
           <span className="tnum font-semibold text-ink">{batt.percent}%</span>
         </StatusChip>
       )}

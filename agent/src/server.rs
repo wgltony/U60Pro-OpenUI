@@ -137,6 +137,11 @@ fn is_lan_origin(origin: &str) -> bool {
     if host == "localhost" || host == "127.0.0.1" || host == "::1" {
         return true;
     }
+    // The dashboard opened at the router's own tailnet address (the agent forwards that
+    // address's port 9090 to itself); no other tailnet or carrier-NAT address.
+    if crate::tailscale::own_ipv4().as_deref() == Some(host) {
+        return true;
+    }
     let parts: Vec<&str> = host.split('.').collect();
     if parts.len() != 4 {
         return false;
@@ -716,11 +721,24 @@ fn respond(request: Request, status: u16, body: Value, origin: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
-    use super::is_at_command_allowed;
+    use super::{is_at_command_allowed, is_lan_origin};
     use std::io::{Read, Write};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{mpsc, Arc};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn origins_are_lan_or_the_routers_own_tailnet_address() {
+        assert!(is_lan_origin("http://192.168.0.1:8080"));
+        assert!(!is_lan_origin("https://192.168.0.1:8080"));
+        assert!(!is_lan_origin("http://100.64.0.7:8080"));
+        crate::tailscale::set_own_ipv4(Some("100.64.0.7"));
+        assert!(is_lan_origin("http://100.64.0.7:8080"));
+        // Other tailnet or carrier-NAT addresses stay out.
+        assert!(!is_lan_origin("http://100.64.0.8:8080"));
+        assert!(!is_lan_origin("http://100.64.0.7.evil.example:8080"));
+        crate::tailscale::set_own_ipv4(None);
+    }
 
     /// One request to a real tiny_http server on loopback; returns the raw reply.
     fn exchange(raw: &[u8], respond: fn(tiny_http::Request)) -> String {

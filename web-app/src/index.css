@@ -96,3 +96,24 @@ button {
 .no-scrollbar {
   scrollbar-width: none;
 }
+
+/* Charging: the empty part of a battery meter fills from the level towards full, again
+   and again, and the bolt breathes. Still for people who ask for reduced motion. */
+@keyframes charge-climb {
+  from { transform: scaleX(0); opacity: 0.9; }
+  to { transform: scaleX(1); opacity: 0.25; }
+}
+.charge-climb {
+  transform-origin: left;
+  animation: charge-climb 1.6s ease-in infinite;
+}
+@keyframes charge-breathe {
+  50% { opacity: 0.35; }
+}
+.charge-breathe {
+  animation: charge-breathe 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .charge-climb { animation: none; transform: none; opacity: 0.35; }
+  .charge-breathe { animation: none; }
+}

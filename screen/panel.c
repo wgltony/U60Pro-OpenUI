@@ -64,7 +64,7 @@ struct profile { unsigned long long id; int active; char name[193]; };
 struct snapshot {
   unsigned long long rev, handshake, rx, tx, stamp, job, done, fresh, failed_job;
   int has, enabled, connected, error, all, busy, result, n, has_fresh;
-  int np, battery, temperature;
+  int np, battery, temperature, charging; /* charging: 1 charging, 2 full, 0 not (or an older agent) */
   unsigned long long settings_rev;
   int idle_seconds, brightness, home_page, menu_mask, zh, idle_sleep;
   unsigned long long uptime;
@@ -216,6 +216,11 @@ static struct nodes_view nodes;
 static int group_offset, node_offset, open_group, diag_offset, diag_from = MENU, esim_offset, uplink_from = MENU, ts_offset, ts_from = MENU;
 static unsigned long long open_gen;
 static long long page_fetch_at;
+/* Charging: the battery fill climbs in CHARGE_FRAMES steps, one per CHARGE_STEP_MS, on the
+ * pages that show the battery and only while the screen is on. */
+#define CHARGE_FRAMES 4
+#define CHARGE_STEP_MS 700
+static int charge_frame;
 /* The confirmation dialog (5) and the subscription dialog (6). */
 enum { CF_BACKEND = 1, CF_UPDATE, CF_ROLLBACK, CF_GEO, CF_ESIM, CF_REBOOT, CF_UPLINK, CF_TS, CF_RELAY, CF_ADMIN, CF_KICK, CF_CFOPT };
 /* The long-press power menu (dialog 7), its confirmation (8) and the wait after it (9):
@@ -368,7 +373,7 @@ static int parse_snapshot(char *buf, struct snapshot *out) {
       }
     }
     else if (line[0] == 'O')
-      sscanf(line, "O %d %d %llu %lf %lf", &s.battery, &s.temperature, &s.uptime, &s.memory, &s.cpu);
+      sscanf(line, "O %d %d %llu %lf %lf %d", &s.battery, &s.temperature, &s.uptime, &s.memory, &s.cpu, &s.charging);
     else if (line[0] == 'P' && s.np < 5) {
       struct profile *p = &s.profiles[s.np];
       if (sscanf(line, "P\t%llu\t%d\t%192[^\n]", &p->id, &p->active, p->name) == 3 && p->id)
@@ -1173,7 +1178,7 @@ static int panel(int heartbeat, int idle_seconds) {
   if (on_level <= 0) on_level = 128;
   screen_awake = 1;
   long long started = monotonic_ms();
-  long long last = monotonic_ms(), next = 0, beat = 0, contact = last;
+  long long last = monotonic_ms(), next = 0, beat = 0, contact = last, charge_at = 0;
   int first = 1, settling = 0;
   long long settle_at = 0;
   char reply[49152];
@@ -1216,6 +1221,11 @@ static int panel(int heartbeat, int idle_seconds) {
       settling = 0; (void)!write(heartbeat, "R", 1);
     }
     if (settling && now >= settle_at && screen_awake) need_draw = 1;
+    if (data.charging == 1 && screen_awake && (page == MENU || page == OVERVIEW) && now >= charge_at) {
+      charge_at = now + CHARGE_STEP_MS;
+      charge_frame = (charge_frame + 1) % CHARGE_FRAMES;
+      need_draw = 1;
+    }
     if (need_draw && screen_awake) {
       struct drm_buf *frame = drm_draw_buf(&drm);
       if (render_changed(frame, first || settling)) {
@@ -2344,6 +2354,17 @@ int main(int argc, char **argv) {
   press_id(&b,"overview");assert(page==OVERVIEW);
   press_id_absent(&b,"wireguard");assert(!reachable(WG)&&page==OVERVIEW);
   data.battery=12;capture(&b,argv[1],"battery-low");assert(strstr(html,"12%") && strstr(html,"#f06a6a"));
+  /* Charging: O's sixth field; green even when low, a bolt, and a dimmer fill that climbs
+   * frame by frame on Overview and the menu card. Five fields (older agent): not charging. */
+  {struct snapshot c;char o6[]="S 7 1 0 0 0 0 0 0 1 1\nO 9 300 60 30.0 5.0 1\n.\n",o5[]="S 7 1 0 0 0 0 0 0 1 1\nO 9 300 60 30.0 5.0\n.\n";
+   assert(parse_snapshot(o6,&c)&&c.charging==1&&c.battery==9);assert(parse_snapshot(o5,&c)&&!c.charging);}
+  data.charging=1;charge_frame=0;capture(&b,argv[1],"battery-charging");
+  assert(strstr(html,"⚡充电中")&&!strstr(html,"12%⚡")&&!strstr(html,"background:#f06a6a;border-radius")&&!strstr(html,"background:#2f8a55;border-radius"));
+  {char frame0[16384];snprintf(frame0,sizeof(frame0),"%s",html);
+   charge_frame=2;render(&b);assert(strstr(html,"background:#2f8a55;border-radius")&&strcmp(frame0,html));}
+  page=MENU;charge_frame=3;capture(&b,argv[1],"menu-charging");assert(strstr(html,"12%⚡")&&strstr(html,"background:#2f8a55;border-radius"));
+  data.battery=100;data.charging=2;page=OVERVIEW;capture_both(&b,argv[1],"battery-full");render(&b);assert(strstr(html,"⚡已充满")&&!strstr(html,"background:#2f8a55;border-radius"));
+  data.charging=0;charge_frame=0;
   data.battery=-1;capture(&b,argv[1],"battery-unknown");assert(strstr(html,"--%"));
   char bad_settings[]="C 4 0 0 4 99\n.\n";assert(!parse_snapshot(bad_settings,&prefs));
   /* The language field of the C record switches every page; Chinese is the default. */

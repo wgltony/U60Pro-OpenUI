@@ -239,7 +239,7 @@ export default function HomePage({ onNavigate }: { onNavigate?: (g: 'uplink' | '
 
         <StatCard
           className="col-span-2 xl:col-span-1"
-          icon={battery?.charging ? <IBolt size={15} className="text-ok" /> : <IBattery size={15} />}
+          icon={battery?.charging ? <IBolt size={15} className="charge-breathe text-ok" /> : <IBattery size={15} />}
           label={t('Battery')}
           foot={
             <span className="tnum">
@@ -258,8 +258,9 @@ export default function HomePage({ onNavigate }: { onNavigate?: (g: 'uplink' | '
           </div>
           <Meter
             pct={battery?.percent ?? 0}
-            tone={(battery?.percent ?? 100) <= 20 ? 'bg-danger' : 'bg-ok'}
+            tone={(battery?.percent ?? 100) <= 20 && !battery?.charging ? 'bg-danger' : 'bg-ok'}
             className="mt-3"
+            charging={!!battery?.charging}
           />
         </StatCard>
       </div>
