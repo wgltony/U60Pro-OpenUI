@@ -571,4 +571,12 @@ export default {
   'Invalid MAC address': 'MAC 地址无效',
   'The blocklist is full': '拉黑名单已满',
   'The Wi-Fi blocklist did not change': 'Wi-Fi 拉黑名单未生效',
+  'No node in the active subscription runs through Cloudflare': '当前订阅中没有经过 Cloudflare 的节点',
+  'No Cloudflare address answered; check the mobile data connection': '没有 Cloudflare 地址响应，请检查移动数据连接',
+  'Turn on Cloudflare IP optimization first': '请先开启 Cloudflare IP 优选',
+  'The core rejected the optimized profile': '内核拒绝了优选后的配置',
+  'The new address did not work through the node; kept the previous one': '新地址无法通过节点连通，已保留原地址',
+  'Invalid optimization interval': '优选间隔无效',
+  'Cannot save Cloudflare optimization settings': '无法保存 Cloudflare 优选设置',
+  'Cannot save the Cloudflare optimization state': '无法保存 Cloudflare 优选状态',
 } satisfies Dict

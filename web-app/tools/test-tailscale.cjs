@@ -83,6 +83,24 @@ test('remote management toggles exactly and reports off/starting/pending/active/
   assert.equal(remoteAccessState({ ...base, remote_access: true, lan_cidr: null }), 'error')
 })
 
+test('remote SSH toggles exactly and reports off/idle/no_service/active/unknown', () => {
+  const { tailscaleUpdate, remoteSshState, tailnetIpv4 } = load('../src/features/proxy/tailscaleModel.ts')
+  const base = { ...fixture, revision: 4, backend_state: 'Running', ssh_service: true }
+  assert.deepEqual(plain(tailscaleUpdate({ ...base, remote_ssh: false }, 'remote_ssh')), { expected_revision: 4, action: 'remote_ssh', enabled: true })
+  assert.deepEqual(plain(tailscaleUpdate({ ...base, remote_ssh: true }, 'remote_ssh')), { expected_revision: 4, action: 'remote_ssh', enabled: false })
+  // Unknown is never treated as on: the toggle asks to turn it on, and the agent refuses a foreign rule.
+  assert.deepEqual(plain(tailscaleUpdate({ ...base, remote_ssh: null }, 'remote_ssh')), { expected_revision: 4, action: 'remote_ssh', enabled: true })
+  assert.equal(remoteSshState({ ...fixture }), 'unsupported')
+  assert.equal(remoteSshState({ ...base, remote_ssh: null }), 'unknown')
+  assert.equal(remoteSshState({ ...base, remote_ssh: false }), 'off')
+  assert.equal(remoteSshState({ ...base, remote_ssh: true, backend_state: 'Stopped' }), 'idle')
+  assert.equal(remoteSshState({ ...base, remote_ssh: true, ssh_service: false }), 'no_service')
+  assert.equal(remoteSshState({ ...base, remote_ssh: true, ssh_service: null }), 'active')
+  assert.equal(remoteSshState({ ...base, remote_ssh: true }), 'active')
+  assert.equal(tailnetIpv4({ ...base, self: { ...base.self, ips: ['fd7a:115c:a1e0::1', '100.64.0.10'] } }), '100.64.0.10')
+  assert.equal(tailnetIpv4({ ...base, self: null }), null)
+})
+
 test('sign-in requests carry only a valid name and key; stages follow the daemon', () => {
   const { tailscaleUpdate, setupStage } = load('../src/features/proxy/tailscaleModel.ts')
   const base = { ...fixture, self: null, backend_state: 'NeedsLogin', installed: true, login_active: false }

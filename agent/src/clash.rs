@@ -3,6 +3,7 @@
 //! changes main routes, stock firewall chains, init.d, or UCI; the core listens only
 //! on loopback and a Unix socket inside the root-only state directory.
 use crate::{
+    clash_cfopt,
     clash_config::{self, Options},
     clash_ctl,
     clash_sub::{self, Usage},
@@ -539,7 +540,7 @@ fn geodata_installed() -> Vec<&'static str> {
 
 // ---------- Core process ----------
 
-fn log_line(line: &str) {
+pub(crate) fn log_line(line: &str) {
     let mut logs = LOGS.lock().unwrap();
     if logs.len() >= LOG_LINES {
         logs.pop_front();
@@ -737,15 +738,54 @@ fn test_composed(
         let _ = fs::remove_file(candidate);
     })
 }
-/// Composes the running profile from the active subscription and checks it.
-fn write_profile(s: &Settings) -> Result<(), String> {
+fn active_text(s: &Settings) -> Result<String, String> {
     let id = s.active_subscription.ok_or("Add a subscription first")?;
-    let text = fs::read_to_string(sub_path(id, "yaml"))
-        .map_err(|_| "Active subscription has not been downloaded; refresh it")?;
-    let map = clash_config::parse(&text)?;
+    fs::read_to_string(sub_path(id, "yaml"))
+        .map_err(|_| "Active subscription has not been downloaded; refresh it".into())
+}
+/// The active subscription's profile as downloaded, before any rewriting.
+pub(crate) fn active_source() -> Result<Mapping, String> {
+    clash_config::parse(&active_text(&load()?)?)
+}
+/// Composes the running profile from the active subscription and checks it. With a
+/// Cloudflare address picked, its rewrite goes in first; a profile the core refuses with
+/// it is written without it, so the optimization can never keep Clash down.
+fn write_profile(s: &Settings) -> Result<(), String> {
+    let text = active_text(s)?;
+    let mut map = clash_config::parse(&text)?;
     let candidate = Path::new(HOME).join(".config.candidate.yaml");
+    if clash_cfopt::rewrite(&mut map) {
+        match test_composed(Path::new(MIHOMO), Path::new(HOME), &candidate, &map, s) {
+            Ok(()) => {
+                return fs::rename(&candidate, PROFILE)
+                    .map_err(|_| "Cannot install Clash profile".into())
+            }
+            Err(e) => {
+                clash_cfopt::rejected(&e);
+                map = clash_config::parse(&text)?;
+            }
+        }
+    }
     test_composed(Path::new(MIHOMO), Path::new(HOME), &candidate, &map, s)?;
     fs::rename(&candidate, PROFILE).map_err(|_| "Cannot install Clash profile".into())
+}
+/// Rewrites the running profile from saved settings and reloads the core, as a refresh
+/// of the active subscription does; for the Cloudflare optimizer.
+pub(crate) fn reload_profile() -> Result<(), String> {
+    let _transition = crate::transition::lock();
+    let _guard = LOCK.lock().unwrap();
+    let s = load()?;
+    if !s.enabled || !core_running() {
+        return Err("Clash is not running".into());
+    }
+    write_profile(&s)?;
+    ctl(
+        "PUT",
+        "/configs?force=true",
+        Some(&json!({"path":"","payload":""})),
+        60,
+    )
+    .map(|_| ())
 }
 /// Checks a downloaded profile before it may replace a stored one, whether or not Clash
 /// is on and the subscription active: composed with `s`'s options like `write_profile`

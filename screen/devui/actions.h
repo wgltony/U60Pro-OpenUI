@@ -44,7 +44,7 @@ static void go(int p) {
 static int parent(int p) {
   switch(p) {
   case PROFILES: case DEVICES: return visible_page(WG)?WG:MENU;
-  case NODES: case SUBS: case CORE: return CLASH;
+  case NODES: case SUBS: case CORE: case CFOPT: return CLASH;
   case GROUP: return NODES;
   case DIAG: return (diag_from==PROXY||diag_from==CLASH)&&reachable(diag_from)?diag_from:MENU;
   case TAILSCALE: return ts_from==PROXY&&reachable(PROXY)?PROXY:MENU;
@@ -158,7 +158,7 @@ static void tap(int x,int y) {
   if(!strcmp(a,"back")) { back();return; }
   static const struct { const char *id; int page; } links[]={
     {"wireguard",WG},{"overview",OVERVIEW},{"profiles",PROFILES},{"proxy",PROXY},
-    {"clash",CLASH},{"nodes",NODES},{"subs",SUBS},{"core",CORE},{"esim",ESIM},
+    {"clash",CLASH},{"nodes",NODES},{"subs",SUBS},{"core",CORE},{"cfopt",CFOPT},{"esim",ESIM},
     {"wifi",WIFI_PAGE},{"signal",SIGNAL_PAGE},{"usb",USB_PAGE},{"power",POWER_PAGE},{"booster",BOOSTER_PAGE}};
   for(size_t i=0;i<sizeof(links)/sizeof(links[0]);i++)
     if(!strcmp(a,links[i].id)) { if(reachable(links[i].page)){group_offset=0;go(links[i].page);} return; }
@@ -189,16 +189,23 @@ static void tap(int x,int y) {
   if(page==TAILSCALE) {
     const struct tailscale_info *t=&data.tailscale;
     char req[96];
-    if(!strcmp(a,"tsprev")&&ts_offset>0)ts_offset-=3;
-    else if(!strcmp(a,"tsnext")&&ts_offset+3<t->n)ts_offset+=3;
+    if(!strcmp(a,"tsprev")&&ts_offset>0)ts_offset-=2;
+    else if(!strcmp(a,"tsnext")&&ts_offset+2<t->n)ts_offset+=2;
     else if(!ts_blocked()) {
+      if(!strcmp(a,"tsssh")) {
+        if(!t->has_ssh||t->remote_ssh==2)return;
+        snprintf(req,sizeof(req),"ts %llu ssh %s\n",t->rev,t->remote_ssh?"off":"on");
+        snprintf(chosen_name,sizeof(chosen_name),"%s",t->remote_ssh?L("Turn off remote SSH","关闭远程 SSH"):L("Turn on remote SSH","开启远程 SSH"));
+        ask(CF_TS,1,JOB_TS,t->rev,req);
+        return;
+      }
       if(!strcmp(a,"tstoggle")) {
         snprintf(req,sizeof(req),"ts %llu %s\n",t->rev,t->enabled?"disconnect":"connect");
         snprintf(chosen_name,sizeof(chosen_name),"%s",t->enabled?L("Disconnect","断开"):L("Connect","连接"));
       } else if(!strcmp(a,"tsclear")&&strcmp(t->selected,"-")) {
         snprintf(req,sizeof(req),"ts %llu clear\n",t->rev);
         snprintf(chosen_name,sizeof(chosen_name),"%s",L("Clear exit","清除出口"));
-      } else if(!strncmp(a,"ts",2)&&(i=digit_id(a+1,'s','2'))>=0&&ts_offset+i<t->n&&!t->rows[ts_offset+i].selected) {
+      } else if(!strncmp(a,"ts",2)&&(i=digit_id(a+1,'s','1'))>=0&&ts_offset+i<t->n&&!t->rows[ts_offset+i].selected) {
         const struct tailscale_row *row=&t->rows[ts_offset+i];
         snprintf(req,sizeof(req),"ts %llu exit %llu %d\n",t->rev,t->gen,row->index);
         snprintf(chosen_name,sizeof(chosen_name),"%s",row->name);
@@ -302,6 +309,13 @@ static void tap(int x,int y) {
       char req[64];snprintf(req,sizeof(req),"uplink %llu %s\n",u->rev,u->enabled?"off":"on");
       ask(CF_UPLINK,!u->enabled,JOB_UPLINK,u->rev,req);
     } else if(!strcmp(a,"ulogin")&&uplink_login_ok()) ask(CF_UPLINK,2,JOB_UPLINK,u->rev,"uplink login\n");
+  } else if(page==CFOPT) {
+    const struct cfopt_info *c=&data.cfopt;
+    if(!strcmp(a,"cfrun")&&cfopt_can_run())send_job("cfopt run\n",JOB_CFOPT,0);
+    else if(!strcmp(a,"cfauto")&&c->has&&!blocked()) {
+      char req[64];snprintf(req,sizeof(req),"cfopt %llu %s\n",c->rev,c->enabled?"off":"on");
+      ask(CF_CFOPT,!c->enabled,JOB_CFOPT,c->rev,req);
+    }
   } else if(page==DIAG) {
     if(!strcmp(a,"drun")&&!blocked()&&data.diag.has&&!data.diag.running)send_job("diag\n",JOB_DIAG,0);
     else if(!strcmp(a,"prev")&&diag_offset>0)diag_offset-=4;
@@ -341,11 +355,14 @@ static void tap(int x,int y) {
     }
   } else if(page==USB_PAGE&&!blocked()&&data.toolbox.has) {
     int cur=usb_mode_index(data.toolbox.usb_mode),pick=usb_draft>=0?usb_draft:cur;
-    if(!strncmp(a,"usb",3)&&a[3]>='0'&&a[3]<='1'&&!a[4]) {
+    if(!strncmp(a,"usb",3)&&usb_switching()) {
+      /* Nothing on the mode rows until the switch shows; TTL stays usable. */
+    } else if(!strncmp(a,"usb",3)&&a[3]>='0'&&a[3]<='1'&&!a[4]) {
       usb_draft=a[3]-'0';need_draw=1;
     } else if(!strcmp(a,"usbapply")&&pick>=0&&pick!=cur) {
       char req[64];snprintf(req,sizeof(req),"tool usb_mode %s\n",usb_modes[pick]);
-      usb_draft=-1;send_job(req,JOB_TOOL,0);
+      usb_draft=-1;usb_target=pick;usb_target_until=(unsigned long long)time(NULL)+USB_SWITCH_WAIT_S;
+      send_job(req,JOB_TOOL,0);
     } else if(!strcmp(a,"ttl0")){ttl_draft=-1;send_job("tool ttl 0\n",JOB_TOOL,0);}
     else if(!strcmp(a,"ttl64")){ttl_draft=-1;send_job("tool ttl 64\n",JOB_TOOL,0);}
     else if(!strcmp(a,"ttl65")){ttl_draft=-1;send_job("tool ttl 65\n",JOB_TOOL,0);}

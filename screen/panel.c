@@ -80,6 +80,7 @@ struct snapshot {
   struct uplink_info uplink;
   struct relay_catalog relay;
   struct tailscale_info tailscale;
+  struct cfopt_info cfopt;
   struct toolbox_info toolbox;
   struct speed_chart chart;
   struct wifi_sta wsta[16];
@@ -96,7 +97,7 @@ static int screen_awake = 1;
 #endif
 /* Menu features first (their numbers are the settings record's page bits), then pages
  * reached from them. */
-enum { WG, DEVICES, MENU, PROFILES, OVERVIEW, PROXY, CLASH, ESIM, UPLINK, WIFI_PAGE, SIGNAL_PAGE, USB_PAGE, POWER_PAGE, BOOSTER_PAGE, TAILSCALE, NODES, GROUP, SUBS, CORE, DIAG };
+enum { WG, DEVICES, MENU, PROFILES, OVERVIEW, PROXY, CLASH, ESIM, UPLINK, WIFI_PAGE, SIGNAL_PAGE, USB_PAGE, POWER_PAGE, BOOSTER_PAGE, TAILSCALE, NODES, GROUP, SUBS, CORE, DIAG, CFOPT };
 #define LEGACY_PAGES 27  /* features of a C record: WireGuard, devices, profiles, overview */
 #define MENU_PAGES 123   /* features of a V record: the above plus proxy and Clash */
 #define ESIM_MENU_PAGES 251 /* features of a W record: the above plus eSIM */
@@ -121,7 +122,7 @@ static int visible_page(int p) { return p == MENU || (p <= TAILSCALE && (setting
 static int reachable(int p) {
   switch (p) {
   case PROFILES: case DEVICES: return visible_page(p) || visible_page(WG);
-  case NODES: case GROUP: case SUBS: case CORE: return visible_page(CLASH);
+  case NODES: case GROUP: case SUBS: case CORE: case CFOPT: return visible_page(CLASH);
   case DIAG: return visible_page(CLASH) || visible_page(PROXY);
   case TAILSCALE: return visible_page(TAILSCALE) || visible_page(PROXY);
   case UPLINK: return visible_page(UPLINK) || (visible_page(OVERVIEW) && data.uplink.has);
@@ -141,10 +142,15 @@ static unsigned long long pending, pending_revision, chosen_profile, chosen_revi
 static char chosen_name[193];
 static char notice[128], failure_text[97];
 /* What the pending job does, for its labels and its completion. */
-enum { JOB_WG = 1, JOB_BACKEND, JOB_MODE, JOB_SUB, JOB_REFRESH, JOB_SELECT, JOB_DELAY, JOB_CORE, JOB_DIAG, JOB_ESIM, JOB_UPLINK, JOB_TOOL, JOB_TS, JOB_ADMIN };
+enum { JOB_WG = 1, JOB_BACKEND, JOB_MODE, JOB_SUB, JOB_REFRESH, JOB_SELECT, JOB_DELAY, JOB_CORE, JOB_DIAG, JOB_ESIM, JOB_UPLINK, JOB_TOOL, JOB_TS, JOB_ADMIN, JOB_CFOPT };
 static int pending_kind;
 /* USB page: the mode picked but not applied yet (-1: none). */
 static int usb_draft = -1;
+/* USB page: the mode an applied switch moves to (-1: none), until the H record shows it or
+ * the wait runs out. The agent replies before the switch runs, so the job ends first. */
+static int usb_target = -1;
+static unsigned long long usb_target_until;
+#define USB_SWITCH_WAIT_S 30
 /* USB page: a custom TTL being dialed with -/+ but not applied yet (-1: none, use presets). */
 static int ttl_draft = -1;
 /* Wi-Fi page: 0 bands, 1 connected devices, 2 blocked devices; first row shown; the
@@ -163,7 +169,7 @@ static long long monotonic_ms(void) {
  * the start of a diagnosis answers in seconds. Past it the job is taken as lost. */
 static long long job_wait_ms(int kind) {
   /* An eSIM action only starts the agent's own job, which its Q record then follows. */
-  return kind == JOB_SELECT || kind == JOB_DELAY || kind == JOB_DIAG || kind == JOB_ESIM || kind == JOB_UPLINK || kind == JOB_TOOL || kind == JOB_ADMIN ? 60000 : 180000;
+  return kind == JOB_SELECT || kind == JOB_DELAY || kind == JOB_DIAG || kind == JOB_ESIM || kind == JOB_UPLINK || kind == JOB_TOOL || kind == JOB_ADMIN || kind == JOB_CFOPT ? 60000 : 180000;
 }
 static void amount(char *out, size_t n, unsigned long long v) {
   if (v >= 1073741824)
@@ -208,7 +214,7 @@ static int group_offset, node_offset, open_group, diag_offset, diag_from = MENU,
 static unsigned long long open_gen;
 static long long page_fetch_at;
 /* The confirmation dialog (5) and the subscription dialog (6). */
-enum { CF_BACKEND = 1, CF_UPDATE, CF_ROLLBACK, CF_GEO, CF_ESIM, CF_REBOOT, CF_UPLINK, CF_TS, CF_RELAY, CF_ADMIN, CF_KICK };
+enum { CF_BACKEND = 1, CF_UPDATE, CF_ROLLBACK, CF_GEO, CF_ESIM, CF_REBOOT, CF_UPLINK, CF_TS, CF_RELAY, CF_ADMIN, CF_KICK, CF_CFOPT };
 /* The long-press power menu (dialog 7), its confirmation (8) and the wait after it (9):
  * what was chosen (1 restart, 2 shut down), until when to wait, and why it failed. */
 enum { DLG_POWER = 7, DLG_POWER_CONFIRM, DLG_POWERING };
@@ -325,13 +331,14 @@ static int parse_snapshot(char *buf, struct snapshot *out) {
     else if (line[0] == 'J')
       /* fresh, the newest job the records already show, is absent from older agents. */
       s.has_fresh = sscanf(line, "J %d %llu %llu %d %llu", &s.busy, &s.job, &s.done, &s.result, &s.fresh) == 5;
-    else if (line[0] && strchr("ABKUMXxEQqRHGTtLlwIi", line[0]) && line[1] == '\t') {
+    else if (line[0] && strchr("ABKkUMXxEQqRHGTthLlwIi", line[0]) && line[1] == '\t') {
       char *f[48]; /* H has 39 fields */
       int n = split_tabs(line, f, 48);
       switch (f[0][0]) {
       case 'A': parse_admin(f, n, &s.admin); break;
       case 'B': parse_backend(f, n, &s.backend); break;
       case 'K': parse_clash(f, n, &s.clash); break;
+      case 'k': parse_cfopt(f, n, &s.cfopt); break;
       case 'U': if (s.nsubs < 5 && parse_sub(f, n, &s.subs[s.nsubs])) s.nsubs++; break;
       case 'M': parse_core(f, n, &s.core); break;
       case 'X': parse_diag(f, n, &s.diag); break;
@@ -341,6 +348,7 @@ static int parse_snapshot(char *buf, struct snapshot *out) {
       case 'q': parse_esim_row(f, n, &s.esim); break;
       case 'T': parse_tailscale(f, n, &s.tailscale); break;
       case 't': parse_tailscale_row(f, n, &s.tailscale); break;
+      case 'h': parse_tailscale_ssh(f, n, &s.tailscale); break;
       case 'R': parse_uplink(f, n, &s.uplink); break;
       case 'L': parse_relay(f,n,&s.relay);break;
       case 'l': parse_relay_saved(f,n,&s.relay);break;
@@ -463,6 +471,7 @@ static int send_job(const char *req, int kind, unsigned long long revision) {
   pending = 0;
   pending_kind = 0;
   failure_text[0] = 0;
+  usb_target = -1;
   if(kind==JOB_UPLINK){relay_editor_clear();relay_view=RV_STATUS;}
   if (!strncmp(reply, "ERR Stale", 9) && kind == JOB_UPLINK) {
     snprintf(notice,sizeof(notice),"%s",L("Relay list changed. Refresh and choose again.","中继列表已变化，请刷新后重新选择。"));dialog=3;
@@ -529,6 +538,7 @@ static const char *job_failure(int kind, int result) {
   case JOB_REFRESH: return L("Subscription update failed.", "订阅更新失败。");
   case JOB_CORE: return L("The core request was refused.", "内核请求被拒绝。");
   case JOB_DIAG: return L("Diagnostics could not start.", "无法启动诊断。");
+  case JOB_CFOPT: return L("Optimization was refused; see OpenUI.", "优选请求被拒绝，请在 OpenUI 查看。");
   case JOB_ESIM: return L("The eSIM request was refused.", "eSIM 请求被拒绝。");
   case JOB_UPLINK: return L("Wi-Fi relay request failed. Check its status.", "无线中继请求失败，请检查状态。");
   case JOB_ADMIN: return L("Service change failed. Reload status; do not retry blindly.", "服务更改失败。请刷新状态，勿盲目重试。");
@@ -553,6 +563,7 @@ static void settle_jobs(void) {
     snprintf(failure_text, sizeof(failure_text), "%s", kind!=JOB_UPLINK&&kind!=JOB_ADMIN&&data.failed_job == pending ? data.failure : "");
     if(kind==JOB_UPLINK){relay_editor_clear();relay_view=RV_STATUS;}
     snprintf(notice, sizeof(notice), "%s", job_failure(kind, data.result));
+    usb_target = -1;
     pending = 0;
     pending_kind = 0;
     dialog = 3;
@@ -1900,6 +1911,44 @@ static void esim_tests(struct drm_buf *b,const char *dir) {
   settings_menu=80;assert(!reachable(ESIM));page=MENU;render(b);assert(!strstr(html,"act:esim"));
   puts("PASS eSIM page (zh/en): W settings record, profile records, switch and restart confirmations, paging, stale generations, running jobs and card states");
 }
+/* Cloudflare IP optimizer: the k record, the Clash page row and the page's actions. */
+static void cfopt_tests(struct drm_buf *b,const char *dir) {
+  unsigned long long now=(unsigned long long)time(NULL);
+  static char base[32768],fixture[33000];
+  proxy_snapshot(base,sizeof(base));
+  char *j=strstr(base,"J 0 3 3 0 3");assert(j);
+  snprintf(fixture,sizeof(fixture),"%.*sk\t3\t1\t0\t-\t162.159.45.145\tEWR\t221\t23400\t%llu\t4\t-\n%s",(int)(j-base),base,now-7200,j);
+  struct snapshot s;assert(parse_snapshot(fixture,&s));
+  assert(s.cfopt.has&&s.cfopt.enabled&&!s.cfopt.running&&s.cfopt.rev==3&&s.cfopt.tls_ms==221&&s.cfopt.speed_kbps==23400);
+  assert(s.cfopt.interval==4&&!strcmp(s.cfopt.colo,"EWR")&&!s.cfopt.problem[0]);
+  /* Older agents send no k; a malformed one is ignored. */
+  {struct snapshot o;assert(parse_snapshot(base,&o)&&!o.cfopt.has);
+   snprintf(fixture,sizeof(fixture),"%.*sk\t3\t2\t0\t-\t-\t-\t0\t0\t0\t4\t-\n%s",(int)(j-base),base,j);
+   assert(parse_snapshot(fixture,&o)&&!o.cfopt.has);}
+  data=s;settings_revision=0;update_settings(&s);
+  reset_job();stub_job="OK 1\n";page=CLASH;dialog=0;dirty=0;
+  capture_both(b,dir,"clash-cfopt-row");
+  assert(strstr(html,"act:cfopt")&&strstr(html,"162.159.45.145")&&strstr(html,"act:core")&&strstr(html,"act:diag"));
+  press_id(b,"cfopt");assert(page==CFOPT);capture_both(b,dir,"cfopt");
+  assert(strstr(html,"TLS 221 ms")&&strstr(html,"23.4 Mbps")&&strstr(html,"Every 4 h"));
+  press_id(b,"cfrun");expect_request("cfopt run\n");assert(pending_kind==JOB_CFOPT);reset_job();
+  press_id(b,"cfauto");assert(dialog==5&&confirm_what==CF_CFOPT&&confirm_target==0);
+  capture_both(b,dir,"cfopt-off-confirm");press_id(b,"confirm");expect_request("cfopt 3 off\n");reset_job();
+  /* While a run goes, and while Clash is down, the button waits. */
+  data.cfopt.running=1;snprintf(data.cfopt.phase,sizeof(data.cfopt.phase),"probing");
+  capture_both(b,dir,"cfopt-running");
+  assert(strstr(html,"Testing edge addresses")&&strstr(html,"id=\"cfrun\" href=\"act:none\""));
+  test_request[0]=0;press_id(b,"cfrun");assert(!test_request[0]);
+  data.cfopt.running=0;data.clash.running=0;render(b);assert(strstr(html,"id=\"cfrun\" href=\"act:none\""));
+  data.clash.running=1;snprintf(data.cfopt.problem,sizeof(data.cfopt.problem),"nonode");data.cfopt.ip[0]=0;
+  settings_zh=0;render(b);assert(strstr(html,"No node runs through Cloudflare"));
+  data.cfopt.enabled=0;press_id(b,"cfauto");assert(dialog==5&&confirm_target==1);
+  press_id(b,"confirm");expect_request("cfopt 3 on\n");reset_job();
+  press_id(b,"back");assert(page==CLASH);
+  press_id(b,"core");assert(page==CORE);press_id(b,"back");press_id(b,"diag");assert(page==DIAG);press_id(b,"back");assert(page==CLASH);
+  settings_menu=16;assert(!reachable(CFOPT));
+  puts("PASS CF IP optimizer: k record (old/malformed ignored), Clash row beside core and diagnostics, run and on/off with confirmations, running and Clash-down states");
+}
 /* The Wi-Fi relay page: Y settings, the R record, Overview's row, switching and states. */
 static void tailscale_tests(struct drm_buf *b,const char *dir) {
   unsigned long long now=(unsigned long long)time(NULL);
@@ -1908,12 +1957,16 @@ static void tailscale_tests(struct drm_buf *b,const char *dir) {
       "S 7 1 0 0 0 0 0 0 1 %llu\n"
       "B\ttailscale\t0\t7\t1\t-\t0\t12\t1\t-\t0\t9\t1\t-\t0\n"
       "T\t9\t42\t1\tRunning\t0\tus-west-exit\t%llu\n"
-      "t\t0\t1\tus-west-exit\nt\t1\t0\thk-exit\nt\t2\t0\tjp-exit\nt\t3\t0\tsg-exit\n"
+      "t\t0\t1\tus-west-exit\nt\t1\t0\thk-exit\nt\t2\t0\tjp-exit\nt\t3\t0\tsg-exit\nh\t0\t1\n"
       "C 200 120 128 2 27 en\nY 200 120 128 2 113 en 1\n"
       "F 200 120 128 14 16497 en 1\nJ 0 0 0 0 0\n.\n",now,now);
   struct snapshot s;assert(parse_snapshot(fixture,&s));
   assert(s.backend.active==BK_TS&&s.backend.rev[2]==9&&s.backend.ready[2]);
   assert(s.tailscale.has&&s.tailscale.n==4&&s.tailscale.gen==42&&!strcmp(s.tailscale.rows[1].name,"hk-exit"));
+  assert(s.tailscale.has_ssh&&s.tailscale.remote_ssh==0&&s.tailscale.ssh_service==1);
+  /* An agent without remote SSH sends no h; a malformed h is ignored. */
+  {struct snapshot o;char old[512];snprintf(old,sizeof(old),"S 7 1 0 0 0 0 0 0 1 %llu\nT\t9\t42\t1\tRunning\t0\t-\t%llu\nh\t3\t1\n.\n",now,now);
+   assert(parse_snapshot(old,&o)&&o.tailscale.has&&!o.tailscale.has_ssh);}
   data=s;settings_revision=0;assert(update_settings(&s)==2&&settings_home==TAILSCALE);
   reset_job();stub_job="OK 1\n";page=MENU;dialog=0;dirty=0;capture_both(b,dir,"menu-tailscale");
   assert(strstr(html,"act:tailscale")&&strstr(html,"Tailscale"));
@@ -1921,7 +1974,16 @@ static void tailscale_tests(struct drm_buf *b,const char *dir) {
   assert(strstr(html,"Status != forwarding")&&strstr(html,"us-west-exit"));
   press_id(b,"ts1");assert(dialog==5&&confirm_what==CF_TS);
   capture_both(b,dir,"tailscale-confirm");press_id(b,"confirm");expect_request("ts 9 exit 42 1\n");reset_job();
-  press_id(b,"tsnext");assert(ts_offset==3);press_id(b,"ts0");press_id(b,"confirm");expect_request("ts 9 exit 42 3\n");reset_job();
+  press_id(b,"tsnext");assert(ts_offset==2);press_id(b,"ts1");press_id(b,"confirm");expect_request("ts 9 exit 42 3\n");reset_job();
+  press_id(b,"tsnext");assert(ts_offset==2);press_id(b,"tsprev");assert(ts_offset==0);
+  /* Remote SSH: its own confirmation; unknown never sends a request. */
+  press_id(b,"tsssh");assert(dialog==5&&confirm_what==CF_TS&&confirm_target==1);
+  capture_both(b,dir,"tailscale-ssh-confirm");assert(strstr(html,"remote SSH"));
+  press_id(b,"confirm");expect_request("ts 9 ssh on\n");reset_job();
+  data.tailscale.remote_ssh=1;render(b);assert(strstr(html,"ssh root@"));
+  press_id(b,"tsssh");press_id(b,"confirm");expect_request("ts 9 ssh off\n");reset_job();
+  data.tailscale.remote_ssh=2;test_request[0]=0;press_id(b,"tsssh");assert(!dialog&&!test_request[0]);
+  render(b);assert(strstr(html,"id=\"tsssh\" href=\"act:none\""));data.tailscale.remote_ssh=0;
   press_id(b,"tsclear");press_id(b,"confirm");expect_request("ts 9 clear\n");reset_job();
   press_id(b,"tstoggle");press_id(b,"confirm");expect_request("ts 9 disconnect\n");reset_job();
   data.tailscale.enabled=0;press_id(b,"tstoggle");press_id(b,"confirm");expect_request("ts 9 connect\n");reset_job();data.tailscale.enabled=1;
@@ -2098,7 +2160,19 @@ static void toolbox_tests(struct drm_buf *b, const char *dir) {
   /* Picking only marks a mode; Apply sends it, and re-picking the active one disables Apply. */
   press_id(b,"usb1");assert(usb_draft==1&&!test_request[0]);capture_both(b,dir,"toolbox-usb-picked");
   press_id(b,"usbapply");expect_request("tool usb_mode ecm\n");assert(usb_draft==-1);reset_job();
-  press_id(b,"usb0");press_id(b,"usbapply");assert(!test_request[0]);
+  /* The agent replies before it switches: until H shows ECM the page says so and takes
+   * no other pick, then it shows ECM as current. */
+  assert(usb_target==1);capture_both(b,dir,"toolbox-usb-switching");
+  assert(strstr(html,"Switching")&&strstr(html,"id=\"usbapply\" href=\"act:none\""));
+  press_id(b,"usb0");press_id(b,"usbapply");assert(!test_request[0]&&usb_draft==-1);
+  press_id(b,"ttl65");expect_request("tool ttl 65\n");reset_job();assert(usb_target==1);
+  snprintf(data.toolbox.usb_mode,sizeof(data.toolbox.usb_mode),"ecm");render(b);
+  assert(usb_target==-1&&!strstr(html,"Switching"));
+  press_id(b,"usb1");press_id(b,"usbapply");assert(!test_request[0]);
+  /* A switch that never shows stops waiting. */
+  press_id(b,"usb0");press_id(b,"usbapply");expect_request("tool usb_mode rndis\n");reset_job();
+  assert(usb_switching());usb_target_until=0;render(b);assert(usb_target==-1);
+  snprintf(data.toolbox.usb_mode,sizeof(data.toolbox.usb_mode),"rndis");
   press_id_absent(b,"usb2");
   assert(!strstr(html,"usbadb"));
   press_id(b,"back");assert(page==MENU);
@@ -2278,6 +2352,7 @@ int main(int argc, char **argv) {
   relay_full_tests(&b,argv[1]);
   toolbox_tests(&b,argv[1]);
   tailscale_tests(&b,argv[1]);
+  cfopt_tests(&b,argv[1]);
   admin_tests(&b,argv[1]);
   usblan_tests(&b,argv[1]);
   wifi_tests(&b,argv[1]);

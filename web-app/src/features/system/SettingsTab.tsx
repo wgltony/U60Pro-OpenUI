@@ -32,9 +32,14 @@ const USB_MODE_INFO: Record<UsbModeKey, { label: string; description: string; wa
   },
 }
 
+/** How long to follow a scheduled switch: the firmware script takes about 8 s. */
+const USB_SWITCH_WAIT_MS = 30_000
+const USB_POLL_MS = 1500
+
 function UsbSection() {
   const [status, setStatus] = useState<UsbStatus | null>(null)
   const [busy, setBusy] = useState(false)
+  const [switching, setSwitching] = useState<UsbModeKey | null>(null)
   const [powerbank, setPowerbank] = useState<boolean | null>(null)
 
   const fetchStatus = useCallback(async () => {
@@ -75,20 +80,43 @@ function UsbSection() {
 
     setBusy(true)
     try {
-      await api.usbMode(mode, isExperimentalNcm ? { confirm_experimental: true } : undefined)
-      toast(
-        isExperimentalNcm
-          ? t('NCM switch scheduled — USB will re-enumerate shortly')
-          : mode === 'ecm' && status?.active_mode === 'ncm'
-            ? t('ECM rollback scheduled — USB will re-enumerate shortly')
-            : t('USB mode set to {mode} — reboot to apply', { mode: mode.toUpperCase() }),
-      )
-      fetchStatus()
+      const reply = (await api.usbMode(mode, isExperimentalNcm ? { confirm_experimental: true } : undefined)) as { status?: string } | undefined
+      if (reply?.status === 'scheduled') await follow(mode)
+      else if (reply?.status === 'unchanged') {
+        toast(t('USB is already in {mode}', { mode: mode.toUpperCase() }))
+        fetchStatus()
+      } else {
+        toast(t('USB mode set to {mode} — reboot to apply', { mode: mode.toUpperCase() }))
+        fetchStatus()
+      }
     } catch (e) {
       toastError(e, t('Failed to set USB mode'))
     } finally {
       setBusy(false)
     }
+  }
+
+  // The agent replies before it switches (the reply may itself travel over USB), so
+  // follow the status until the new mode shows instead of reading it once at once.
+  async function follow(mode: UsbModeKey) {
+    setSwitching(mode)
+    const until = Date.now() + USB_SWITCH_WAIT_MS
+    let last: UsbStatus | null = null
+    for (let polls = 1; Date.now() < until; polls++) {
+      await new Promise((r) => window.setTimeout(r, USB_POLL_MS))
+      try {
+        last = await api.usbStatus()
+      } catch {
+        continue // USB, and with it this page's link, may be down for a few seconds
+      }
+      setStatus(last)
+      if (last.active_mode === mode && !last.switching) break
+      // The script finished without reaching the mode.
+      if (last.switching === null && polls >= 2 && last.ncm_last_error) break
+    }
+    setSwitching(null)
+    if (last?.active_mode === mode) toast(t('USB mode is now {mode}', { mode: mode.toUpperCase() }))
+    else toast(t('USB did not switch to {mode}. Try again, or reconnect the cable.', { mode: mode.toUpperCase() }), 'err')
   }
 
   async function setNcmDefault(enabled: boolean) {
@@ -138,6 +166,7 @@ function UsbSection() {
             </>
           )}
         </p>
+        {switching && <p role="status" className="text-[12px] text-warn">{t('Switching to {mode}… USB disconnects for a few seconds.', { mode: switching.toUpperCase() })}</p>}
         {status?.ncm_last_error && <p className="text-[12px] text-danger">{t('Last NCM attempt: {error}', { error: tm(status.ncm_last_error) })}</p>}
 
         <div className="flex flex-wrap gap-1.5">
@@ -150,7 +179,7 @@ function UsbSection() {
               <button
                 key={mode}
                 onClick={() => setMode(mode)}
-                disabled={busy || !isSupported}
+                disabled={busy || !!switching || !isSupported}
                 title={t(info.description)}
                 className={`rounded-lg border px-3 py-1.5 text-[12px] font-bold transition-colors disabled:opacity-40 ${
                   isActive
@@ -162,6 +191,7 @@ function UsbSection() {
               >
                 {t(info.label)}
                 {!isSupported && ` · ${t('n/a')}`}
+                {switching === mode && ' …'}
               </button>
             )
           })}

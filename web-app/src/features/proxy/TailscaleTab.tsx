@@ -2,13 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../data/api'
 import { ApiError } from '../../data/client'
 import type { TailscaleStatus, TailscaleUpdate } from '../../types'
-import { Button, Field, Input, Segmented, Select } from '../../ui/controls'
+import { Button, Field, Input, Segmented, Select, Toggle } from '../../ui/controls'
 import { Card, Chip } from '../../ui/primitives'
 import { confirm, toast, toastError } from '../../ui/feedback'
 import { t, tm } from '../../i18n'
 import { useProxy } from './ProxyContext'
 import SetupGuide, { type SetupStep } from './SetupGuide'
-import { eligibleExitNodes, remoteAccessState, setupStage, tailscaleUpdate, validAuthKey, validHostname, type SignIn } from './tailscaleModel'
+import { eligibleExitNodes, remoteAccessState, remoteSshState, setupStage, tailnetIpv4, tailscaleUpdate, validAuthKey, validHostname, type SignIn } from './tailscaleModel'
 
 const ADMIN = 'https://login.tailscale.com/admin/machines'
 
@@ -21,6 +21,17 @@ function ask(status: TailscaleStatus, action: TailscaleUpdate['action']) {
     confirmLabel: t('Sign out'),
     danger: true,
   })
+  if (action === 'remote_ssh') {
+    const on = status.remote_ssh !== true
+    return confirm({
+      title: on ? t('Turn on remote SSH?') : t('Turn off remote SSH?'),
+      body: on
+        ? t('Devices on your tailnet can open an SSH login to this router at its Tailscale address. Root still needs its password, and nothing is opened on the mobile network.')
+        : t('SSH to the Tailscale address stops, and sessions opened that way disconnect. SSH on the LAN is not affected.'),
+      confirmLabel: t('Confirm'),
+      danger: !on,
+    })
+  }
   const remoteOn = action === 'remote_access' && !status.remote_access
   return confirm(action === 'remote_access' ? {
     title: remoteOn ? t('Turn on remote management?') : t('Turn off remote management?'),
@@ -122,6 +133,11 @@ export default function TailscaleTab() {
       : remote === 'starting' ? <Chip tone="warn">{t('Starting')}</Chip>
         : remote === 'error' ? <Chip tone="danger">{t('Error')}</Chip> : <Chip>{t('Off')}</Chip>
   const lanIp = status?.lan_ip || '192.168.0.1'
+  const ssh = status ? remoteSshState(status) : 'unsupported'
+  const sshChip = ssh === 'active' ? <Chip tone="ok">{t('Working')}</Chip>
+    : ssh === 'idle' || ssh === 'no_service' ? <Chip tone="warn">{t('Not reachable')}</Chip>
+      : ssh === 'unknown' ? <Chip tone="danger">{t('Unknown')}</Chip> : <Chip>{t('Off')}</Chip>
+  const tsIp = status ? tailnetIpv4(status) : null
   const stage = status ? setupStage(status) : 'unsupported'
   const signedIn = stage === 'ready' || stage === 'unsupported'
   const formOk = validHostname(signIn.hostname.trim()) && (method === 'browser' ? true : signIn.authKey.trim() !== '' && validAuthKey(signIn.authKey.trim()))
@@ -250,6 +266,25 @@ export default function TailscaleTab() {
             {status.remote_access ? t('Turn off remote management') : t('Turn on remote management')}
           </Button>
         </div>
+      </div>
+    </Card>}
+    {ssh !== 'unsupported' && status && signedIn && <Card title={t('Remote SSH (Tailscale address)')} action={sshChip}>
+      <div className="space-y-3">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-[13px] font-medium text-ink">{t('SSH on the Tailscale address')}</p>
+            <p className="mt-1 text-xs leading-relaxed text-ink2">{t('Tailscale forwards port 22 of its own address to this router’s local SSH, so no subnet route is needed. Only devices on your tailnet can connect.')}</p>
+          </div>
+          <Toggle label={t('SSH on the Tailscale address')} checked={status.remote_ssh === true} disabled={blocked || ssh === 'unknown'} onChange={() => void mutate('remote_ssh')} />
+        </div>
+        {ssh === 'active' && tsIp && <div className="rounded-xl bg-ok/10 p-3 text-[13px] text-ink2">
+          <p className="font-semibold text-ink">{t('From any device on your tailnet:')}</p>
+          {/* i18n-ignore: a shell command */}
+          <p className="mt-1 font-mono">ssh root@{tsIp}</p>
+        </div>}
+        {ssh === 'idle' && <p className="text-xs text-warn">{t('Works only while Tailscale is connected: turn on remote management or Tailscale mode.')}</p>}
+        {ssh === 'no_service' && <p className="text-xs text-warn">{t('The router’s SSH service is off. Turn it on under System → Settings → ADB and SSH access.')}</p>}
+        {ssh === 'unknown' && <p role="alert" className="text-xs text-danger">{t('Cannot read the forward, or tailnet port 22 is used by another Tailscale serve rule.')}</p>}
       </div>
     </Card>}
     {signedIn && <Card title={t('Tailscale exit node')}>

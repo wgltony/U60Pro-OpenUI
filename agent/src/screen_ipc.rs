@@ -83,6 +83,19 @@ pub enum Job {
     Admin(crate::admin_services::Update),
     /// Pocket OS toolbox actions: stock UI switch, Wi-Fi/USB/Network/TTL/Power/System controls.
     Tool(Tool),
+    /// `cfopt run`, `cfopt <revision> on|off`: Cloudflare IP optimization for Clash.
+    CfOpt(CfOpt),
+}
+
+/// Cloudflare IP optimization from the panel.
+#[derive(Debug, PartialEq)]
+pub enum CfOpt {
+    /// Starts a run now; the `k` record shows its progress.
+    Run,
+    Set {
+        revision: u64,
+        enabled: bool,
+    },
 }
 
 /// Pocket OS toolbox actions from the panel.
@@ -138,6 +151,10 @@ pub enum Tailscale {
         revision: u64,
         generation: u64,
         index: usize,
+    },
+    Ssh {
+        revision: u64,
+        enabled: bool,
     },
 }
 
@@ -202,12 +219,30 @@ pub fn tailscale_records(v: &Value, stamp: u64) -> String {
             ts_name(&p["name"])
         ));
     }
+    // h remote_ssh ssh_service: 0 off, 1 on, 2 unknown. A separate record, so screens
+    // that require T's exact field count keep reading it. No addresses cross here.
+    if v.get("remote_ssh").is_some() {
+        let flag = |k: &str| v[k].as_bool().map_or(2, u8::from);
+        out.push_str(&format!(
+            "h\t{}\t{}\n",
+            flag("remote_ssh"),
+            flag("ssh_service")
+        ));
+    }
     out
 }
 /// Resolve against a *fresh* get() under the shared transition lock, then call
 /// update_locked before dropping it. The backend rechecks revision and eligibility.
 pub fn tailscale_body(v: &Value, action: &Tailscale) -> Result<Value, &'static str> {
     let (revision, action_name, exit) = match *action {
+        Tailscale::Ssh { revision, enabled } => {
+            if v["revision"].as_u64() != Some(revision) {
+                return Err("Configuration changed; reload Tailscale.");
+            }
+            return Ok(
+                json!({"action":"remote_ssh","expected_revision":revision,"enabled":enabled}),
+            );
+        }
         Tailscale::Connect(r) => (r, "connect", None),
         Tailscale::Disconnect(r) => (r, "disconnect", None),
         Tailscale::Clear(r) => (r, "select_exit", Some(String::new())),
@@ -491,6 +526,11 @@ pub fn parse(line: &str) -> Result<Request, &'static str> {
             job(Job::Core(json!({"action":"update","tag":tag})))
         }
         ["diag"] => job(Job::Diagnose),
+        ["cfopt", "run"] => job(Job::CfOpt(CfOpt::Run)),
+        ["cfopt", rev, state @ ("on" | "off")] => job(Job::CfOpt(CfOpt::Set {
+            revision: revision(rev)?,
+            enabled: *state == "on",
+        })),
         ["power", "reboot"] => Ok(Request::Power(Power::Reboot)),
         ["power", "off"] => Ok(Request::Power(Power::Off)),
         ["esim", "scan"] => job(Job::Esim(Esim::Scan)),
@@ -502,6 +542,10 @@ pub fn parse(line: &str) -> Result<Request, &'static str> {
         ["ts", rev, "connect"] => job(Job::Tailscale(Tailscale::Connect(revision(rev)?))),
         ["ts", rev, "disconnect"] => job(Job::Tailscale(Tailscale::Disconnect(revision(rev)?))),
         ["ts", rev, "clear"] => job(Job::Tailscale(Tailscale::Clear(revision(rev)?))),
+        ["ts", rev, "ssh", state @ ("on" | "off")] => job(Job::Tailscale(Tailscale::Ssh {
+            revision: revision(rev)?,
+            enabled: *state == "on",
+        })),
         ["ts", rev, "exit", g, i] => job(Job::Tailscale(Tailscale::Exit {
             revision: revision(rev)?,
             generation: generation(g)?,
@@ -622,6 +666,33 @@ pub fn text_bytes(s: &str, max: usize) -> String {
     } else {
         out
     }
+}
+/// `k`: Cloudflare IP optimization. revision, on, running, phase, address, data center,
+/// TLS ms, kbit/s, last run, interval hours, and what stopped the last run (`-` when
+/// nothing did): nonode, offline, clash or failed. The address is a shared Cloudflare edge.
+pub fn cfopt_record(v: &Value) -> String {
+    let n = |k: &str| v[k].as_u64().unwrap_or(0);
+    let a = &v["applied"];
+    let problem = match v["error"].as_str() {
+        None => "-",
+        Some(e) if e.starts_with("No node") => "nonode",
+        Some(e) if e.starts_with("No Cloudflare address") => "offline",
+        Some("Clash is not running") => "clash",
+        Some(_) => "failed",
+    };
+    format!(
+        "k\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{problem}\n",
+        n("revision"),
+        u8::from(v["enabled"] == true),
+        u8::from(v["running"] == true),
+        word(v["phase"].as_str().unwrap_or(""), 12),
+        word(a["ip"].as_str().unwrap_or(""), 15),
+        word(a["colo"].as_str().unwrap_or(""), 8),
+        a["tls_ms"].as_u64().unwrap_or(0),
+        a["speed_kbps"].as_u64().unwrap_or(0),
+        n("last_run"),
+        n("interval_hours"),
+    )
 }
 /// A short ASCII token (a type, state or version), `-` when absent.
 fn word(s: &str, max: usize) -> String {
@@ -2092,6 +2163,78 @@ mod tailscale_tests {
         let mut many = v.clone();
         many["exit_nodes"] = json!(vec![json!({"id":"n1","name":"short"}); 40]);
         assert_eq!(tailscale_records(&many, 123).lines().count(), 33);
+    }
+    #[test]
+    fn cfopt_record_and_commands() {
+        let v = json!({"revision":3,"enabled":true,"running":true,"phase":"probing",
+            "applied":{"ip":"162.159.45.145","colo":"EWR","tls_ms":226,"speed_kbps":21666},
+            "last_run":1790000000u64,"interval_hours":4,"error":null});
+        assert_eq!(
+            cfopt_record(&v),
+            "k\t3\t1\t1\tprobing\t162.159.45.145\tEWR\t226\t21666\t1790000000\t4\t-\n"
+        );
+        let idle = json!({"revision":1,"enabled":false,"running":false,"phase":null,"applied":null,
+            "interval_hours":0,"error":"No node in the active subscription runs through Cloudflare"});
+        assert_eq!(
+            cfopt_record(&idle),
+            "k\t1\t0\t0\t-\t-\t-\t0\t0\t0\t0\tnonode\n"
+        );
+        for (e, w) in [
+            ("No Cloudflare address answered; check", "offline"),
+            ("Clash is not running", "clash"),
+            ("Cannot save x", "failed"),
+        ] {
+            assert!(cfopt_record(&json!({"error":e})).ends_with(&format!("\t{w}\n")));
+        }
+        assert_eq!(parse("cfopt run"), Ok(Request::Job(Job::CfOpt(CfOpt::Run))));
+        assert_eq!(
+            parse("cfopt 5 off"),
+            Ok(Request::Job(Job::CfOpt(CfOpt::Set {
+                revision: 5,
+                enabled: false
+            })))
+        );
+        for bad in [
+            "cfopt",
+            "cfopt 5",
+            "cfopt 5 yes",
+            "cfopt x on",
+            "cfopt run now",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+    }
+    #[test]
+    fn remote_ssh_record_and_command() {
+        // Older agents send no remote_ssh: no h record at all.
+        assert!(!tailscale_records(&snapshot(), 1).contains("\nh\t"));
+        let mut v = snapshot();
+        v["remote_ssh"] = json!(true);
+        v["ssh_service"] = json!(false);
+        assert!(tailscale_records(&v, 1).ends_with("h\t1\t0\n"));
+        v["remote_ssh"] = Value::Null;
+        v["ssh_service"] = Value::Null;
+        assert!(tailscale_records(&v, 1).ends_with("h\t2\t2\n"));
+        assert_eq!(
+            parse("ts 7 ssh on"),
+            Ok(Request::Job(Job::Tailscale(Tailscale::Ssh {
+                revision: 7,
+                enabled: true
+            })))
+        );
+        for bad in ["ts 7 ssh", "ts 7 ssh 1", "ts 7 ssh on 2222", "ts x ssh off"] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        let off = Tailscale::Ssh {
+            revision: 7,
+            enabled: false,
+        };
+        assert_eq!(
+            tailscale_body(&v, &off).unwrap(),
+            json!({"action":"remote_ssh","expected_revision":7,"enabled":false})
+        );
+        v["revision"] = json!(8);
+        assert!(tailscale_body(&v, &off).is_err());
     }
     #[test]
     fn fixed_commands_and_third_backend() {

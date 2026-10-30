@@ -171,6 +171,12 @@ static int usb_mode_index(const char *mode) {
   for(int i=0;i<2;i++)if(!strncmp(mode,usb_modes[i],strlen(usb_modes[i])))return i;
   return -1;
 }
+/* An applied USB switch the H record does not show yet. */
+static int usb_switching(void) {
+  if(usb_target<0)return 0;
+  if(usb_mode_index(data.toolbox.usb_mode)==usb_target||(unsigned long long)time(NULL)>=usb_target_until){usb_target=-1;return 0;}
+  return 1;
+}
 /* Overview's USB LAN switch; no record (older agent) or a stale one is a label, not OFF. */
 static int usb_lan_can(void) { return !blocked()&&data.toolbox.has&&data.toolbox.has_usb_lan; }
 static void usb_lan_row(int y) {
@@ -489,6 +495,7 @@ static void build_html(void) {
   else if(page==SUBS) render_subs();
   else if(page==CORE) render_core();
   else if(page==DIAG) render_diag();
+  else if(page==CFOPT) render_cfopt();
   else if(page==TAILSCALE) render_tailscale();
   else if(page==ESIM) render_esim();
   else if(page==UPLINK) render_uplink();

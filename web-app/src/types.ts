@@ -158,6 +158,8 @@ export interface UsbLanState {
 
 export interface UsbStatus {
   active_mode: UsbMode | null
+  /** The mode a scheduled switch is moving to; null when none runs (absent: older agent). */
+  switching?: UsbMode | null
   default_mode?: UsbMode
   link?: UsbLink
   ncm_persist_on_boot?: boolean
@@ -486,6 +488,10 @@ export interface TailscaleStatus {
   advertised_routes?: string[]
   route_approved?: boolean
   remote_error?: string | null
+  /** SSH on the tailnet address (newer agents only); null when unreadable or port 22 is served by another rule. */
+  remote_ssh?: boolean | null
+  /** Whether the router's local SSH service runs; null when unknown. */
+  ssh_service?: boolean | null
   /** Sign-in (newer agents only): the daemon's link while it waits, and the signed-in account. */
   installed?: boolean
   auth_url?: string | null
@@ -497,7 +503,7 @@ export type TailscaleUpdate =
   | { expected_revision: number; action: 'connect' | 'disconnect' | 'cancel_login' | 'logout' }
   | { expected_revision: number; action: 'login'; hostname?: string; auth_key?: string }
   | { expected_revision: number; action: 'select_exit'; exit_node: string }
-  | { expected_revision: number; action: 'remote_access'; enabled: boolean }
+  | { expected_revision: number; action: 'remote_access' | 'remote_ssh'; enabled: boolean }
 
 export interface WireGuardProfile {
   id: number
@@ -704,6 +710,51 @@ export interface ClashDiagnostics {
   duration_ms?: number
   verdict: ClashVerdict | null
   checks: ClashCheck[]
+}
+
+/** One Cloudflare edge address as `/api/clash/cfopt` measured it. */
+export interface CfProbe {
+  ip: string
+  /** Cloudflare data center (IATA code). */
+  colo: string
+  connect_ms: number
+  tls_ms: number | null
+  speed_kbps: number | null
+}
+export type CfOptPhase = 'nodes' | 'probing' | 'verifying' | 'speed' | 'applying'
+/** `GET/PUT /api/clash/cfopt`, `POST /api/clash/cfopt/run` — agent/src/clash_cfopt.rs.
+ * Device-clock times are raw; pages show the relative `_age_s`/`_in_s` fields. */
+export interface ClashCfOpt {
+  revision: number
+  enabled: boolean
+  /** Hours between automatic runs; 0 runs only on request. */
+  interval_hours: number
+  intervals: number[]
+  speed_test: boolean
+  running: boolean
+  phase: CfOptPhase | null
+  applied: CfProbe | null
+  applied_at: number
+  /** The node domain's own DNS answer, measured the same way. */
+  baseline: CfProbe | null
+  candidates: CfProbe[]
+  /** Nodes the pick applies to. */
+  nodes: string[]
+  last_run: number
+  last_attempt: number
+  error: string | null
+  next_run: number | null
+  tested: number
+  data_kb: number
+  last_run_age_s: number | null
+  next_run_in_s: number | null
+  clash_running: boolean
+}
+export interface ClashCfOptUpdate {
+  expected_revision: number
+  enabled?: boolean
+  interval_hours?: number
+  speed_test?: boolean
 }
 
 /** `GET/POST /api/clash/core` — mirrors agent/src/clash_core.rs; times are device clock seconds.

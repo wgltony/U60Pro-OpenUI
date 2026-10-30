@@ -7,6 +7,7 @@ mod cache;
 mod cell;
 mod charge_policy;
 mod clash;
+mod clash_cfopt;
 mod clash_config;
 mod clash_core;
 mod clash_ctl;
@@ -105,6 +106,7 @@ fn main() {
     // Before the supervisor: an interrupted core update may have left its files or lock.
     clash_core::cleanup_on_start();
     clash::start();
+    clash_cfopt::start();
     wifi_uplink::start();
     admin_services::start();
     screen::start(state.clone());

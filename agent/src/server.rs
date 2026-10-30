@@ -9,6 +9,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 use crate::at_cmd;
 use crate::cell;
 use crate::clash;
+use crate::clash_cfopt;
 use crate::clash_core;
 use crate::clash_diag;
 use crate::connection_logger;
@@ -355,6 +356,9 @@ pub fn route(
         (&Method::Get, "/api/clash/connections") => clash::connections(),
         (&Method::Delete, "/api/clash/connections") => clash::close_connections(),
         (&Method::Get, "/api/clash/logs") => clash::logs(),
+        (&Method::Get, "/api/clash/cfopt") => clash_cfopt::get(),
+        (&Method::Put, "/api/clash/cfopt") => clash_cfopt::update(body),
+        (&Method::Post, "/api/clash/cfopt/run") => clash_cfopt::run(),
         (&Method::Get, "/api/clash/core") => clash_core::get(),
         (&Method::Post, "/api/clash/core") => clash_core::post(body),
         (&Method::Get, "/api/clash/diagnostics") => clash_diag::get(),

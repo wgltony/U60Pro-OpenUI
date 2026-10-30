@@ -22,6 +22,8 @@ import type {
   ClashCoreAction,
   EsimAction,
   EsimStatus,
+  ClashCfOpt,
+  ClashCfOptUpdate,
   ClashDiagnostics,
   ClashProxies,
   ClashStatus,
@@ -669,6 +671,10 @@ export const api = {
   // The run itself takes up to ~40 s in the background; the POST answers at once.
   clashDiagnostics: () => get('/api/clash/diagnostics').then(d => d as unknown as ClashDiagnostics),
   clashDiagnose: () => req('POST', '/api/clash/diagnostics', undefined, undefined, 10_000).then(d => d as unknown as ClashDiagnostics),
+  // Cloudflare IP optimization: a run takes about a minute in the background; the POST answers at once.
+  clashCfOpt: () => get('/api/clash/cfopt').then(d => d as unknown as ClashCfOpt),
+  clashCfOptSet: (body: ClashCfOptUpdate) => req('PUT', '/api/clash/cfopt', body, undefined, 90_000).then(d => d as unknown as ClashCfOpt),
+  clashCfOptRun: () => req('POST', '/api/clash/cfopt/run', undefined, undefined, 10_000).then(d => d as unknown as ClashCfOpt),
   // Core and geo data updates: each action answers at once and runs as a job that
   // clashCore() reports; an upload streams the file (up to 64 MiB), then installs as one.
   // eSIM on a removable eUICC: each action answers at once and runs as a job that esim() reports.

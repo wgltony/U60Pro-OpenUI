@@ -203,6 +203,7 @@ def usb_defaults():
     return {
         "mode": "user",
         "active_mode": "ecm",
+        "switching": None,
         "default_mode": "ecm",
         "ncm_persist_on_boot": False,
         "supported_modes": ["rndis", "ecm", "ncm"],
@@ -385,10 +386,22 @@ def put_wifi_settings(body):
 
 
 def put_usb_mode(body):
+    # Like the B31 agent: reply "scheduled", switch about 4 s later.
     mode = (body or {}).get("mode")
-    if mode:
-        STATE["usb"]["active_mode"] = mode
-    return {"status": "ok", "active_mode": STATE["usb"]["active_mode"]}
+    if not mode or mode == STATE["usb"]["active_mode"]:
+        return {"status": "unchanged", "mode": STATE["usb"]["active_mode"]}
+    STATE["usb_switch"] = (mode, time.time() + 4)
+    STATE["usb"]["switching"] = mode
+    return {"status": "scheduled", "mode": mode, "delay_ms": 1000}
+
+
+def usb_status():
+    pending = STATE.get("usb_switch")
+    if pending and time.time() >= pending[1]:
+        STATE["usb"]["active_mode"] = pending[0]
+        STATE["usb"]["switching"] = None
+        STATE["usb_switch"] = None
+    return STATE["usb"]
 
 
 def put_usb_default(body):
@@ -651,6 +664,63 @@ def clash_diagnose(body):
         STATE["diagnostics"] = {**STATE["diagnostics"], "running": True}
         STATE["diagnostics_done_at"] = time.time() + 3
     return clash_diagnostics()
+
+
+# ── Cloudflare IP optimization (agent/src/clash_cfopt.rs) ─────────────────────
+# A run "finishes" 6 s after it starts and picks a faster edge than the domain's own.
+
+CFOPT = {"revision": 0, "enabled": True, "interval_hours": 4, "speed_test": True,
+         "started": 0.0, "last_run": 0.0, "applied": None}
+CF_PHASES = [(1, "nodes"), (3, "probing"), (4.5, "verifying"), (5.5, "speed"), (6, "applying")]
+CF_CANDIDATES = [
+    {"ip": "162.159.45.145", "colo": "EWR", "connect_ms": 39, "tls_ms": 221, "speed_kbps": 23400},
+    {"ip": "104.16.1.17", "colo": "DTW", "connect_ms": 27, "tls_ms": 226, "speed_kbps": 19800},
+    {"ip": "172.64.53.224", "colo": "EWR", "connect_ms": 41, "tls_ms": 238, "speed_kbps": 17100},
+    {"ip": "108.162.198.184", "colo": "IAD", "connect_ms": 48, "tls_ms": 252, "speed_kbps": None},
+    {"ip": "172.67.203.173", "colo": "ORD", "connect_ms": 193, "tls_ms": 390, "speed_kbps": None},
+]
+
+
+def cfopt_status():
+    c, now = CFOPT, time.time()
+    running = bool(c["started"]) and now - c["started"] < 6
+    if c["started"] and not running:
+        c.update(started=0.0, last_run=now, applied=CF_CANDIDATES[0])
+    phase = next((p for t, p in CF_PHASES if now - c["started"] < t), "applying") if running else None
+    done = c["last_run"] > 0
+    nxt = c["last_run"] + c["interval_hours"] * 3600 if c["enabled"] and c["interval_hours"] else None
+    return {"revision": c["revision"], "enabled": c["enabled"], "interval_hours": c["interval_hours"],
+            "intervals": [0, 1, 2, 3, 4, 6, 8, 12, 24], "speed_test": c["speed_test"], "running": running,
+            "phase": phase, "applied": c["applied"], "applied_at": int(c["last_run"]),
+            "baseline": CF_CANDIDATES[4] if done else None, "candidates": CF_CANDIDATES if done else [],
+            "nodes": ["US-CDN"] if done else [], "last_run": int(c["last_run"]), "last_attempt": int(c["last_run"]),
+            "error": None, "next_run": int(nxt) if nxt else None, "tested": 263 if done else 0,
+            "data_kb": 6312 if done else 0, "last_run_age_s": int(now - c["last_run"]) if done else None,
+            "next_run_in_s": max(0, int(nxt - now)) if nxt and done else (0 if nxt else None),
+            "clash_running": STATE["clash"]["enabled"]}
+
+
+def cfopt_set(body):
+    c = CFOPT
+    if body.get("expected_revision") != c["revision"]:
+        raise ValueError("Configuration changed; refresh and try again")
+    if "interval_hours" in body and body["interval_hours"] not in [0, 1, 2, 3, 4, 6, 8, 12, 24]:
+        raise ValueError("Invalid optimization interval")
+    for k in ("enabled", "interval_hours", "speed_test"):
+        if k in body:
+            c[k] = body[k]
+    c["revision"] += 1
+    return cfopt_status()
+
+
+def cfopt_run(body):
+    if not CFOPT["enabled"]:
+        raise ValueError("Turn on Cloudflare IP optimization first")
+    if not STATE["clash"]["enabled"]:
+        raise ValueError("Clash is not running")
+    if not cfopt_status()["running"]:
+        CFOPT["started"] = time.time()
+    return cfopt_status()
 
 
 # ── Clash core and geo data (agent/src/clash_core.rs) ────────────────────────
@@ -960,7 +1030,7 @@ def uplink_scan(body):
 
 # Tailscale as agent/src/tailscale.rs reports it: signed out at first; a sign-in shows its
 # link after 2 s and "completes" 12 s after it started.
-TS = {"revision": 0, "enabled": False, "remote_access": False, "signed_in": False, "login_started": 0.0, "hostname": "u60-pro"}
+TS = {"revision": 0, "enabled": False, "remote_access": False, "remote_ssh": False, "signed_in": False, "login_started": 0.0, "hostname": "u60-pro"}
 
 
 def tailscale_status():
@@ -976,7 +1046,8 @@ def tailscale_status():
             "lan_cidr": "192.168.0.0/24", "lan_ip": "192.168.0.1", "advertised_routes": ["192.168.0.0/24"] if remote else [],
             "route_approved": False, "remote_error": None, "installed": True,
             "auth_url": "https://login.tailscale.com/a/demo123" if waiting and now - ts["login_started"] >= 2 else None,
-            "login_active": waiting, "login_error": None, "account": "demo@example.com" if signed else None}
+            "login_active": waiting, "login_error": None, "account": "demo@example.com" if signed else None,
+            "remote_ssh": ts["remote_ssh"], "ssh_service": ADMIN["ssh_running"]}
 
 
 def tailscale_set(body):
@@ -992,11 +1063,13 @@ def tailscale_set(body):
         ts["login_started"] = 0.0
     elif action == "logout":
         ts.update({"signed_in": False, "enabled": False, "remote_access": False})
-    elif action in ("remote_access", "connect", "disconnect"):
+    elif action == "remote_ssh" and not body.get("enabled"):
+        ts["remote_ssh"] = False
+    elif action in ("remote_access", "remote_ssh", "connect", "disconnect"):
         if not ts["signed_in"]:
             raise ValueError("Tailscale is not signed in; sign in on the Tailscale page first")
-        if action == "remote_access":
-            ts["remote_access"] = bool(body.get("enabled"))
+        if action in ("remote_access", "remote_ssh"):
+            ts[action] = bool(body.get("enabled"))
         else:
             ts["enabled"] = action == "connect"
     else:
@@ -1045,6 +1118,7 @@ ROUTES_PUT = {
     "/api/tailscale": tailscale_set,
     "/api/proxy": proxy_set,
     "/api/clash": clash_set,
+    "/api/clash/cfopt": cfopt_set,
     "/api/clash/proxies": clash_select,
     "/api/wireguard": wireguard_set,
     "/api/device/charge-control": put_charge_control,
@@ -1266,6 +1340,7 @@ ROUTES_GET = {
          "upload": 18234, "download": 912345, "start": "2026-09-25T08:00:00Z"}] if STATE["clash"]["running"] else []},
     "/api/clash/logs": lambda: {"lines": ["time=\"2026-09-25T08:00:00Z\" level=info msg=\"Start initial Compatible provider default\""]},
     "/api/clash/diagnostics": clash_diagnostics,
+    "/api/clash/cfopt": cfopt_status,
     "/api/clash/core": core_status,
     "/api/esim": esim_status,
     "/api/screen": lambda: STATE["screen"],
@@ -1283,7 +1358,7 @@ ROUTES_GET = {
     "/api/memory": lambda: dashboard_batch()["memory"],
     "/api/wifi/status": lambda: STATE["wifi"],
     "/api/wifi/uplink": uplink_status,
-    "/api/usb/status": lambda: STATE["usb"],
+    "/api/usb/status": usb_status,
     "/api/device/charger": lambda: STATE["charger"],
     "/api/device/charge-control": lambda: STATE["charge_control"],
     "/api/device/thermal/all": thermal_all,
@@ -1336,6 +1411,7 @@ ROUTES_POST = {
         {n: STATE["clash_proxies"]["nodes"][n]["delay"] or 0 for g in STATE["clash_proxies"]["groups"] if g["name"] == body.get("name") for n in g["all"]}
         if body.get("group") else {"delay": (STATE["clash_proxies"]["nodes"].get(body.get("name")) or {}).get("delay") or 0}),
     "/api/clash/diagnostics": clash_diagnose,
+    "/api/clash/cfopt/run": cfopt_run,
     "/api/clash/core": core_action,
     "/api/esim": esim_action,
     "/api/esim/delete": esim_delete,

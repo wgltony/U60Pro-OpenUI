@@ -59,9 +59,17 @@ struct relay_catalog {
   unsigned long long rev,gen,stamp;
   struct relay_saved saved[8];struct relay_scan scan[60];
 };
+/* k: Cloudflare IP optimization. problem: - nonode offline clash failed. */
+struct cfopt_info {
+  int has, enabled, running, interval;
+  unsigned long long rev, last_run;
+  unsigned tls_ms, speed_kbps;
+  char phase[13], ip[16], colo[9], problem[8];
+};
 struct tailscale_row { int index, selected; char name[49]; };
 struct tailscale_info {
   int has, enabled, error, n;
+  int has_ssh, remote_ssh, ssh_service; /* h: 0 off, 1 on, 2 unknown */
   unsigned long long rev, gen, stamp;
   char state[20], selected[49];
   struct tailscale_row rows[32];
@@ -518,6 +526,18 @@ static void parse_tailscale(char **f, int n, struct tailscale_info *t) {
   t->has=1;t->rev=u64_field(f[1]);t->gen=u64_field(f[2]);
   t->stamp=u64_field(f[7]);t->enabled=atoi(f[3]);t->error=atoi(f[5]);COPY(t->state,f[4]);
   copy_name(t->selected,sizeof(t->selected),f[6]);
+}
+static void parse_cfopt(char **f,int n,struct cfopt_info *c) {
+  if(n!=12||(strcmp(f[2],"0")&&strcmp(f[2],"1"))||(strcmp(f[3],"0")&&strcmp(f[3],"1")))return;
+  c->has=1;c->rev=u64_field(f[1]);c->enabled=atoi(f[2]);c->running=atoi(f[3]);
+  COPY(c->phase,f[4]);COPY(c->ip,f[5]);COPY(c->colo,f[6]);
+  c->tls_ms=(unsigned)u64_field(f[7]);c->speed_kbps=(unsigned)u64_field(f[8]);
+  c->last_run=u64_field(f[9]);c->interval=atoi(f[10]);COPY(c->problem,f[11]);
+}
+/* h: whether tailnet port 22 forwards to local SSH, and whether that SSH runs. */
+static void parse_tailscale_ssh(char **f,int n,struct tailscale_info *t) {
+  if(!t->has||n!=3||strlen(f[1])!=1||strlen(f[2])!=1||!strchr("012",f[1][0])||!strchr("012",f[2][0]))return;
+  t->has_ssh=1;t->remote_ssh=f[1][0]-'0';t->ssh_service=f[2][0]-'0';
 }
 static void parse_tailscale_row(char **f,int n,struct tailscale_info *t) {
   if(!t->has || n!=4 || t->n>=32 || u64_field(f[1])!=(unsigned)t->n ||

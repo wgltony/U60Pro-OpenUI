@@ -33,8 +33,24 @@ export function tailscaleUpdate(status: TailscaleStatus, action: TailscaleUpdate
   if (action === 'remote_access') {
     return { expected_revision: status.revision, action, enabled: !status.remote_access }
   }
+  if (action === 'remote_ssh') {
+    return { expected_revision: status.revision, action, enabled: status.remote_ssh !== true }
+  }
   return { expected_revision: status.revision, action }
 }
+
+/** Remote SSH on the tailnet address: off, on and reachable, on while Tailscale is down,
+ *  on without a local SSH service, or unknown (unreadable, or port 22 served by another rule). */
+export function remoteSshState(status: TailscaleStatus): 'unsupported' | 'unknown' | 'off' | 'idle' | 'no_service' | 'active' {
+  if (status.remote_ssh === undefined) return 'unsupported'
+  if (status.remote_ssh === null) return 'unknown'
+  if (!status.remote_ssh) return 'off'
+  if (status.backend_state !== 'Running') return 'idle'
+  return status.ssh_service === false ? 'no_service' : 'active'
+}
+
+/** The router's IPv4 tailnet address, for the ssh command shown. */
+export const tailnetIpv4 = (status: TailscaleStatus) => status.self?.ips.find(ip => /^\d+\.\d+\.\d+\.\d+$/.test(ip)) ?? null
 
 /** Where remote management stands: off, waiting for admin approval, working, or failed. */
 export function remoteAccessState(status: TailscaleStatus): 'unsupported' | 'off' | 'error' | 'starting' | 'pending' | 'active' {

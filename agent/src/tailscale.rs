@@ -67,6 +67,12 @@ enum Update {
         expected_revision: u64,
         enabled: bool,
     },
+    /// SSH on this router's tailnet address: tailscaled forwards TCP 22 to the local-only
+    /// dropbear, which itself is left as it is.
+    RemoteSsh {
+        expected_revision: u64,
+        enabled: bool,
+    },
     /// Without `auth_key` the daemon offers a browser link (`auth_url`) to finish.
     Login {
         expected_revision: u64,
@@ -91,6 +97,9 @@ impl Update {
                 expected_revision, ..
             }
             | Self::RemoteAccess {
+                expected_revision, ..
+            }
+            | Self::RemoteSsh {
                 expected_revision, ..
             }
             | Self::Login {
@@ -302,6 +311,64 @@ fn patch(running: bool, exit: &str, routes: &[String]) -> Result<(), String> {
     .map_err(|_| "Cannot update Tailscale preferences")?;
     if !(200..300).contains(&code) {
         return Err("Tailscale rejected preference update".into());
+    }
+    Ok(())
+}
+/// Remote SSH lives only in tailscaled's serve config (TCP 22 → the loopback dropbear
+/// listener): it persists with the daemon's state and ends with the sign-in, so there is
+/// nothing of ours to reconcile. Other serve rules are never touched.
+const SSH_PORT: &str = "22";
+const SSH_TARGET: &str = "127.0.0.1:22";
+fn serve_config() -> Result<Value, String> {
+    let (code, v) = clash_ctl::request_with_host(
+        Path::new(SOCKET),
+        "GET",
+        "/localapi/v0/serve-config",
+        None,
+        Duration::from_secs(5),
+        "local-tailscaled.sock",
+    )
+    .map_err(|_| "Cannot read Tailscale serve settings")?;
+    if !(200..300).contains(&code) {
+        return Err("Cannot read Tailscale serve settings".into());
+    }
+    Ok(v)
+}
+/// Some(true) when tailnet TCP 22 is exactly our forward, Some(false) when the port is
+/// free, None when another serve rule holds it.
+fn ssh_forward(cfg: &Value) -> Option<bool> {
+    let handler = &cfg["TCP"][SSH_PORT];
+    if handler.is_null() {
+        return Some(false);
+    }
+    let ours = handler
+        .as_object()
+        .is_some_and(|h| h.len() == 1 && h.get("TCPForward") == Some(&json!(SSH_TARGET)));
+    ours.then_some(true)
+}
+fn ssh_forward_args(on: bool) -> &'static [&'static str] {
+    if on {
+        &["serve", "--bg", "--tcp", SSH_PORT, "tcp://127.0.0.1:22"]
+    } else {
+        &["serve", "--tcp=22", "off"]
+    }
+}
+fn set_ssh_forward(on: bool) -> Result<(), String> {
+    match ssh_forward(&serve_config()?) {
+        Some(now) if now == on => return Ok(()),
+        None => return Err("Tailnet port 22 is used by another Tailscale serve rule".into()),
+        _ => {}
+    }
+    let out = Command::new(cli_path())
+        .arg(format!("--socket={SOCKET}"))
+        .args(ssh_forward_args(on))
+        .bounded_output()
+        .map_err(|_| "Cannot run Tailscale serve")?;
+    if !out.status.success() {
+        return Err("Tailscale rejected the remote SSH change".into());
+    }
+    if ssh_forward(&serve_config()?) != Some(on) {
+        return Err("Remote SSH verification failed".into());
     }
     Ok(())
 }
@@ -1032,6 +1099,9 @@ fn response() -> Result<Value, String> {
     result["advertised_routes"] = json!(advertised_routes);
     result["route_approved"] = json!(route_approved(&v, lan.as_deref()));
     result["remote_error"] = json!(REMOTE_ERROR.lock().unwrap().clone());
+    // null when unreadable or when another serve rule holds tailnet port 22.
+    result["remote_ssh"] = json!(serve_config().ok().as_ref().and_then(ssh_forward));
+    result["ssh_service"] = json!(crate::admin_services::snapshot().map(|s| s.ssh_running));
     result["installed"] = json!(Path::new(cli_path()).is_file());
     result["login_active"] = json!(login_active());
     result["login_error"] = json!(LOGIN_ERROR.lock().unwrap().clone());
@@ -1102,6 +1172,8 @@ pub(crate) fn update_locked(body: &[u8]) -> (u16, Value) {
             Update::SelectExit { .. } => "select exit node",
             Update::RemoteAccess { enabled: true, .. } => "remote access on",
             Update::RemoteAccess { .. } => "remote access off",
+            Update::RemoteSsh { enabled: true, .. } => "remote ssh on",
+            Update::RemoteSsh { .. } => "remote ssh off",
             Update::Login { auth_key, .. } if !auth_key.is_empty() => "sign in with key",
             Update::Login { .. } => "sign in with link",
             Update::CancelLogin { .. } => "cancel sign-in",
@@ -1138,6 +1210,15 @@ pub(crate) fn update_locked(body: &[u8]) -> (u16, Value) {
                 } else {
                     ensure_down()?;
                 }
+            }
+            Update::RemoteSsh { enabled, .. } => {
+                if enabled && !enrolled(&status()?) {
+                    return Err(
+                        "Tailscale is not signed in; sign in on the Tailscale page first".into(),
+                    );
+                }
+                persist(&s)?;
+                set_ssh_forward(enabled)?;
             }
             Update::Disconnect { .. } => {
                 BLOCK_NATIVE.store(true, Ordering::SeqCst);
@@ -1315,6 +1396,39 @@ pub fn start() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn remote_ssh_reads_only_its_own_serve_rule() {
+        assert_eq!(ssh_forward(&Value::Null), Some(false));
+        assert_eq!(ssh_forward(&json!({})), Some(false));
+        assert_eq!(
+            ssh_forward(&json!({"TCP":{"443":{"HTTPS":true}}})),
+            Some(false)
+        );
+        assert_eq!(
+            ssh_forward(&json!({"TCP":{"22":{"TCPForward":"127.0.0.1:22"}}})),
+            Some(true)
+        );
+        for other in [
+            json!({"TCP":{"22":{"TCPForward":"192.168.0.5:22"}}}),
+            json!({"TCP":{"22":{"TCPForward":"127.0.0.1:22","TerminateTLS":"x"}}}),
+            json!({"TCP":{"22":{"HTTP":true}}}),
+        ] {
+            assert_eq!(ssh_forward(&other), None, "{other}");
+        }
+        assert_eq!(
+            ssh_forward_args(true),
+            ["serve", "--bg", "--tcp", "22", "tcp://127.0.0.1:22"]
+        );
+        assert_eq!(ssh_forward_args(false), ["serve", "--tcp=22", "off"]);
+        let u: Update =
+            serde_json::from_str(r#"{"action":"remote_ssh","expected_revision":4,"enabled":true}"#)
+                .unwrap();
+        assert!(matches!(u, Update::RemoteSsh { enabled: true, .. }) && u.revision() == 4);
+        assert!(serde_json::from_str::<Update>(
+            r#"{"action":"remote_ssh","expected_revision":4,"enabled":true,"port":2222}"#
+        )
+        .is_err());
+    }
     #[test]
     fn remote_access_routes_are_verified_and_reported() {
         let p = json!({"WantRunning":true,"CorpDNS":false,"RouteAll":false,"ExitNodeID":"","ExitNodeIP":"",

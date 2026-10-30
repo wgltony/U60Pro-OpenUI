@@ -14,6 +14,7 @@ static const char *page_title(void) {
   case SUBS: return L("Subscriptions","订阅");
   case CORE: return L("Core & data","内核与数据");
   case DIAG: return L("Diagnostics","诊断");
+  case CFOPT: return L("CF IP optimizer","CF IP 优选");
   case TAILSCALE: return "Tailscale";
   case ESIM: return "eSIM";
   case UPLINK: return L("Wi-Fi relay","无线中继");
@@ -107,24 +108,36 @@ static const char *ts_summary(void) {
     !t->enabled?L("Off","已关闭"):!strcmp(t->state,"Running")?L("Running (status only)","运行中（仅状态）"):
     !strcmp(t->state,"Starting")?L("Starting","启动中"):L("Unavailable","不可用");
 }
+/* Remote SSH: tailnet port 22 forwarded to this router's local SSH. Unknown is a
+ * label, never an OFF switch. */
+static const char *ts_ssh_detail(void) {
+  const struct tailscale_info *t=&data.tailscale;
+  return !t->has_ssh?L("Unavailable","不可用"):t->remote_ssh==2?L("Unknown; see OpenUI","未知，请查看 OpenUI"):
+    !t->remote_ssh?L("Off; SSH via tailnet","已关闭：经 tailnet SSH"):
+    t->ssh_service==0?L("On; SSH service is off","已开启；SSH 服务已关闭"):
+    strcmp(t->state,"Running")?L("On; needs Tailscale up","已开启；需 Tailscale 连接"):
+    L("On: ssh root@TS IP","已开启：ssh root@TS IP");
+}
 static void render_tailscale(void) {
   const struct tailscale_info *t=&data.tailscale;
   header("Tailscale");
-  sbox(16,72,292,20,"head",ts_summary());
-  switch_row(12,100,296,56,"tstoggle","tstoggle","Tailscale",
+  sbox(16,68,292,20,"head",ts_summary());
+  switch_row(12,92,296,56,"tstoggle","tstoggle","Tailscale",
       L("Connect / disconnect","连接 / 断开"),t->enabled,!ts_blocked());
-  sbox(16,164,292,20,notice[0]?"warn":"muted",notice[0]?notice:L("Status != forwarding proof; no IPv6","状态不代表转发已验证；不支持 IPv6"));
-  sbox(16,190,292,20,"head",t->selected[0]&&strcmp(t->selected,"-")?t->selected:L("No exit selected","未选择出口"));
-  linkbox(12,216,296,48,"tsclear",L("Clear exit","清除出口"),!ts_blocked()&&strcmp(t->selected,"-"),PLAIN);
-  if(ts_offset>=t->n)ts_offset=t->n>0?(t->n-1)/3*3:0;
-  for(int i=0;i<3&&ts_offset+i<t->n;i++) {
+  switch_row(12,152,296,56,"tsssh","tsssh",L("Remote SSH","远程 SSH"),ts_ssh_detail(),
+      t->has_ssh&&t->remote_ssh==1,!ts_blocked()&&t->has_ssh&&t->remote_ssh!=2);
+  sbox(16,212,292,20,notice[0]?"warn":"muted",notice[0]?notice:L("Status != forwarding proof; no IPv6","状态不代表转发已验证；不支持 IPv6"));
+  sbox(16,236,292,20,"head",t->selected[0]&&strcmp(t->selected,"-")?t->selected:L("No exit selected","未选择出口"));
+  linkbox(12,260,296,48,"tsclear",L("Clear exit","清除出口"),!ts_blocked()&&strcmp(t->selected,"-"),PLAIN);
+  if(ts_offset>=t->n)ts_offset=t->n>0?(t->n-1)/2*2:0;
+  for(int i=0;i<2&&ts_offset+i<t->n;i++) {
     const struct tailscale_row *row=&t->rows[ts_offset+i];char id[12];snprintf(id,sizeof(id),"ts%d",i);
-    linkbox(12,272+52*i,296,48,id,row->name,!ts_blocked(),row->selected?CHOSEN:PLAIN);
+    linkbox(12,316+52*i,296,48,id,row->name,!ts_blocked(),row->selected?CHOSEN:PLAIN);
   }
-  if(!t->n)sbox(16,272,292,40,"wrap muted",L("No online eligible exits","没有在线可用出口"));
+  if(!t->n)sbox(16,316,292,40,"wrap muted",L("No online eligible exits","没有在线可用出口"));
   /* Leave a lower inset for the renderer's inclusive/bordered hit rectangle. */
   linkbox(12,428,140,48,"tsprev",L("Previous","上一页"),ts_offset>0,PLAIN);
-  linkbox(168,428,140,48,"tsnext",L("Next","下一页"),ts_offset+3<t->n,PLAIN);
+  linkbox(168,428,140,48,"tsnext",L("Next","下一页"),ts_offset+2<t->n,PLAIN);
 
 }
 static const char *proxy_summary(void) {
@@ -151,6 +164,44 @@ static const char *verdict_text(const char *v, const char **cls) {
   if(!strcmp(v,"nodes"))return L("Nodes or the internet fail","节点或外网不可用");
   if(!strcmp(v,"no_devices")){*cls="warn";return L("No device uses Clash","没有设备走 Clash");}
   *cls="warn";return v;
+}
+static int cfopt_can_run(void) {
+  const struct cfopt_info *c=&data.cfopt;
+  return c->has&&c->enabled&&!c->running&&data.clash.running&&!blocked();
+}
+static const char *cfopt_phase(const char *p) {
+  return !strcmp(p,"probing")?L("Testing edge addresses...","正在测试边缘地址..."):
+    !strcmp(p,"verifying")?L("Checking the fastest...","正在复测最快地址..."):
+    !strcmp(p,"speed")?L("Speed-testing the best...","正在测速..."):
+    !strcmp(p,"applying")?L("Applying to Clash...","正在应用到 Clash..."):L("Finding Cloudflare nodes...","正在查找 Cloudflare 节点...");
+}
+/* One line for the Clash page row and the page's own summary. */
+static const char *cfopt_summary(const char **cls) {
+  static char line[96];
+  const struct cfopt_info *c=&data.cfopt;
+  *cls="muted";
+  if(!c->has)return data.stamp?L("Unavailable","不可用"):L("Loading status","正在加载状态");
+  if(!c->enabled)return L("Off","已关闭");
+  if(c->running||(pending&&pending_kind==JOB_CFOPT)){*cls="warn";return c->running?cfopt_phase(c->phase):L("Starting...","正在开始...");}
+  if(!strcmp(c->problem,"nonode"))return L("No node runs through Cloudflare","没有经过 Cloudflare 的节点");
+  if(!strcmp(c->problem,"offline")){*cls="bad";return L("No address answered","没有地址响应");}
+  if(!strcmp(c->problem,"failed")){*cls="bad";return L("Last run failed; see OpenUI","上次运行失败，请在 OpenUI 查看");}
+  if(!data.clash.running||!strcmp(c->problem,"clash"))return L("Runs while Clash is on","Clash 开启时运行");
+  if(c->ip[0]){*cls="good";snprintf(line,sizeof(line),"%s · %s",c->ip,c->colo);return line;}
+  return L("Waiting for the first run","等待首次运行");
+}
+/* diag_summary for a half-width row. */
+static const char *diag_short(const char **cls) {
+  const struct diag_info *d=&data.diag;
+  const char *v=d->verdict;
+  *cls="muted";
+  if(!d->has)return "--";
+  if(d->running){*cls="warn";return L("Running...","诊断中...");}
+  if(!v[0])return L("Find issues","排查问题");
+  verdict_text(v,cls);
+  return !strcmp(v,"ok")?L("All passed","全部通过"):!strcmp(v,"clash_off")?L("Clash off","Clash 未开"):
+    !strcmp(v,"core_down")?L("Core down","内核无响应"):!strcmp(v,"not_routed")?L("Not routed","未进 Clash"):
+    !strcmp(v,"nodes")?L("Nodes fail","节点不可用"):!strcmp(v,"no_devices")?L("No devices","无设备"):v;
 }
 static const char *diag_summary(const char **cls) {
   const struct diag_info *d=&data.diag;
@@ -270,11 +321,15 @@ static void render_clash(void) {
   else snprintf(tmp,sizeof(tmp),"%s",L("Add subscriptions in OpenUI","请在 OpenUI 添加订阅"));
   nav_row(12,300,296,48,"subs",L("Subscriptions","订阅"),tmp,"",reachable(SUBS));
   const struct core_info *k=&data.core;
-  if(k->available&&k->newer&&k->latest[0])snprintf(tmp,sizeof(tmp),L("%s · %s available","%s · 可更新到 %s"),k->version[0]?k->version:"--",k->latest);
-  else snprintf(tmp,sizeof(tmp),"%s",k->available&&k->version[0]?k->version:L("Core and geo data","内核与 GEO 数据"));
-  nav_row(12,352,296,48,"core",L("Core & data","内核与数据"),tmp,k->newer?"accent":"",reachable(CORE));
-  const char *dcls;const char *detail=diag_summary(&dcls);
-  nav_row(12,404,296,48,"diag",L("Diagnostics","诊断"),detail,dcls,reachable(DIAG));
+  /* Core and diagnostics share the last row, so the optimizer gets one of its own; half rows
+     carry short details. */
+  if(k->available&&k->newer&&k->latest[0])snprintf(tmp,sizeof(tmp),"%s",L("Update ready","可更新"));
+  else snprintf(tmp,sizeof(tmp),"%s",k->available&&k->version[0]?k->version:L("Geo data","GEO 数据"));
+  const char *ccls;const char *cdetail=cfopt_summary(&ccls);
+  nav_row(12,352,296,48,"cfopt",L("CF IP optimizer","CF IP 优选"),cdetail,ccls,reachable(CFOPT));
+  nav_row(12,404,146,48,"core",L("Core","内核"),tmp,k->newer?"accent":"",reachable(CORE));
+  const char *dcls;const char *detail=diag_short(&dcls);
+  nav_row(162,404,146,48,"diag",L("Diagnostics","诊断"),detail,dcls,reachable(DIAG));
   footer(456,20,b->has&&!b->ready[1]&&!c->enabled?reason_text(b->reason[1]):"",
          b->has&&!b->ready[1]&&!c->enabled?"warn":"muted");
 }
@@ -501,6 +556,32 @@ static void check_detail(char *buf, size_t n, const struct check_info *c) {
     else if(v[3]>0&&v[3]!=NO_FIGURE)snprintf(buf,n,L("Rejected packets: %lld","已拒绝数据包：%lld 个"),v[3]);
     else snprintf(buf,n,"%s",L("Rules in place","规则完整"));
   }
+}
+static void render_cfopt(void) {
+  const struct cfopt_info *c=&data.cfopt;
+  char tmp[128],ago[48];
+  header(L("CF IP optimizer","CF IP 优选"));
+  add("<div class=\"box card\" style=\"left:12px;top:72px;width:296px;height:76px\"></div>");
+  const char *cls,*s=cfopt_summary(&cls);
+  snprintf(tmp,sizeof(tmp),"head %s",strcmp(cls,"muted")?cls:"");
+  sbox(28,78,268,20,tmp,s);
+  tmp[0]=0;
+  if(c->has&&c->ip[0]) {
+    int n=snprintf(tmp,sizeof(tmp),"TLS %u ms",c->tls_ms);
+    if(c->speed_kbps)snprintf(tmp+n,sizeof(tmp)-n," · %.1f Mbps",c->speed_kbps/1000.0);
+  }
+  sbox(28,100,268,20,"muted",tmp);
+  if(c->has&&c->last_run){ago_text(ago,sizeof(ago),c->last_run);snprintf(tmp,sizeof(tmp),L("Last run %s","上次运行 %s"),ago);}
+  else snprintf(tmp,sizeof(tmp),"%s",L("Not run yet","尚未运行"));
+  sbox(28,122,268,20,"muted",tmp);
+  if(c->interval)snprintf(tmp,sizeof(tmp),L("Every %d h while Clash runs","Clash 运行时每 %d 小时"),c->interval);
+  else snprintf(tmp,sizeof(tmp),"%s",L("Only when started here or in OpenUI","仅在此处或 OpenUI 手动运行"));
+  switch_row(12,156,296,56,"cfauto","cfauto",L("Auto optimize","自动优选"),tmp,c->has&&c->enabled,c->has&&!blocked());
+  linkbox(12,220,296,56,"cfrun",c->running||(pending&&pending_kind==JOB_CFOPT)?L("Optimizing, about 1 min","正在优选，约 1 分钟"):
+          L("Optimize now","立即优选"),cfopt_can_run(),PRIMARY);
+  box(28,288,264,124,"wrap muted",L("Tests about 260 Cloudflare addresses from here and points nodes behind Cloudflare at the fastest. The domain stays as a fallback. About 6 MB per run.",
+      "测试约 260 个 Cloudflare 地址，让经过 Cloudflare 的节点使用最快的一个，原域名保留为备用。每次约 6 MB 流量。"));
+  footer(418,40,notice[0]?"":L("Interval and speed test: OpenUI → Proxy → Clash","间隔与测速设置：OpenUI → 代理 → Clash"),"muted");
 }
 static void render_diag(void) {
   const struct diag_info *d=&data.diag;
@@ -919,14 +1000,15 @@ static void usb_mode_row(int i, int y, int cur, int pick, int can) {
 static void render_usb(void) {
   const struct toolbox_info *h=&data.toolbox;
   char tmp[128];
-  int can=!blocked()&&h->has;
-  int cur=usb_mode_index(h->usb_mode),pick=usb_draft>=0?usb_draft:cur;
+  int can=!blocked()&&h->has,switching=usb_switching();
+  int cur=usb_mode_index(h->usb_mode),pick=switching?usb_target:usb_draft>=0?usb_draft:cur;
   header(L("USB & TTL","USB 与 TTL"));
   snprintf(tmp,sizeof(tmp),L("USB mode · now %s","USB 模式 · 当前 %s"),h->usb_mode[0]?h->usb_mode:"--");
   section(66,tmp);
-  for(int i=0;i<2;i++)usb_mode_row(i,88+i*58,cur,pick,can);
-  linkbox(12,206,296,48,"usbapply",pending&&pending_kind==JOB_TOOL?L("Applying","正在应用"):L("Apply","应用"),
-          can&&pick>=0&&pick!=cur,PRIMARY);
+  for(int i=0;i<2;i++)usb_mode_row(i,88+i*58,cur,pick,can&&!switching);
+  linkbox(12,206,296,48,"usbapply",switching?L("Switching, about 10 s","正在切换，约 10 秒"):
+          pending&&pending_kind==JOB_TOOL?L("Applying","正在应用"):L("Apply","应用"),
+          can&&!switching&&pick>=0&&pick!=cur,PRIMARY);
   if(h->ttl_val)snprintf(tmp,sizeof(tmp),L("TTL for shared devices · %llu","共享设备的 TTL · %llu"),h->ttl_val);
   else snprintf(tmp,sizeof(tmp),"%s",L("TTL for shared devices · off","共享设备的 TTL · 关"));
   section(258,tmp);
@@ -948,9 +1030,10 @@ static void render_usb(void) {
   linkbox(158,334,52,48,"ttlp","+",can,PLAIN);
   linkbox(218,334,90,48,"ttlset",pending&&pending_kind==JOB_TOOL?L("Setting","应用中"):L("Set","设定"),
           can&&ttl_draft>0&&(unsigned long long)ttl_draft!=h->ttl_val,PRIMARY);
-  footer(390,80,pending&&pending_kind==JOB_TOOL?L("Applying… USB drops for a few seconds, then reconnects with ADB.","正在应用… USB 会断开几秒，随后连同 ADB 一起恢复。"):
+  footer(390,80,switching?L("Switching the USB mode… USB drops for a few seconds, then reconnects with ADB.","正在切换 USB 模式… USB 会断开几秒，随后连同 ADB 一起恢复。"):
+         pending&&pending_kind==JOB_TOOL?L("Applying… USB drops for a few seconds, then reconnects with ADB.","正在应用… USB 会断开几秒，随后连同 ADB 一起恢复。"):
          pick>=0&&pick!=cur?L("Apply switches the USB mode: USB drops for a few seconds and comes back with ADB. A reboot returns to RNDIS.","点「应用」切换：USB 断开几秒后恢复，ADB 保持可用。重启后回到 RNDIS。"):
-         L("Tap a preset, or dial a custom TTL with − / + and Set. A fixed TTL makes shared devices look like the router.","点预设，或用 − / + 调出自定义 TTL 再点「设定」。固定 TTL 可让共享设备看起来与本机相同。"),pending?"warn":"muted");
+         L("Tap a preset, or dial a custom TTL with − / + and Set. A fixed TTL makes shared devices look like the router.","点预设，或用 − / + 调出自定义 TTL 再点「设定」。固定 TTL 可让共享设备看起来与本机相同。"),pending||switching?"warn":"muted");
 }
 static void render_power(void) {
   const struct toolbox_info *h=&data.toolbox;
@@ -1058,6 +1141,11 @@ static void render_confirm(void) {
     title=L("Switch to Clash?","切换到 Clash？");
     text=b->active==BK_TS?L("Tailscale turns off; traffic pauses.","Tailscale 将关闭，流量会中断。"):b->active==BK_WG?L("WireGuard turns off. Starting Clash can take a minute.","WireGuard 将关闭，启动 Clash 可能需要一分钟。"):
       L("Selected devices will use Clash. Starting can take a minute.","所选设备将通过 Clash 上网，启动可能需要一分钟。");
+  } else if(confirm_what==CF_TS&&confirm_target==1) {
+    title=L("Change remote SSH?","更改远程 SSH？");
+    text=L("Tailnet devices reach this router's SSH at its Tailscale address. Root still needs its password.","tailnet 中的设备可通过 Tailscale 地址访问本路由器的 SSH，root 仍需密码。");
+    snprintf(detail,sizeof(detail),"%s",chosen_name);
+    button=L("Apply","应用");
   } else if(confirm_what==CF_TS) {
     title=L("Apply Tailscale change?","应用 Tailscale 更改？");
     text=L("Traffic may pause. Connecting turns other proxy modes off. Enrollment is separate.","流量可能中断；连接将关闭其他代理模式。请另行完成注册。");
@@ -1077,6 +1165,11 @@ static void render_confirm(void) {
     title=L("Switch profile?","切换配置文件？");
     text=L("Mobile data stops for 10-30 s while the modem reads the card again.","基带重新读卡期间，移动数据中断约 10-30 秒。");
     snprintf(detail,sizeof(detail),"%s",chosen_name);
+  } else if(confirm_what==CF_CFOPT) {
+    title=confirm_target?L("Turn on auto optimize?","开启自动优选？"):L("Turn off auto optimize?","关闭自动优选？");
+    text=confirm_target?L("Runs now and then on its interval while Clash runs. About 6 MB of data per run.","将立即运行，之后在 Clash 运行时按间隔运行。每次约 6 MB 流量。"):
+      L("Nodes go back to their domain's own address; Clash reloads, so connections restart.","节点恢复使用域名解析的地址；Clash 会重新加载，连接会重新建立。");
+    button=confirm_target?L("Turn on","开启"):L("Turn off","关闭");
   } else if(confirm_what==CF_UPLINK&&confirm_target==2) {
     title=L("Start login mode?","开始认证模式？");
     text=L("Changes routing; connections may pause. Sign in from a connected device.","将更改路由，连接可能中断。请在已连接的设备上登录。");

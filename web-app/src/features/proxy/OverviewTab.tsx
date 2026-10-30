@@ -4,6 +4,7 @@ import { Segmented } from '../../ui/controls'
 import { Card, Chip, Stat } from '../../ui/primitives'
 import { useClash } from './ClashContext'
 import { backendOf, useProxy } from './ProxyContext'
+import CloudflareCard from './CloudflareCard'
 import DiagnosticsCard from './DiagnosticsCard'
 import SetupGuide, { type SetupStep } from './SetupGuide'
 import { t, tm } from '../../i18n'
@@ -105,6 +106,7 @@ export default function OverviewTab({ onGo }: { onGo: (tab: ClashSetupTab) => vo
         </div>
       </Card>}
 
+      <CloudflareCard />
       <DiagnosticsCard />
     </div>
   )

@@ -443,6 +443,10 @@ fn signal_wanted() -> bool {
 /// action from a toolbox page).
 const TOOLBOX_EVERY: u64 = 10;
 static TOOLBOX_AT: AtomicU64 = AtomicU64::new(0);
+/// Read `H` again on the next status cycle, for a change that lands after its reply.
+pub(crate) fn refresh_toolbox_soon() {
+    TOOLBOX_AT.store(0, Ordering::Relaxed);
+}
 /// The TTL setting changes only on request: it is read every minute, and at once after a
 /// toolbox action (`force`), instead of with each `H`.
 const TTL_EVERY: u64 = 60;
@@ -584,7 +588,7 @@ fn refresh_proxy_parts() {
     let backend = ipc::backend_record(&proxy::get().1["data"]);
     let (code, v) = clash::get();
     let clash = if code == 200 {
-        ipc::clash_records(&v["data"])
+        ipc::clash_records(&v["data"]) + &ipc::cfopt_record(&crate::clash_cfopt::get().1["data"])
     } else {
         String::new()
     };
@@ -704,6 +708,7 @@ enum Work {
     Tailscale(ipc::Tailscale),
     Admin(crate::admin_services::Update),
     Tool(Tool),
+    CfOpt(ipc::CfOpt),
 }
 fn work(job: Job) -> Result<Work, &'static str> {
     let proxies = || PROXIES.lock().unwrap();
@@ -736,6 +741,7 @@ fn work(job: Job) -> Result<Work, &'static str> {
         Job::Tailscale(t) => Work::Tailscale(t),
         Job::Admin(u) => Work::Admin(u),
         Job::Tool(t) => Work::Tool(t),
+        Job::CfOpt(c) => Work::CfOpt(c),
     })
 }
 fn run_tool(t: &Tool) -> (u16, Value) {
@@ -887,6 +893,11 @@ fn run(work: &Work) -> (u16, Value) {
         }
         Work::Admin(u) => crate::admin_services::apply(*u),
         Work::Tool(t) => run_tool(t),
+        // A run starts in the background and returns; the k record shows its progress.
+        Work::CfOpt(ipc::CfOpt::Run) => crate::clash_cfopt::run(),
+        Work::CfOpt(ipc::CfOpt::Set { revision, enabled }) => crate::clash_cfopt::update(&body(
+            &json!({"expected_revision":revision,"enabled":enabled}),
+        )),
     }
 }
 /// Ends a job on every path, a panic included: publishes its result (failed unless the

@@ -28,6 +28,9 @@ const PERSIST_CONFIG_PATH: &str = "/data/local/tmp/usb_config.json";
 const LEGACY_PERSIST_CONFIG_PATH: &str = "/data/local/tmp/wifi_config.json";
 const USB_DEFAULT_MODE_KEY: &str = "usb_default_mode";
 static USB_BUSY: AtomicBool = AtomicBool::new(false);
+/// The mode a scheduled firmware switch is moving to, until its script returns: the reply
+/// goes out before the switch, so status shows it is still under way.
+static SWITCHING_TO: Mutex<Option<String>> = Mutex::new(None);
 pub(crate) struct SwitchGuard;
 impl SwitchGuard {
     pub(crate) fn acquire() -> Result<Self, String> {
@@ -107,6 +110,7 @@ fn firmware_mode_set(mode: &str) -> (u16, Value) {
     let serial = read_trimmed(&format!("{GADGET_DIR}/strings/0x409/serialnumber"))
         .filter(|s| s.len() <= 32 && s.chars().all(|c| c.is_ascii_alphanumeric()))
         .unwrap_or_else(|| "0123456789ABCDEF".into());
+    *SWITCHING_TO.lock().unwrap() = Some(mode.to_string());
     // After a second, so this reply (over USB too) leaves before USB drops.
     thread::spawn(move || {
         let _guard = guard;
@@ -129,6 +133,9 @@ fn firmware_mode_set(mode: &str) -> (u16, Value) {
                 let _ = fs::write(NCM_LAST_ERROR_PATH, format!("usb_switch: {e}"));
             }
         }
+        *SWITCHING_TO.lock().unwrap() = None;
+        // DevUI reads the mode every ten seconds; show the new one now.
+        crate::screen::refresh_toolbox_soon();
     });
     (
         202,
@@ -478,6 +485,10 @@ pub fn usb_status(_state: &AppState) -> (u16, Value) {
     let persisted = read_persisted_config();
     let default_mode = parse_usb_default_mode(&persisted).unwrap_or("ecm");
     payload.insert("active_mode".into(), json!(detect_active_usb_mode()));
+    payload.insert(
+        "switching".into(),
+        json!(SWITCHING_TO.lock().unwrap().clone()),
+    );
     payload.insert("default_mode".into(), json!(default_mode));
     payload.insert("ncm_persist_on_boot".into(), json!(default_mode == "ncm"));
     payload.insert("supported_modes".into(), json!(supported_modes()));
