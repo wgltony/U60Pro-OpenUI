@@ -45,6 +45,7 @@ static void draw_pixel(struct drm_buf *b, int x, int y, uint16_t c) {
 #include "devui/html.h"
 #include "devui_assets.h"
 #include "devui/records.h"
+#include "devui/imei_records.h"
 #define MAX_ROWS 128
 #define BG 0x0863
 #define CARD 0x1926
@@ -87,6 +88,7 @@ struct snapshot {
   struct wifi_blocked wblk[32];
   int nwsta, nwblk;
   struct admin_info admin;
+  struct imei_info imei;
   char failure[97]; /* the agent's message for failed_job */
   struct row rows[MAX_ROWS];
 };
@@ -97,7 +99,7 @@ static int screen_awake = 1;
 #endif
 /* Menu features first (their numbers are the settings record's page bits), then pages
  * reached from them. */
-enum { WG, DEVICES, MENU, PROFILES, OVERVIEW, PROXY, CLASH, ESIM, UPLINK, WIFI_PAGE, SIGNAL_PAGE, USB_PAGE, POWER_PAGE, BOOSTER_PAGE, TAILSCALE, NODES, GROUP, SUBS, CORE, DIAG, CFOPT };
+enum { WG, DEVICES, MENU, PROFILES, OVERVIEW, PROXY, CLASH, ESIM, UPLINK, WIFI_PAGE, SIGNAL_PAGE, USB_PAGE, POWER_PAGE, BOOSTER_PAGE, TAILSCALE, NODES, GROUP, SUBS, CORE, DIAG, CFOPT, IMEI_PAGE };
 #define LEGACY_PAGES 27  /* features of a C record: WireGuard, devices, profiles, overview */
 #define MENU_PAGES 123   /* features of a V record: the above plus proxy and Clash */
 #define ESIM_MENU_PAGES 251 /* features of a W record: the above plus eSIM */
@@ -121,6 +123,7 @@ static int visible_page(int p) { return p == MENU || (p <= TAILSCALE && (setting
  * which shows it when the agent reports one. */
 static int reachable(int p) {
   switch (p) {
+  case IMEI_PAGE: return visible_page(SIGNAL_PAGE);
   case PROFILES: case DEVICES: return visible_page(p) || visible_page(WG);
   case NODES: case GROUP: case SUBS: case CORE: case CFOPT: return visible_page(CLASH);
   case DIAG: return visible_page(CLASH) || visible_page(PROXY);
@@ -230,6 +233,7 @@ static int admin_confirm_valid(void) {
   return admin_can(row) && data.admin.rev==confirm_rev && admin_value(row)!=enabled;
 }
 #include "devui/relay_editor.h"
+#include "devui/imei_state.h"
 #include "devui/render.h"
 // The LCD and raw touch axes are mounted upside down relative to the case.
 // Keep layout coordinates upright; transform only at the hardware boundary.
@@ -251,6 +255,7 @@ static void rotate_frame(struct drm_buf *b) {
 static int parse_snapshot(char *buf, struct snapshot *out) {
   struct snapshot s = {.battery = -1, .temperature = -999, .memory = -1};
   char *save, *line = strtok_r(buf, "\n", &save);
+  int imei_seen = 0, imei_bad = 0;
   int valid = 0, v_ok = 0, v_idle = 0, v_level = 0, v_home = 0, v_mask = 0;
   int w_ok = 0, w_idle = 0, w_level = 0, w_home = 0, w_mask = 0, w_sleep = 0;
   int y_ok = 0, y_idle = 0, y_level = 0, y_home = 0, y_mask = 0, y_sleep = 0;
@@ -331,6 +336,9 @@ static int parse_snapshot(char *buf, struct snapshot *out) {
     else if (line[0] == 'J')
       /* fresh, the newest job the records already show, is absent from older agents. */
       s.has_fresh = sscanf(line, "J %d %llu %llu %d %llu", &s.busy, &s.job, &s.done, &s.result, &s.fresh) == 5;
+    else if (!strncmp(line,"I1",2)) {
+      if(imei_seen++ || !parse_imei(line,&s.imei))imei_bad=1;
+    }
     else if (line[0] && strchr("ABKkUMXxEQqRHGTthLlwIi", line[0]) && line[1] == '\t') {
       char *f[48]; /* H has 39 fields */
       int n = split_tabs(line, f, 48);
@@ -407,6 +415,7 @@ static int parse_snapshot(char *buf, struct snapshot *out) {
     s.settings_rev = v_rev; s.idle_seconds = v_idle; s.brightness = v_level;
     s.home_page = v_home; s.menu_mask = v_mask; s.zh = strcmp(v_lang, "en") != 0;
   }
+  if(imei_bad)memset(&s.imei,0,sizeof(s.imei));
   if(s.relay.has&&(!s.uplink.has||s.relay.rev!=s.uplink.rev||s.relay.ns!=s.relay.saved_count||s.relay.nw!=s.relay.scan_count))s.relay.has=0;
   if (valid || s.settings_rev)
     *out = s;
@@ -600,6 +609,7 @@ static void settle_jobs(void) {
 }
 /* After each status: settings, the device draft, pages that are no longer shown, jobs. */
 static void track_status(int changed) {
+  int imei_was_open=page==IMEI_PAGE;
   if(relay_edit.active&&(page!=UPLINK||!data.relay.has||stale()||relay_edit.rev!=data.uplink.rev||
       (relay_edit.from_scan&&(!relay_scan_fresh()||relay_edit.gen!=data.relay.gen))))relay_invalidate();
   int relay_total=relay_view==RV_SCAN?data.relay.nw:data.relay.ns;
@@ -621,6 +631,8 @@ static void track_status(int changed) {
   if (esim_offset >= data.esim.n) esim_offset = data.esim.n > 0 ? (data.esim.n - 1) / 4 * 4 : 0;
   if (!reachable(page) && !dirty && !pending && !dialog) page = MENU;
   settle_jobs();
+  imei_track();
+  if(imei_was_open&&page!=IMEI_PAGE){relay_wipe(html,sizeof(html));relay_wipe(drawn_html,sizeof(drawn_html));drawn_valid=0;}
   need_draw = 1;
 }
 /* Offline synthetic keyboard timing: no display/input device, agent IPC,
@@ -1179,9 +1191,11 @@ static int panel(int heartbeat, int idle_seconds) {
     if (now >= next) {
       next = now + 2000;
       struct snapshot incoming;
+      long long request_started=monotonic_ms();
       if (exchange("status\n", reply, sizeof(reply)) == 0) {
         contact = now;
         if (parse_snapshot(reply, &incoming)) {
+          imei_observe(&incoming.imei,request_started);
           data = incoming;
           int old_brightness = settings_brightness;
           int changed = update_settings(&data);
@@ -2103,6 +2117,7 @@ static void uplink_tests(struct drm_buf *b,const char *dir) {
 }
 #include "devui/relay_tests.h"
 #include "devui/admin_tests.h"
+#include "devui/imei_tests.h"
 #include "devui/usblan_tests.h"
 #include "devui/wifi_tests.h"
 static void toolbox_tests(struct drm_buf *b, const char *dir) {
@@ -2121,7 +2136,7 @@ static void toolbox_tests(struct drm_buf *b, const char *dir) {
   press_id(b,"w2");expect_request("tool wifi_toggle 2g 0\n");assert(pending_kind==JOB_TOOL);reset_job();
   press_id(b,"back");assert(page==MENU);
   press_id(b,"signal");assert(page==SIGNAL_PAGE);capture_both(b,dir,"toolbox-signal");
-  assert(strstr(html,"5G Auto")&&strstr(html,"Collecting speed")&&strstr(html,"256M"));
+  assert(strstr(html,"id=\"net0\"")&&strstr(html,"act:imei")&&strstr(html,"Collecting speed")&&strstr(html,"256M"));
   /* G: the speed chart. Malformed lists leave it empty; a good one draws one column per
    * point on a 1/2/5 scale, and the speed row takes the newest point over H's. */
   {
@@ -2356,6 +2371,7 @@ int main(int argc, char **argv) {
   admin_tests(&b,argv[1]);
   usblan_tests(&b,argv[1]);
   wifi_tests(&b,argv[1]);
+  imei_tests(&b,argv[1]);
   free(b.map);
   return 0;
 }

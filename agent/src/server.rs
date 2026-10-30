@@ -290,9 +290,15 @@ fn handle_request(mut request: Request, state: &AppState) {
         }
     }
 
+    // IMEI is a small, sensitive control protocol, never an upload or arbitrary DIAG API.
+    let body_cap = if path == "/api/imei" {
+        4096
+    } else {
+        1024 * 1024
+    };
     let mut body = Vec::new();
     let mut reader = request.as_reader();
-    let mut limited = std::io::Read::take(&mut reader, 1024 * 1024 + 1);
+    let mut limited = std::io::Read::take(&mut reader, body_cap + 1);
     if let Err(e) = std::io::Read::read_to_end(&mut limited, &mut body) {
         respond(
             request,
@@ -303,11 +309,11 @@ fn handle_request(mut request: Request, state: &AppState) {
         return;
     }
 
-    if body.len() > 1024 * 1024 {
+    if body.len() as u64 > body_cap {
         respond(
             request,
             413,
-            json!({"ok": false, "error": "request body exceeds 1 MiB"}),
+            json!({"ok": false, "error": if path == "/api/imei" { "imei_body_too_large" } else { "request body exceeds 1 MiB" }}),
             origin_ref,
         );
         return;
@@ -404,6 +410,9 @@ pub fn route(
         // SIM
         (&Method::Get, "/api/sim/info") => sim::sim_info(state),
         (&Method::Get, "/api/sim/imei") => sim::sim_imei(state),
+        // Shared protected IMEI controller. GET is cached only; explicit actions are queued.
+        (&Method::Get, "/api/imei") => (200, crate::imei::status()),
+        (&Method::Post, "/api/imei") => imei_post(body),
         // Cell / band lock
         (&Method::Post, "/api/cell/lock/nr") => cell::cell_lock_nr(state, body),
         (&Method::Post, "/api/cell/lock/lte") => cell::cell_lock_lte(state, body),
@@ -456,6 +465,21 @@ pub fn route(
         (&Method::Get, "/api/logger/connection/status") => connection_logger::status(state),
         // Fallback
         _ => (404, json!({"ok": false, "error": "not found"})),
+    }
+}
+
+/// Parse only the typed IMEI protocol; never reflect targets or malformed request text.
+fn imei_post(body: &[u8]) -> (u16, Value) {
+    if body.len() > 4096 {
+        return (413, json!({"ok":false,"error":"imei_body_too_large"}));
+    }
+    let action = match serde_json::from_slice::<crate::imei::Action>(body) {
+        Ok(action) => action,
+        Err(_) => return (400, json!({"ok":false,"error":"invalid_imei_request"})),
+    };
+    match crate::imei::submit(action) {
+        Ok(reply) => (200, reply),
+        Err(reply) => reply,
     }
 }
 

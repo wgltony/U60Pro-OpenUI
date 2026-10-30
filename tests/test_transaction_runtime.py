@@ -2,13 +2,16 @@
 
 B31's Lua/luci.jsonc JSON adapter is deliberately replaced by a strict Python
 adapter here; these tests do not claim to execute Lua or any device service.
-No host PID is ever signalled. The shell's identity checks and journal run as-is.
+Fake lifecycle signals never target host PIDs. The shell's identity checks and
+journal run as-is; lock-inheritance tests use explicitly owned host subprocesses.
 """
+import fcntl
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import select
 import shutil
 import subprocess
 import sys
@@ -33,6 +36,29 @@ fail=(root/'fail').read_text().splitlines() if (root/'fail').exists() else []
 if op in fail or ':'.join([op,*args]) in fail: sys.exit(71)
 def write(path, text):
     path.parent.mkdir(parents=True,exist_ok=True); path.write_text(text)
+def persistent_runtime_child():
+    # Opt-in only: inherit the real shell descriptors just like nohup/daemon
+    # startup, but never execute a device service or act on a supplied PID.
+    if os.environ.get('U60_TEST_PERSIST_RUNTIME') != ':'.join([op,*args]): return
+    status=int(os.environ['U60_TEST_CHILD_STATUS_FD'])
+    parent_gate=int(os.environ['U60_TEST_PARENT_GATE_FD'])
+    child_gate=int(os.environ['U60_TEST_CHILD_GATE_FD'])
+    pid=os.fork()
+    if pid==0:
+        try:
+            os.setsid()
+            null=os.open(os.devnull,os.O_RDWR)
+            for fd in (0,1,2): os.dup2(null,fd)
+            if null>2: os.close(null)
+            os.close(parent_gate)
+            os.write(status,('child '+str(os.getpid())+'\n').encode())
+            while os.read(child_gate,1)==b'?': os.write(status,b'child-alive\n')
+            os.write(status,b'child-exit\n')
+        finally: os._exit(0)
+    os.close(child_gate)
+    os.write(status,b'parent-ready\n')
+    os.read(parent_gate,1)
+persistent_runtime_child()
 def spawn(kind):
     pid=int((root/'next-pid').read_text()) if (root/'next-pid').exists() else 800
     write(root/'next-pid',str(pid+1))
@@ -111,10 +137,46 @@ else: raise AssertionError(op)
 def make_backend(root):
     """Shared explicit empty-runtime backend for historical file snapshot tests."""
     root = Path(root)
+    # The real firmware always mounts /data before installation starts.
+    (root / 'data').mkdir(exist_ok=True)
     (root / 'shim').mkdir(exist_ok=True)
     backend = root / 'shim/runtime-backend'
     backend.write_text(BACKEND)
     backend.chmod(0o700)
+    # Execute the production shell guard unchanged on macOS and non-root CI.
+    # Only the explicit disposable U60_TEST_ROOT is modeled as UID 0. flock is
+    # real host fcntl locking; Lua's small JSON predicate is a strict Python
+    # adapter, not a claim that vendor Lua or real device services were tested.
+    adapters = {
+        'stat': '''#!/usr/bin/env python3
+import os,sys
+from pathlib import Path
+assert sys.argv[1]=='-c'
+p=Path(sys.argv[3]); p.resolve().relative_to(Path(os.environ['U60_TEST_ROOT']).resolve())
+s=p.lstat(); assert s.st_uid==os.getuid()
+v={'%u':'0','%a':format(s.st_mode & 0o7777,'o'),'%h':str(s.st_nlink)}
+fmt=sys.argv[2]; assert fmt in ('%u:%a','%u:%a:%h')
+for key,value in v.items(): fmt=fmt.replace(key,value)
+print(fmt)
+''',
+        'flock': '''#!/usr/bin/env python3
+import fcntl,sys
+assert sys.argv[1]=='-n'
+try: fcntl.flock(int(sys.argv[2]),fcntl.LOCK_EX|fcntl.LOCK_NB)
+except BlockingIOError: sys.exit(1)
+''',
+        'lua': '''#!/usr/bin/env python3
+import json,sys
+from pathlib import Path
+code=sys.stdin.read(); assert "j.stage=='complete'" in code and 'j.uncertain==false' in code
+raw=Path(sys.argv[-1]).read_bytes(); assert len(raw)<=65536
+j=json.loads(raw); assert isinstance(j,dict) and type(j.get('schema')) is int and j['schema']==1 and j.get('stage')=='complete' and j.get('uncertain') is False
+''',
+    }
+    for name, text in adapters.items():
+        path = root / 'shim' / name
+        path.write_text(text)
+        path.chmod(0o700)
     (root / 'proc/net').mkdir(parents=True, exist_ok=True)
     for name in ('tcp', 'tcp6'):
         (root / 'proc/net' / name).write_text('')
@@ -167,6 +229,109 @@ class RuntimeTransactions(unittest.TestCase):
     def clear_events(self):
         (self.root / 'events.log').write_text('')
 
+    def assert_runtime_child_does_not_retain_imei_lock(self, operation):
+        """Real inherited descriptors, gated parent and a test-owned fork only."""
+        status_read, status_write = os.pipe()
+        parent_read, parent_write = os.pipe()
+        child_read, child_write = os.pipe()
+        descriptors = {status_read, status_write, parent_read, parent_write, child_read, child_write}
+        process = None
+        child_pid = None
+        child_exited = False
+        try:
+            # The shell owns FD9. Keep all protocol descriptors outside that
+            # range, even when other tests or the runner already have FDs open.
+            inherited = []
+            for fd in (status_write, parent_read, child_read):
+                high = fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 32)
+                descriptors.add(high)
+                inherited.append(high)
+                os.close(fd)
+                descriptors.remove(fd)
+            status_write, parent_read, child_read = inherited
+            env = {**self.env, 'U60_TEST_PERSIST_RUNTIME': operation,
+                   'U60_TEST_CHILD_STATUS_FD': str(status_write),
+                   'U60_TEST_PARENT_GATE_FD': str(parent_read),
+                   'U60_TEST_CHILD_GATE_FD': str(child_read)}
+            command = ['sh', str(ROOT / 'scripts/device/transaction.sh'), 'restore', 'test-123', 'aabb']
+            process = subprocess.Popen(command, env=env, text=True, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, pass_fds=inherited)
+            for fd in inherited:
+                os.close(fd)
+                descriptors.remove(fd)
+
+            def message():
+                data = bytearray()
+                while not data.endswith(b'\n'):
+                    self.assertTrue(select.select([status_read], [], [], 10)[0],
+                                    f'test-owned child {child_pid} did not acknowledge')
+                    byte = os.read(status_read, 1)
+                    self.assertTrue(byte, 'test-owned child channel closed unexpectedly')
+                    data.extend(byte)
+                return data.decode().rstrip('\n')
+
+            ready = set()
+            while 'parent-ready' not in ready or child_pid is None:
+                event = message()
+                if event.startswith('child '):
+                    child_pid = int(event.split()[1])
+                    self.assertGreater(child_pid, 1)  # Recorded for diagnostics, never signalled.
+                else:
+                    self.assertEqual(event, 'parent-ready')
+                ready.add(event)
+            lock = self.root / 'data/openui-imei/controller.lock'
+            with lock.open('r+b') as separate_opener:
+                # runtime() must close only its child copy: the transaction
+                # parent still excludes another controller throughout restore.
+                self.assertIsNone(process.poll())
+                self.assertTrue((self.transaction.parent / 'active').exists())
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(separate_opener, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                os.close(parent_write)
+                descriptors.remove(parent_write)
+                stdout, stderr = process.communicate(timeout=20)
+                self.assertEqual(process.returncode, 0, stderr or stdout)
+                self.assertFalse((self.transaction.parent / 'active').exists())
+                # The inherited-descriptor child is demonstrably still alive
+                # after restore exits, without PID lookup or arbitrary signals.
+                os.write(child_write, b'?')
+                self.assertEqual(message(), 'child-alive')
+                fcntl.flock(separate_opener, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(separate_opener, fcntl.LOCK_UN)
+            os.close(child_write)
+            descriptors.remove(child_write)
+            self.assertEqual(message(), 'child-exit')
+            child_exited = True
+            # EOF proves all forked copies closed the dedicated status channel.
+            self.assertTrue(select.select([status_read], [], [], 10)[0])
+            self.assertEqual(os.read(status_read, 1), b'')
+        finally:
+            # Closing both gates releases only this fixture's backend/fork, even
+            # on assertion failure. No PID obtained from disk is ever signalled.
+            for fd in (parent_write, child_write):
+                if fd in descriptors:
+                    os.close(fd)
+                    descriptors.remove(fd)
+            try:
+                if process is not None:
+                    try:
+                        process.communicate(timeout=20)
+                    except subprocess.TimeoutExpired:
+                        process.kill()  # Exact Popen created above, not a discovered host PID.
+                        process.communicate(timeout=10)
+                    if child_pid is not None and not child_exited:
+                        self.assertTrue(select.select([status_read], [], [], 10)[0],
+                                        f'test-owned child {child_pid} did not exit after gate closure')
+                        while True:
+                            data = os.read(status_read, 4096)
+                            if not data:
+                                break
+                            self.assertTrue(select.select([status_read], [], [], 10)[0],
+                                            f'test-owned child {child_pid} retained its status pipe')
+            finally:
+                for fd in descriptors:
+                    os.close(fd)
+
     def install_sidecars(self, agent=True):
         for path in ('data/bin/tailscaled', 'data/bin/tailscale', 'etc/init.d/openui-tailscale', 'data/bin/relay-band-guard.sh'):
             self.write(path, 'old ' + path)
@@ -179,6 +344,33 @@ class RuntimeTransactions(unittest.TestCase):
         base = self.transaction.parent
         self.assertEqual((base / 'active').read_text().strip(), 'test-123')
         self.assertEqual((base / 'lock/owner').read_text().strip(), 'test-123')
+
+    def test_restore_agent_child_does_not_inherit_imei_lock(self):
+        self.install_sidecars()
+        self.write('data/local/tmp/start_zte_agent.sh', '#!/bin/sh\n')
+        self.backend('start', 'agent')
+        self.action('begin')
+        self.action('quiesce', 'all')
+        self.assert_runtime_child_does_not_retain_imei_lock('start:agent')
+
+    def test_legacy_restore_agent_child_does_not_inherit_imei_lock(self):
+        self.install_sidecars()
+        self.write('data/local/tmp/start_zte_agent.sh', '#!/bin/sh\n')
+        self.backend('start', 'agent')
+        self.action('begin')
+        self.action('quiesce', 'all')
+        # Legacy recovery has no target inventory but must isolate runtime FDs.
+        inventory = self.transaction / 'targets'
+        self.assertEqual(inventory.resolve().parent, self.transaction.resolve())
+        inventory.unlink()
+        self.assert_runtime_child_does_not_retain_imei_lock('start:agent')
+
+    def test_restore_http_child_does_not_inherit_imei_lock(self):
+        self.write('etc/config/uhttpd', 'old HTTP config\n')
+        self.action('begin')
+        self.action('quiesce', 'none')
+        self.write('etc/config/uhttpd', 'changed HTTP config\n')
+        self.assert_runtime_child_does_not_retain_imei_lock('http-restart')
 
     def test_running_services_quiesce_before_replace_and_restore_original_versions(self):
         self.install_sidecars()

@@ -1,0 +1,125 @@
+{
+  "commit": "2f7e24c49125ba06d375def56ea5f3e7c1f770aa",
+  "files": [
+    {
+      "path": "LICENSE",
+      "sha256": "57dd1c9e1b8769a0666d9794398b684892f2f4543dfac101ad47cf5902b4b9f1",
+      "upstream_path": "LICENSE"
+    },
+    {
+      "path": "src/plan_io.h",
+      "sha256": "4d5262746b1c2d7393a90817486b4019b2655e828b9e93393f40f143c360070b",
+      "upstream_path": "MacIMEI/DeviceHelpers/src/plan_io.h"
+    },
+    {
+      "path": "src/support_config.h",
+      "sha256": "737c86238adf6efba55d6ab1c1943380ebf39ae54bc0316aaaa31e717f0fae09",
+      "upstream_path": "MacIMEI/DeviceHelpers/src/support_config.h"
+    },
+    {
+      "path": "src/zte_config.c",
+      "sha256": "a27876e6915a5edaefe610fd7fb4e5acb288b5e61ab95fa96815ad91a5c553c0",
+      "upstream_path": "MacIMEI/DeviceHelpers/src/zte_config.c"
+    },
+    {
+      "path": "src/zte_config_read.c",
+      "sha256": "e2b1402f452c68c0a96c828680dda6ccd07bb6134fc2f2a3ac644d170bf33320",
+      "upstream_path": "MacIMEI/DeviceHelpers/src/zte_config_read.c"
+    },
+    {
+      "path": "src/zte_nv.c",
+      "sha256": "9e9e8a820cf66e8224ff58c7dd754560c3af581a1e223e81475a44cb4a4909f1",
+      "upstream_path": "MacIMEI/DeviceHelpers/src/zte_nv.c"
+    },
+    {
+      "path": "tests/config_fixture.h",
+      "sha256": "6f3ac35864f134486b44765a1feda8a9705eed045ba5473d21d286d027985fab",
+      "upstream_path": "MacIMEI/DeviceHelpers/tests/config_fixture.h"
+    },
+    {
+      "path": "tests/config_plan_tests.c",
+      "sha256": "df0b5f25c8802301e373a17236862c456c5d316f42475448ee4e51ba22a7718a",
+      "upstream_path": "MacIMEI/DeviceHelpers/tests/config_plan_tests.c"
+    },
+    {
+      "path": "tests/config_read_tests.c",
+      "sha256": "ee51a817263c5de91289521fe74be97b9b9dd43c2c367b2cf69cdb4c936f9427",
+      "upstream_path": "MacIMEI/DeviceHelpers/tests/config_read_tests.c"
+    },
+    {
+      "path": "tests/config_transaction_tests.c",
+      "sha256": "9cc8a6188da53376db96ab92c6af71d551fed98660687b552f1c39cba204cc6a",
+      "upstream_path": "MacIMEI/DeviceHelpers/tests/config_transaction_tests.c"
+    },
+    {
+      "path": "tests/nv_fixture.h",
+      "sha256": "54b6c5ef8818d259883f1bd02c10e557b087c24428afe45f4ecf6de1b95bf893",
+      "upstream_path": "MacIMEI/DeviceHelpers/tests/nv_fixture.h"
+    },
+    {
+      "path": "tests/nv_plan_tests.c",
+      "sha256": "ebf20a7276f3ef3b08910bd64d8e59f6b3ac7ac992d510df6450d70db8d395f0",
+      "upstream_path": "MacIMEI/DeviceHelpers/tests/nv_plan_tests.c"
+    },
+    {
+      "path": "tests/nv_protocol_tests.c",
+      "sha256": "8571415b314ce18326810d056014ec74aaee443d370f651f0174766268785a95",
+      "upstream_path": "MacIMEI/DeviceHelpers/tests/nv_protocol_tests.c"
+    },
+    {
+      "path": "tests/nv_read_tests.c",
+      "sha256": "9b5bd9e4f279ac447ad7612484ab46a6e7a50207778ca95ecd9d6a4020a10802",
+      "upstream_path": "MacIMEI/DeviceHelpers/tests/nv_read_tests.c"
+    },
+    {
+      "path": "tests/nv_restore_tests.c",
+      "sha256": "289d2cb38151c664e69b1d15ebc103ffb936b7bb3b4faf9a2ca4c1ac8e203422",
+      "upstream_path": "MacIMEI/DeviceHelpers/tests/nv_restore_tests.c"
+    },
+    {
+      "path": "tests/nv_topology_tests.c",
+      "sha256": "6fbece42342305f79aa70c04b14765b5f1be4f82f48a6706286c027a2f36bd2b",
+      "upstream_path": "MacIMEI/DeviceHelpers/tests/nv_topology_tests.c"
+    },
+    {
+      "path": "tests/run_support_tests.py",
+      "sha256": "8050cff4b68ca66ce6e7a82d04b1d6a6ba1b6e9ee8578bf94bed73c3da905108",
+      "upstream_path": "MacIMEI/DeviceHelpers/tests/run_support_tests.py"
+    },
+    {
+      "path": "tests/run_tests.py",
+      "sha256": "ad718cba131a21c9a691ab55124752b5525f6353dd00b1a37eca99b2f19bcf66",
+      "upstream_path": "MacIMEI/DeviceHelpers/tests/run_tests.py"
+    },
+    {
+      "path": "tests/support_config_tests.c",
+      "sha256": "91240e7713f7ab06698b1fd59cab2ff4ab6abb3b099f6d50218854bb6b416338",
+      "upstream_path": "MacIMEI/DeviceHelpers/tests/support_config_tests.c"
+    },
+    {
+      "path": "tests/support_nv_tests.c",
+      "sha256": "6acce4c8f1a38c6547f49257fdd67c5ebd7bd078c53e341f67d726ea92782400",
+      "upstream_path": "MacIMEI/DeviceHelpers/tests/support_nv_tests.c"
+    },
+    {
+      "path": "upstream/README.md",
+      "sha256": "eb1ec168497def880965a0b5675efda7ad7322af7fa044d15b56462fd8a8e0a8",
+      "upstream_path": "MacIMEI/DeviceHelpers/README.md"
+    },
+    {
+      "path": "upstream/build.py",
+      "sha256": "8db7ae928485745746aa6f24443f004919e692e63728380477918436bf1e4c50",
+      "upstream_path": "MacIMEI/DeviceHelpers/build.py"
+    },
+    {
+      "path": "upstream/build_support.py",
+      "sha256": "e0bff40854f9c6b1a3f4837d66550b9b7accf0d56ce87c1ac8de9c76590b7a6a",
+      "upstream_path": "MacIMEI/DeviceHelpers/build_support.py"
+    }
+  ],
+  "license": "MIT",
+  "repository": "https://github.com/SadykovIV/ZTE_U60Pro",
+  "schema": 1,
+  "scope": "Independent native NV550/EFS DeviceHelpers and synthetic tests only; no QMI/eSIM/ES10 modules",
+  "source_date_epoch": 1792817981
+}

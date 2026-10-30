@@ -20,9 +20,12 @@ Use [install.sh](INSTALL.md), not inherited GUI/setup tutorials.
 3. **Stay out of partitions.** No `dd`, `mtd`, `fw_setenv`, `/dev/block`,
    QFPROM/fuse writes, `abctl --set_active` (mixed-slot boots can brick).
    There is no recovery from these without a flasher.
-4. **Config backup/restore is the only sanctioned privileged path**
+4. **Config backup/restore is the sanctioned initial-unlock path**
    (`scripts/zunlock.py`, `scripts/zbackup.py`). Always `--dry-run` first;
-   restore runs as root and extracts whatever it validates.
+   restore runs as root and extracts whatever it validates. The optional
+   [protected IMEI transaction](IMEI.md) is a separate, narrowly profiled runtime
+   feature, not permission for arbitrary NV/EFS, partition or fuse writes. It has
+   not been verified on a real modem; installation must explicitly opt in.
 5. **Exploit/injection tooling lives in `scripts/research/` and stays
    there.** It is quarantined for a reason — see its README.
 6. **FOTA auto-update stays off** (`zharden.sh` step 4). A surprise firmware
@@ -134,7 +137,13 @@ ubus call zwrt_data get_wwaniface '{"source_module":"zte_topsw_data","cid":1}'
   `/data/local/tmp/open-u60-transactions/<id>/before/etc_rc.local`. Prevention:
   never inline-quote device commands through a host shell — push a script and
   run it. See [OPERATIONS.md](OPERATIONS.md) §7.1.
-- **IMEI is QFPROM-fused** — hardware-locked, not modifiable. Don't try.
+- **IMEI / NV**: the inherited claim that every MU5250 IMEI is QFPROM-fused
+  lacked model-specific evidence. A pinned public DIAG/NV/EFS implementation now
+  underlies the optional [protected transaction](IMEI.md), but that does not prove
+  this device's ABI, persistent write or recovery. No fuse/partition writes, AT
+  guesses, arbitrary NV operations, automatic startup writes or unconfirmed
+  reboot are allowed. Native bounded known-original reverse writes within one
+  explicitly confirmed transaction are disclosed in that document.
 - **eSIM**: the CN unit has no usable built-in eUICC. Removable eUICC cards are
   managed with lpac ([ESIM.md](ESIM.md)) through QMI UIM and DMS requests only, never
   AT commands. A switch takes the radio to low power, powers the SIM off and on and

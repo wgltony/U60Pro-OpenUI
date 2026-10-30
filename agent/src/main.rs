@@ -20,6 +20,7 @@ mod egress;
 mod esim;
 mod event_bus;
 mod handlers;
+mod imei;
 mod lan;
 mod logging;
 mod lpac;

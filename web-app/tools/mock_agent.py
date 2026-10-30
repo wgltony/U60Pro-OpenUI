@@ -1326,7 +1326,18 @@ def esim_delete(body):
     return esim_start("delete", [("es10c_delete_profile", 1), ("reading", 1), ("es9p_handle_notification", 1)], deleted)
 
 
+def imei_unavailable():
+    # Deliberately no simulated writes or automatic probe. A generic mutation
+    # success would dangerously imply that an identifier was actually changed.
+    return {"protocol": 1, "revision": 1, "stamp": int(time.time()),
+            "busy": False, "phase": "unsupported", "code": "helper_unavailable",
+            "imei1": None, "imei2": None, "secondary": "unknown",
+            "operation_id": None, "preview_id": None, "target1_masked": None,
+            "target2_masked": None, "allowed": [], "preview_expires_in": 0}
+
+
 ROUTES_GET = {
+    "/api/imei": imei_unavailable,
     "/api/admin/services": admin_services,
     "/api/usb/lan": usb_lan,
     "/api/tailscale": tailscale_status,
@@ -1471,7 +1482,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send({"ok": False, "error": "use POST"}, 405)
         fn = ROUTES_GET.get(path)
         if fn:
-            return self._send({"ok": True, "data": fn()})
+            return self._send(fn() if path == '/api/imei' else {"ok": True, "data": fn()})
         return self._send({"ok": True, "data": {}})
 
     def do_POST(self):
@@ -1479,6 +1490,8 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
         if path == "/api/auth/login":
             return self._send({"ok": True, "data": {"token": "demo-token"}})
+        if path == '/api/imei':
+            return self._send({"ok": False, "error": "helper_unavailable"}, 409)
         if path == "/api/screen":
             STATE["screen"].update({"running": True, "state": "active"})
             return self._send({"ok": True, "data": STATE["screen"]})

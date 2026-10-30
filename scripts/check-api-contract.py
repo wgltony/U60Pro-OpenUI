@@ -53,7 +53,13 @@ def agent_routes() -> set[tuple[str, str]]:
 
 
 def dashboard_routes() -> set[str]:
-    return set(PATH_RE.findall(read(API_TS))) | set(PATH_RE.findall(read(CLIENT_TS)))
+    # Feature-specific clients (for example the guarded IMEI session) need the
+    # same coverage as the original central api.ts, including TSX call sites.
+    routes: set[str] = set()
+    for path in (ROOT / 'web-app/src').rglob('*'):
+        if path.is_file() and path.suffix in ('.ts', '.tsx'):
+            routes.update(PATH_RE.findall(read(path)))
+    return routes
 
 
 def mock_routes() -> set[str]:

@@ -109,6 +109,10 @@ the touchscreen preview build); none show a real device.
   block / unblock on the web page and the touchscreen (random MACs matched by name).
 - **Signal and cellular**: carrier and cell details, network mode, band and cell locks,
   APN, SMS, data usage and TTL (presets or a custom 1–255 value).
+- **Development IMEI / NV transactions** (source install, explicit `--with-imei`):
+  shared web-signal and DevUI-signal checks, preview, second confirmation, private
+  backups, restoration and post-boot verification. **Not verified on a real modem;
+  absent from published v1.2.2 assets.** Not a generic NV editor; see [limits and workflow](docs/IMEI.md).
 - **eSIM**: manage the profiles on a removable eUICC card (9eSIM, 5ber, eSTK.me and
   similar), as EasyEUICC does on Android: switch, rename, delete, download from an
   activation code or a QR image and handle notifications on the web page; switch on the

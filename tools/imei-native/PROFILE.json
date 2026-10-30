@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "profile": "mu5250-b31-libdiag-v1",
+  "model": "MU5250",
+  "firmware": "BD_CNMU5250V1.0.0B31",
+  "router_sha256": "55c54f74aaa427940254a2f16c36771e675a80a002363e4f10b0dfcb604d9c6f",
+  "libdiag_sha256": "c0fee4f76b302dd7db2a91dcd5bf1a3f771f674b4637f21468d864a789d00392",
+  "musl_sha256": "d9e8fd8847efd5f63c7ff6476d8654f187be2a48d59d5551eb7c3df9c70e01dd",
+  "evidence": {
+    "hashes": "Provided by parent integration agent after read-only sha256sum of stock CN B31 files; this native implementation agent did not access the device.",
+    "upstream_source": "https://github.com/SadykovIV/ZTE_U60Pro/tree/2f7e24c49125ba06d375def56ea5f3e7c1f770aa/MacIMEI/DeviceHelpers",
+    "public_scope": "Pinned public source targets MU5250 B31, but these local hash observations are not claimed to be an OEM public attestation.",
+    "limitations": "Hash identity and synthetic protocol tests do not prove live NV/EFS write permission, modem persistence, network-side PEI, or ABI compatibility. No helper or DIAG session was run during this implementation."
+  }
+}

@@ -44,9 +44,14 @@ data/bin/relay-band-guard.sh
 etc/init.d/openui-tailscale
 etc/config/zwrt_zte_dm
 etc/config/wireless
-data/local/tmp/relay-band-guard.disabled"
+data/local/tmp/relay-band-guard.disabled
+data/local/tmp/openui-imei-helpers"
 
-runtime() {
+runtime() (
+    # Runtime services may outlive this transaction. Never let a daemon inherit
+    # controller.lock: only the transaction parent retains it through final sync.
+    # This child scope also covers the explicit host backend and legacy starts.
+    exec 9>&-
     if [ -n "$root" ]; then "$U60_TEST_BACKEND" "$@"; return; fi
     operation=$1; shift
     case "$operation" in
@@ -77,7 +82,7 @@ runtime() {
         http-restart) /etc/init.d/uhttpd restart ;;
         *) return 64 ;;
     esac
-}
+)
 
 restore_fota() {
     mode=$(cat "$transaction/runtime/fota")
@@ -194,7 +199,7 @@ check(type(instance.running) == "boolean")
 if instance.running then
  check(type(instance.pid) == "number" and instance.pid > 1 and instance.pid % 1 == 0)
  print("running " .. instance.pid .. " " .. bin .. " " .. state)
-else print("stopped") end'
+else print("stopped") end' < "$transaction/procd.json"
     fi
 }
 
@@ -319,8 +324,42 @@ write_state() {
     sync
 }
 
+# The IMEI controller holds this same flock through each durable operation.
+# Take it BEFORE publishing active, then keep it until the marker is durable:
+# workers recheck that marker after acquiring their lease. Never replace a
+# controller/helper while an unfinished NV/EFS operation needs its old version.
+imei_deployment_guard() {
+    imei_state="$root/data/openui-imei"
+    # Create the shared lock even before the first controller operation; skipping
+    # an absent directory would race a concurrently queued first CHECK.
+    test ! -L "$root/data" && test -d "$root/data"
+    if [ ! -e "$imei_state" ] && [ ! -L "$imei_state" ]; then mkdir -m 700 "$imei_state"; fi
+    test ! -L "$imei_state" && test -d "$imei_state"
+    test "$(stat -c '%u:%a' "$imei_state")" = '0:700'
+    if [ ! -e "$imei_state/controller.lock" ] && [ ! -L "$imei_state/controller.lock" ]; then
+        (umask 077; set -C; : > "$imei_state/controller.lock")
+    fi
+    test ! -L "$imei_state/controller.lock" && test -f "$imei_state/controller.lock"
+    test "$(stat -c '%u:%a:%h' "$imei_state/controller.lock")" = '0:600:1'
+    exec 9<> "$imei_state/controller.lock"
+    flock -n 9 || { echo 'An IMEI operation is busy; no installation changes were made.' >&2; return 75; }
+    if [ -e "$imei_state/current.json" ] || [ -L "$imei_state/current.json" ]; then
+        test ! -L "$imei_state/current.json" && test -f "$imei_state/current.json"
+        test "$(stat -c '%u:%a:%h' "$imei_state/current.json")" = '0:600:1'
+        lua - "$imei_state/current.json" <<'LUA'
+local f=assert(io.open(arg[1], 'rb'))
+local b=f:read(65537); f:close()
+assert(type(b)=='string' and #b<=65536, 'Invalid IMEI journal')
+local j=require('luci.jsonc').parse(b)
+assert(type(j)=='table' and j.schema==1 and j.stage=='complete' and j.uncertain==false,
+       'Finish IMEI recovery before deployment; no installation changes were made')
+LUA
+    fi
+}
+
 case "$action" in
 begin)
+    imei_deployment_guard
     mkdir -p "$base"
     if ! mkdir "$base/lock" 2>/dev/null; then
         echo 'An unfinished deployment exists. Recover it before starting another installation.' >&2
@@ -372,6 +411,7 @@ quiesce|restore|complete)
     if [ -f "$transaction/targets" ]; then targets=$(cat "$transaction/targets"); else targets=$legacy_targets; inventory=false; fi
     test "$(cat "$transaction/identity")" = "$identity"
     case "$(cat "$transaction/state")" in pending|committed|restored) ;; *) exit 65 ;; esac
+    if [ "$action" = restore ]; then imei_deployment_guard; fi
     if [ "$action" = restore ] && [ ! -e "$base/active" ]; then
         if [ -d "$base/lock" ]; then test "$(cat "$base/lock/owner")" = "$id"
         else mkdir "$base/lock"; printf '%s\n' "$id" > "$base/lock/owner"; fi

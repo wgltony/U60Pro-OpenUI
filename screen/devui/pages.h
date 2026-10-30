@@ -20,6 +20,7 @@ static const char *page_title(void) {
   case UPLINK: return L("Wi-Fi relay","无线中继");
   case WIFI_PAGE: return "Wi-Fi";
   case SIGNAL_PAGE: return L("Signal","信号");
+  case IMEI_PAGE: return "IMEI / NV550";
   case USB_PAGE: return L("USB & TTL","USB 与 TTL");
   case POWER_PAGE: return L("Battery","电池与充电");
   case BOOSTER_PAGE: return L("Booster","加速清理");
@@ -975,10 +976,12 @@ static void render_signal(void) {
   int is_nsa=!strcmp(h->net_select,"LTE_AND_5G");
   int is_4g=!strcmp(h->net_select,"Only_LTE");
   int is_auto=!is_sa&&!is_nsa&&!is_4g;
-  linkbox(12,322,142,48,"net0",L("5G Auto","5G 自动"),can,is_auto?CHOSEN:PLAIN);
-  linkbox(166,322,142,48,"net1",L("5G SA only","仅 5G SA"),can,is_sa?CHOSEN:PLAIN);
-  linkbox(12,378,142,48,"net2","5G NSA",can,is_nsa?CHOSEN:PLAIN);
-  linkbox(166,378,142,48,"net3",L("4G only","仅 4G"),can,is_4g?CHOSEN:PLAIN);
+  /* One row of four, so the speed chart above and the IMEI row below both fit. */
+  linkbox(12,322,68,48,"net0",L("Auto","自动"),can,is_auto?CHOSEN:PLAIN);
+  linkbox(88,322,68,48,"net1","SA",can,is_sa?CHOSEN:PLAIN);
+  linkbox(164,322,68,48,"net2","NSA",can,is_nsa?CHOSEN:PLAIN);
+  linkbox(240,322,68,48,"net3","4G",can,is_4g?CHOSEN:PLAIN);
+  nav_row(12,378,296,48,"imei","IMEI / NV550",L("Guarded · explicit check","受保护 · 需手动检查"),"warn",1);
   footer(434,40,pending&&pending_kind==JOB_TOOL?L("Switching the network mode...","正在切换网络制式..."):
          L("Band and cell locking are in OpenUI.","锁频段与锁小区请在 OpenUI 中操作。"),pending?"warn":"muted");
 }
