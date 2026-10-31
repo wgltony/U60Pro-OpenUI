@@ -742,7 +742,8 @@ pub fn reason_code(reason: &Value) -> &'static str {
         "other"
     }
 }
-/// `B active conflict` then WG, Clash and (when present) TS: revision, ready, reason, error.
+/// `B active conflict` then WG, Clash and (when present) TS: revision, ready, reason, error;
+/// after TS, whether it has an exit node (exclusive) and runs alongside the active one.
 pub fn backend_record(v: &Value) -> String {
     let side = |id: &str| {
         let b = v["backends"]
@@ -761,11 +762,16 @@ pub fn backend_record(v: &Value) -> String {
         .as_str()
         .filter(|a| matches!(*a, "wireguard" | "clash" | "tailscale"))
         .unwrap_or("off");
-    let extra = if v["backends"]
+    let ts = v["backends"]
         .as_array()
-        .is_some_and(|a| a.iter().any(|b| b["id"] == "tailscale"))
-    {
-        format!("\t{}", side("tailscale"))
+        .and_then(|a| a.iter().find(|b| b["id"] == "tailscale"));
+    let extra = if let Some(ts) = ts {
+        format!(
+            "\t{}\t{}\t{}",
+            side("tailscale"),
+            u8::from(ts["exclusive"] == true),
+            u8::from(v["alongside"] == true)
+        )
     } else {
         String::new()
     };
@@ -1655,6 +1661,13 @@ mod tests {
         assert_eq!(
             backend_record(&json!({})),
             "B\toff\t0\t0\t0\t-\t0\t0\t0\t-\t0\n"
+        );
+        let beside = json!({"active":"clash","conflict":false,"alongside":true,"backends":[
+            {"id":"wireguard","revision":1,"ready":true},{"id":"clash","revision":2,"ready":true},
+            {"id":"tailscale","enabled":true,"exclusive":false,"revision":3,"ready":true}]});
+        assert_eq!(
+            backend_record(&beside),
+            "B\tclash\t0\t1\t1\t-\t0\t2\t1\t-\t0\t3\t1\t-\t0\t0\t1\n"
         );
     }
     #[test]

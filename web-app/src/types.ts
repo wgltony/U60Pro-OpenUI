@@ -459,11 +459,15 @@ export interface ProxyBackend {
   error: string | null
   /** Clash only: the core runs. */
   running?: boolean
+  /** Tailscale only: on with an exit node, so Clash and WireGuard cannot run. */
+  exclusive?: boolean
 }
 export interface ProxyStatus {
   active: ProxyChoice
   /** More than one backend saved as on; the agent resolves precedence. */
   conflict: boolean
+  /** Tailscale mode without an exit node runs beside the active Clash or WireGuard. */
+  alongside?: boolean
   backends: ProxyBackend[]
 }
 export interface ProxySwitch {

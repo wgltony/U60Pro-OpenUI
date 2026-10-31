@@ -1203,7 +1203,7 @@ pub(crate) fn update_locked(body: &[u8]) -> (u16, Value) {
         let old = load()?;
         let (next, written) = edited(&old, u, fetched.as_ref())?;
         if next.enabled {
-            crate::tailscale::ensure_down()?;
+            crate::tailscale::make_room()?;
         }
         let wg_on = next.enabled && wireguard::stored_enabled();
         if wg_on && !takeover {

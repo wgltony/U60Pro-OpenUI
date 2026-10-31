@@ -38,11 +38,16 @@ export function useProxy() {
 
 /** Every activation is confirmed; the server, not this dialog, enforces exclusivity. */
 function ask(s: ProxyStatus, target: ProxyChoice) {
-  const activeNames = s.backends.filter(b => b.enabled).map(b => BACKEND_NAMES[b.id]).join(' + ')
+  // Tailscale running alongside stays on, so it is not named.
+  const activeNames = s.backends.filter(b => b.enabled && !(s.alongside && b.id === 'tailscale')).map(b => BACKEND_NAMES[b.id]).join(' + ')
   if (target === 'off') {
     return confirm({ title: t('Turn {name} off?', { name: activeNames || t('Proxy') }), body: t('Settings are kept. Forwarded traffic pauses briefly while rules are removed; then all devices use the normal network.'), confirmLabel: t('Turn off') })
   }
-  return confirm({ title: t('Activate {name}?', { name: BACKEND_NAMES[target] }), body: t('Only one network backend can be active. Other backends will be turned off, with their settings kept. Devices may briefly lose internet.'), confirmLabel: t('Activate backend') })
+  const ts = backendOf(s, 'tailscale')
+  const keepsTailscale = target !== 'tailscale' && !!ts?.enabled && ts.exclusive === false
+  return confirm({ title: t('Activate {name}?', { name: BACKEND_NAMES[target] }), body: keepsTailscale
+    ? t('Other backends will be turned off, with their settings kept. Tailscale has no exit node and stays connected. Devices may briefly lose internet.')
+    : t('Only one network backend can be active. Other backends will be turned off, with their settings kept. Devices may briefly lose internet.'), confirmLabel: t('Activate backend') })
 }
 
 export function ProxyProvider({ children }: { children: ReactNode }) {

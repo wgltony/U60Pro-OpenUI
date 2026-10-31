@@ -1066,8 +1066,35 @@ fn ensure_remote_only(s: &Settings) -> Result<(), String> {
     BLOCK_NATIVE.store(false, Ordering::SeqCst);
     Ok(())
 }
+/// Tailscale mode with an exit node routes the internet and so excludes Clash and
+/// WireGuard. Without one it holds only tailnet peer routes, like remote access, and the
+/// native backends run beside it.
+fn exclusive(s: &Settings) -> bool {
+    s.enabled && !s.exit_node.is_empty()
+}
+/// The daemon routes no internet traffic: no exit node in its prefs, or no daemon and no
+/// tunnel device (its routes go with the device).
+fn exit_route_absent() -> bool {
+    if !Path::new(SOCKET).exists() {
+        return !Path::new("/sys/class/net/tailscale0").exists();
+    }
+    prefs().is_ok_and(|p| {
+        p["ExitNodeID"].as_str().unwrap_or("").is_empty()
+            && p["ExitNodeIP"]
+                .as_str()
+                .is_none_or(|s| s.is_empty() || s == "invalid IP")
+    })
+}
 pub(crate) fn native_allowed() -> bool {
-    !BLOCK_NATIVE.load(Ordering::SeqCst) && load().is_ok_and(|s| !s.enabled)
+    !BLOCK_NATIVE.load(Ordering::SeqCst) && load().is_ok_and(|s| !exclusive(&s))
+}
+/// Called ONLY with transition lock, before Clash or WireGuard turns on: Tailscale mode
+/// with an exit node gives way (ensure_down); without one it stays connected.
+pub(crate) fn make_room() -> Result<(), String> {
+    if load().is_ok_and(|s| s.enabled && s.exit_node.is_empty()) && native_allowed() {
+        return Ok(());
+    }
+    ensure_down()
 }
 pub(crate) fn require_native_allowed() -> Result<(), String> {
     if native_allowed() {
@@ -1089,6 +1116,11 @@ fn start_selected(s: &Settings) -> Result<(), String> {
         // If shutdown itself fails, native backends remain blocked and error is retained.
         let _ = stop_owned_and_daemon();
     }
+    if !exclusive(s) {
+        // Without an exit node native backends stay allowed, unless an earlier exit
+        // route may still be in place.
+        BLOCK_NATIVE.store(result.is_err() && !exit_route_absent(), Ordering::SeqCst);
+    }
     result
 }
 fn start_selected_inner(s: &Settings) -> Result<(), String> {
@@ -1099,7 +1131,9 @@ fn start_selected_inner(s: &Settings) -> Result<(), String> {
     if !s.exit_node.is_empty() && !exits(&v).iter().any(|p| p["id"] == s.exit_node) {
         return Err("Selected exit node is not an online eligible tailnet peer".into());
     }
-    native_off()?;
+    if exclusive(s) {
+        native_off()?;
+    }
     let routes = routes(s)?;
     patch(true, &s.exit_node, &routes)?;
     if !verify(&prefs()?, true, &s.exit_node, &routes) {
@@ -1195,7 +1229,7 @@ pub(crate) fn summary() -> Result<Value, String> {
     let s = load()?;
     let ready = Path::new(cli_path()).is_file() && Path::new(SOCKET).exists();
     Ok(
-        json!({"enabled":s.enabled,"revision":s.revision,"ready":ready,
+        json!({"enabled":s.enabled,"revision":s.revision,"ready":ready,"exclusive":exclusive(&s),
         "reason":if ready { Value::Null } else { json!("Tailscale daemon is unavailable") },
         "error":ERROR.lock().unwrap().clone()}),
     )
@@ -1267,7 +1301,9 @@ pub(crate) fn update_locked(body: &[u8]) -> (u16, Value) {
                 persist(&s)?;
                 *REMOTE_ERROR.lock().unwrap() = None;
                 if s.enabled {
-                    BLOCK_NATIVE.store(true, Ordering::SeqCst);
+                    if exclusive(&s) {
+                        BLOCK_NATIVE.store(true, Ordering::SeqCst);
+                    }
                     start_selected(&s)?;
                 } else if enabled {
                     ensure_remote_only(&s)?;
@@ -1299,7 +1335,8 @@ pub(crate) fn update_locked(body: &[u8]) -> (u16, Value) {
                     return Err("Exit node must be an online eligible tailnet peer".into());
                 }
                 s.exit_node = exit_node;
-                if s.enabled {
+                // Choosing an exit turns Clash and WireGuard off (start_selected).
+                if exclusive(&s) {
                     BLOCK_NATIVE.store(true, Ordering::SeqCst);
                 }
                 persist(&s)?;
@@ -1372,10 +1409,12 @@ pub(crate) fn update_locked(body: &[u8]) -> (u16, Value) {
                 if !s.exit_node.is_empty() && !exits(&v).iter().any(|p| p["id"] == s.exit_node) {
                     return Err("Selected exit node is not an online eligible tailnet peer".into());
                 }
-                BLOCK_NATIVE.store(true, Ordering::SeqCst);
-                // Cleanup failure must never start Tailscale or create an ON intent.
-                native_off()?;
                 s.enabled = true;
+                if exclusive(&s) {
+                    BLOCK_NATIVE.store(true, Ordering::SeqCst);
+                    // Cleanup failure must never start Tailscale or create an ON intent.
+                    native_off()?;
+                }
                 persist(&s)?;
                 start_selected(&s)?;
             }
@@ -1404,10 +1443,13 @@ pub fn start() {
                 let _transition = crate::transition::lock();
                 let result = load().and_then(|s| {
                     if s.enabled {
-                        BLOCK_NATIVE.store(true, Ordering::SeqCst);
+                        let exclusive = exclusive(&s);
+                        if exclusive {
+                            BLOCK_NATIVE.store(true, Ordering::SeqCst);
+                        }
                         if first
-                            || wireguard::stored_enabled()
-                            || clash::stored_enabled()
+                            || (exclusive
+                                && (wireguard::stored_enabled() || clash::stored_enabled()))
                             || !routes(&s).is_ok_and(|r| {
                                 prefs().is_ok_and(|p| verify(&p, true, &s.exit_node, &r))
                             })
@@ -1464,6 +1506,23 @@ pub fn start() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_an_exit_node_excludes_the_native_backends() {
+        let s = |enabled: bool, exit: &str| Settings {
+            enabled,
+            exit_node: exit.into(),
+            ..Settings::default()
+        };
+        assert!(exclusive(&s(true, "nABC123CNTRL")));
+        assert!(
+            !exclusive(&s(true, "")),
+            "tailnet only: Clash/WireGuard run beside it"
+        );
+        assert!(
+            !exclusive(&s(false, "nABC123CNTRL")),
+            "a saved exit with the mode off"
+        );
+    }
     #[test]
     fn api_forward_takes_only_a_free_port_or_its_own_rule() {
         let t = "192.168.0.1:9090";

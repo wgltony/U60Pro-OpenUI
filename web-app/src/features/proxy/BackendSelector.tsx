@@ -34,12 +34,13 @@ export default function BackendSelector({ onSwitched }: { onSwitched: (target: P
             options={[{ value: 'off', label: t('Off') }, ...IDS.map(id => ({ value: id, label: BACKEND_NAMES[id], disabled: !backendOf(status, id)?.ready && id !== status.active }))]}
             onChange={v => void switchTo(v).then(ok => { if (ok) onSwitched(v) })} />
           <p className="text-xs text-ink2">{line}</p>
+          {status.alongside && !pending && <p className="text-xs text-ink2">{t('Tailscale stays connected alongside it (no exit node).')}</p>}
         </> : !error && <p className="text-sm text-ink2">{t('Loading…')}</p>}
         {error && <p role="alert" className="rounded-lg bg-danger/10 p-3 text-[13px] text-danger">{tm(error)}</p>}
         {current?.error && !pending && <p role="alert" className="rounded-lg bg-danger/10 p-3 text-[13px] text-danger">{tm(current.error)}</p>}
         {status?.conflict && <p role="alert" className="rounded-lg bg-warn/10 p-3 text-[13px] text-warn">{t('Multiple network backends are saved as on. Choose one backend to resolve the conflict.')}</p>}
         {blocked.map(b => <p key={b.id} className="text-xs text-ink2">{t('{name}: {reason}', { name: BACKEND_NAMES[b.id], reason: tm(b.reason) })}</p>)}
-        <p className="text-xs text-ink3">{t('Only one can be on. Switching turns the other off and keeps its settings; devices briefly lose internet while rules are replaced.')}</p>
+        <p className="text-xs text-ink3">{t('Only one can be on. Switching turns the other off and keeps its settings; devices briefly lose internet while rules are replaced.')} {t('Tailscale without an exit node can stay connected beside Clash or WireGuard.')}</p>
       </div>
     </Card>
   )

@@ -13,7 +13,7 @@ import { eligibleExitNodes, remoteAccessState, remoteSshState, setupStage, tailn
 const ADMIN = 'https://login.tailscale.com/admin/machines'
 
 /** Asked before changes that move traffic or end access; sign-in itself changes nothing yet. */
-function ask(status: TailscaleStatus, action: TailscaleUpdate['action']) {
+function ask(status: TailscaleStatus, action: TailscaleUpdate['action'], exit = '') {
   if (action === 'login' || action === 'cancel_login') return Promise.resolve(true)
   if (action === 'logout') return confirm({
     title: t('Sign out of Tailscale?'),
@@ -42,11 +42,14 @@ function ask(status: TailscaleStatus, action: TailscaleUpdate['action']) {
     danger: !remoteOn,
   } : {
     title: action === 'connect' ? t('Connect Tailscale?') : action === 'disconnect' ? t('Disconnect Tailscale?') : t('Change Tailscale exit node?'),
-    body: action === 'connect' ? t('Connecting activates Tailscale mode and turns Clash and WireGuard off. Their settings are kept.')
+    body: action === 'connect' ? (status.selected_exit_node
+      ? t('Connecting activates Tailscale mode and turns Clash and WireGuard off. Their settings are kept.')
+      : t('Tailscale connects without an exit node. Clash and WireGuard keep running; choosing an exit node later turns them off.'))
       : action === 'disconnect' ? (status.remote_access
         ? t('Tailscale mode turns off. Remote management keeps Tailscale connected for access to this router.')
         : t('Tailscale will disconnect. No other network backend is started automatically.'))
-        : t('The selected exit changes the Tailscale internet route. None clears the exit selection; it does not activate Clash.'),
+        : exit ? t('Devices’ internet goes through the selected exit node, and Clash and WireGuard turn off. Their settings are kept.')
+          : t('The exit node is cleared. Tailscale stays connected for tailnet access; Clash and WireGuard can be turned on beside it.'),
     confirmLabel: t('Confirm'),
   })
 }
@@ -97,7 +100,7 @@ export default function TailscaleTab() {
     if (!status || busy.current || pending || settingsBusy || error) return
     // Hold a local guard while the standard confirmation dialog is open, too.
     busy.current = true
-    const accepted = await ask(status, action)
+    const accepted = await ask(status, action, selected)
     if (!accepted || !mounted.current || !beginSettingsUpdate()) { busy.current = false; return }
     generation.current += 1
     setWorking(action)
@@ -125,7 +128,8 @@ export default function TailscaleTab() {
   const nodes = status ? eligibleExitNodes(status) : []
   const blocked = !!working || !!pending || settingsBusy || !!error || !status
   const running = status?.enabled && status.backend_state === 'Running'
-  const canSelect = !blocked && running && proxy?.active === 'tailscale' && !status?.error
+  // Tailscale mode may run beside Clash or WireGuard, so the proxy selector need not show it.
+  const canSelect = !blocked && running && !!proxy && !status?.error
   const selectedMissing = selected !== '' && !nodes.some(node => node.id === selected)
   const remote = status ? remoteAccessState(status) : 'unsupported'
   const remoteChip = remote === 'active' ? <Chip tone="ok">{t('Working')}</Chip>
@@ -159,7 +163,7 @@ export default function TailscaleTab() {
       title: t('Choose how to use it'),
       done: !!status.remote_access || status.enabled,
       final: true,
-      detail: t('Remote management lets your tailnet reach this router and its LAN, alongside Clash or WireGuard. Tailscale mode instead sends devices’ internet through an exit node and turns Clash and WireGuard off.'),
+      detail: t('Remote management lets your tailnet reach this router and its LAN, alongside Clash or WireGuard. Tailscale mode connects without advertising the LAN, also alongside them; only with an exit node does it send devices’ internet through it and turn Clash and WireGuard off.'),
       actions: [
         { label: t('Turn on remote management'), onClick: () => void mutate('remote_access'), disabled: blocked || stage !== 'ready', loading: working === 'remote_access' },
         { label: t('Use Tailscale mode'), onClick: () => void mutate('connect'), disabled: blocked || stage !== 'ready', loading: working === 'connect' },

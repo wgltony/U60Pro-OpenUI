@@ -581,7 +581,7 @@ pub(crate) fn update_locked(body: &[u8]) -> (u16, Value) {
         let old = load()?;
         let next = edited(&old, u)?;
         if next.enabled {
-            crate::tailscale::ensure_down()?;
+            crate::tailscale::make_room()?;
         }
         let clash_on = next.enabled && clash::stored_enabled();
         if clash_on && !takeover {

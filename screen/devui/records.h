@@ -8,6 +8,8 @@ enum { BK_OFF, BK_WG, BK_CLASH, BK_TS };
 #define NO_FIGURE LLONG_MIN
 struct backend_info {
   int has, active, conflict;
+  /* Tailscale has an exit node (an older agent: always), or runs beside the active one. */
+  int ts_exclusive, alongside;
   unsigned long long rev[3]; /* WireGuard, Clash */
   int ready[3], error[3];
   char reason[3][12];
@@ -170,11 +172,14 @@ static void copy_name(char *dst, size_t cap, const char *src) { copy_field(dst, 
 static unsigned long long u64_field(const char *s) { return strtoull(s, NULL, 10); }
 static long long figure_field(const char *s) { return strcmp(s, "-") ? strtoll(s, NULL, 10) : NO_FIGURE; }
 #define COPY(dst, src) copy_field(dst, sizeof(dst), src)
-/* B active conflict, then per backend: revision ready reason error. */
+/* B active conflict, then per backend: revision ready reason error; after Tailscale,
+ * exclusive and alongside. */
 static void parse_backend(char **f, int n, struct backend_info *b) {
   if (n < 11) return;
   b->active = !strcmp(f[1], "wireguard") ? BK_WG : !strcmp(f[1], "clash") ? BK_CLASH : !strcmp(f[1], "tailscale") ? BK_TS : BK_OFF;
   b->conflict = atoi(f[2]) != 0;
+  b->ts_exclusive = n >= 17 ? atoi(f[15]) != 0 : 1;
+  b->alongside = n >= 17 && atoi(f[16]) != 0;
   for (int i = 0; i < (n >= 15 ? 3 : 2); i++) {
     b->rev[i] = u64_field(f[3 + 4 * i]);
     b->ready[i] = atoi(f[4 + 4 * i]) != 0;

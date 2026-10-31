@@ -277,6 +277,7 @@ static void render_proxy(void) {
     box(16,58,252,20,"muted",L("Choose WireGuard or Clash above.","可在上方选择 WireGuard 或 Clash。"));
   }
   if(b->has&&b->conflict)sbox(16,100,252,20,"warn",L("Backend conflict; choose a mode.","后端冲突，请重新选择模式。"));
+  else if(b->has&&b->alongside)sbox(16,100,252,20,"muted",L("Tailscale also on (no exit node)","Tailscale 同时在线（无出口）"));
   card_close(link,124);
   const char *dcls;const char *detail=diag_summary(&dcls);
   nav_row(12,344,296,52,"tailscale","Tailscale",ts_summary(),"warn",reachable(TAILSCALE));
@@ -1135,17 +1136,20 @@ static void render_confirm(void) {
   const char *title,*text,*button=L("Switch","切换");
   char detail[200]="";
   int tone=PRIMARY;
+  /* Without an exit node Tailscale stays connected beside the backend switched to. */
+  const char *ts_off=b->ts_exclusive?L("Tailscale turns off; traffic pauses.","Tailscale 将关闭，流量会中断。"):
+    L("Tailscale has no exit node and stays on.","Tailscale 未用出口节点，将保持连接。");
   if(confirm_what==CF_BACKEND&&confirm_target==BK_OFF) {
     title=L("Turn off the proxy?","关闭代理？");
     text=L("Devices will use the normal network.","设备将恢复为普通网络。");
     button=L("Turn off","关闭");tone=DANGER;
   } else if(confirm_what==CF_BACKEND&&confirm_target==BK_WG) {
     title=L("Switch to WireGuard?","切换到 WireGuard？");
-    text=b->active==BK_TS?L("Tailscale turns off; traffic pauses.","Tailscale 将关闭，流量会中断。"):b->active==BK_CLASH?L("Clash turns off and traffic pauses briefly.","Clash 将关闭，流量会短暂中断。"):
+    text=b->active==BK_TS?ts_off:b->active==BK_CLASH?L("Clash turns off and traffic pauses briefly.","Clash 将关闭，流量会短暂中断。"):
       L("Selected devices will use WireGuard.","所选设备将通过 WireGuard 上网。");
   } else if(confirm_what==CF_BACKEND) {
     title=L("Switch to Clash?","切换到 Clash？");
-    text=b->active==BK_TS?L("Tailscale turns off; traffic pauses.","Tailscale 将关闭，流量会中断。"):b->active==BK_WG?L("WireGuard turns off. Starting Clash can take a minute.","WireGuard 将关闭，启动 Clash 可能需要一分钟。"):
+    text=b->active==BK_TS?ts_off:b->active==BK_WG?L("WireGuard turns off. Starting Clash can take a minute.","WireGuard 将关闭，启动 Clash 可能需要一分钟。"):
       L("Selected devices will use Clash. Starting can take a minute.","所选设备将通过 Clash 上网，启动可能需要一分钟。");
   } else if(confirm_what==CF_TS&&confirm_target==1) {
     title=L("Change remote SSH?","更改远程 SSH？");
@@ -1154,7 +1158,7 @@ static void render_confirm(void) {
     button=L("Apply","应用");
   } else if(confirm_what==CF_TS) {
     title=L("Apply Tailscale change?","应用 Tailscale 更改？");
-    text=L("Traffic may pause. Connecting turns other proxy modes off. Enrollment is separate.","流量可能中断；连接将关闭其他代理模式。请另行完成注册。");
+    text=L("Traffic may pause. An exit node turns other proxy modes off. Enrollment is separate.","流量可能中断；使用出口节点时会关闭其他代理模式。请另行完成注册。");
     snprintf(detail,sizeof(detail),"%s",chosen_name);
     button=L("Apply","应用");
   } else if(confirm_what==CF_UPDATE) {

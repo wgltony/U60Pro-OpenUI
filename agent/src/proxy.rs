@@ -48,12 +48,16 @@ fn compose(wireguard: Result<Value, String>, clash: Result<Value, String>) -> Va
     };
     json!({"active": active, "conflict": on(0) && on(1), "backends": backends})
 }
+/// Tailscale mode with an exit node takes over. Without one it only reaches the tailnet:
+/// it is active when nothing else is, and otherwise runs `alongside` the active backend.
 fn compose_tailscale(mut v: Value, tailscale: Result<Value, String>) -> Value {
     let ts = entry("tailscale", tailscale);
-    if ts["enabled"] == true {
+    let alongside = ts["enabled"] == true && ts["exclusive"] == false && v["active"] != "off";
+    if ts["enabled"] == true && !alongside {
         v["conflict"] = json!(v["active"] != "off");
         v["active"] = json!("tailscale");
     }
+    v["alongside"] = json!(alongside);
     v["backends"].as_array_mut().unwrap().push(ts);
     v
 }
@@ -108,8 +112,28 @@ pub fn set(body: &[u8]) -> (u16, Value) {
     let Ok(switch) = serde_json::from_slice::<Switch>(body) else {
         return (400, json!({"ok": false, "error": "Invalid proxy request"}));
     };
-    let ts_on = crate::tailscale::summary().is_ok_and(|s| s["enabled"] == true);
-    if switch.backend == Backend::Tailscale || (switch.backend == Backend::Off && ts_on) {
+    let state = |s: Result<Value, String>| {
+        s.map(|v| (v["enabled"] == true, v["revision"].as_u64().unwrap_or(0)))
+            .unwrap_or((false, 0))
+    };
+    let (wireguard, clash) = (state(wireguard::summary()), state(clash::summary()));
+    let ts = crate::tailscale::summary().ok();
+    let ts_on = ts.as_ref().is_some_and(|s| s["enabled"] == true);
+    // Shown as the active backend (compose_tailscale), so Off turns Tailscale off.
+    let ts_active =
+        ts_on && (ts.as_ref().is_some_and(|s| s["exclusive"] == true) || !wireguard.0 && !clash.0);
+    // Off for a Tailscale that now runs beside Clash or WireGuard must not turn those off.
+    if switch.backend == Backend::Off
+        && !ts_active
+        && (wireguard.0 || clash.0)
+        && switch.active == Some(Backend::Tailscale)
+    {
+        return (
+            409,
+            json!({"ok":false,"error":"Configuration changed; refresh before saving"}),
+        );
+    }
+    if switch.backend == Backend::Tailscale || (switch.backend == Backend::Off && ts_active) {
         if switch.backend == Backend::Off && switch.active.is_some_and(|a| a != Backend::Tailscale)
         {
             return (
@@ -130,18 +154,13 @@ pub fn set(body: &[u8]) -> (u16, Value) {
         if code != 200 {
             return (code, reply);
         }
-        if switch.backend == Backend::Off {
-            if let Err(e) = crate::tailscale::native_off() {
-                return (400, json!({"ok":false,"error":e}));
-            }
+        // Chosen here, Tailscale is the only backend on, also without an exit node (its
+        // own Connect then leaves Clash and WireGuard on).
+        if let Err(e) = crate::tailscale::native_off() {
+            return (400, json!({"ok":false,"error":e}));
         }
         return get();
     }
-    let state = |s: Result<Value, String>| {
-        s.map(|v| (v["enabled"] == true, v["revision"].as_u64().unwrap_or(0)))
-            .unwrap_or((false, 0))
-    };
-    let (wireguard, clash) = (state(wireguard::summary()), state(clash::summary()));
     if ts_on && matches!(switch.backend, Backend::Wireguard | Backend::Clash) {
         let revision = if switch.backend == Backend::Wireguard {
             wireguard.1
@@ -154,7 +173,7 @@ pub fn set(body: &[u8]) -> (u16, Value) {
                 json!({"ok":false,"error":"Configuration changed; refresh before saving"}),
             );
         }
-        if let Err(e) = crate::tailscale::ensure_down() {
+        if let Err(e) = crate::tailscale::make_room() {
             return (400, json!({"ok":false,"error":e}));
         }
     }
@@ -191,6 +210,7 @@ mod tests {
         assert_eq!(only_ts["backends"].as_array().unwrap().len(), 3);
         let conflict = compose_tailscale(compose(summary(true), summary(false)), summary(true));
         assert_eq!(conflict["conflict"], true);
+        assert_eq!(conflict["alongside"], false);
         assert!(
             serde_json::from_str::<Switch>(r#"{"backend":"tailscale","expected_revision":0}"#)
                 .is_ok()
@@ -199,6 +219,35 @@ mod tests {
             r#"{"backend":"tailscale","expected_revision":0,"command":"up"}"#
         )
         .is_err());
+    }
+    #[test]
+    fn tailscale_without_an_exit_node_runs_beside_the_native_backend() {
+        let ts = |exclusive: bool| {
+            summary(true).map(|mut v| {
+                v["exclusive"] = json!(exclusive);
+                v
+            })
+        };
+        let beside = compose_tailscale(compose(summary(false), summary(true)), ts(false));
+        assert_eq!(
+            (&beside["active"], &beside["conflict"], &beside["alongside"]),
+            (&json!("clash"), &json!(false), &json!(true))
+        );
+        let alone = compose_tailscale(compose(summary(false), summary(false)), ts(false));
+        assert_eq!(
+            (&alone["active"], &alone["alongside"]),
+            (&json!("tailscale"), &json!(false))
+        );
+        let exit = compose_tailscale(compose(summary(true), summary(false)), ts(true));
+        assert_eq!(
+            (&exit["active"], &exit["conflict"], &exit["alongside"]),
+            (&json!("tailscale"), &json!(true), &json!(false))
+        );
+        let off = compose_tailscale(compose(summary(false), summary(true)), summary(false));
+        assert_eq!(
+            (&off["active"], &off["alongside"]),
+            (&json!("clash"), &json!(false))
+        );
     }
     #[test]
     fn the_active_backend_follows_the_saved_state() {

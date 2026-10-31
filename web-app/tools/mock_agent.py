@@ -572,9 +572,11 @@ def proxy_status():
         if name == "clash":
             entry["running"] = value["running"]
         backends.append(entry)
-    backends.append({"id": "tailscale", "enabled": TS["enabled"], "revision": TS["revision"], "ready": True, "reason": None, "error": None})
-    active = "wireguard" if wg["enabled"] else "clash" if clash["enabled"] else "tailscale" if TS["enabled"] else "off"
-    return {"active": active, "conflict": wg["enabled"] and clash["enabled"], "backends": backends}
+    # The mock offers no exit nodes, so Tailscale mode is never exclusive: it runs alongside.
+    backends.append({"id": "tailscale", "enabled": TS["enabled"], "exclusive": False, "revision": TS["revision"], "ready": True, "reason": None, "error": None})
+    native = "wireguard" if wg["enabled"] else "clash" if clash["enabled"] else None
+    active = native or ("tailscale" if TS["enabled"] else "off")
+    return {"active": active, "conflict": wg["enabled"] and clash["enabled"], "alongside": bool(native and TS["enabled"]), "backends": backends}
 
 
 def proxy_set(body):

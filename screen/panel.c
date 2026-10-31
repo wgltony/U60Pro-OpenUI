@@ -2026,6 +2026,22 @@ static void tailscale_tests(struct drm_buf *b,const char *dir) {
   page=PROXY;capture_both(b,dir,"proxy-tailscale");assert(strstr(html,"Tailscale")&&!strstr(html,"Devices use the normal network"));
   press_id(b,"bk0");press_id(b,"confirm");expect_request("backend 9 off tailscale\n");reset_job();
   press_id(b,"tailscale");assert(page==TAILSCALE);press_id(b,"back");assert(page==PROXY);
+  /* An older agent's 15-field B: Tailscale counts as exclusive. */
+  assert(data.backend.ts_exclusive&&!data.backend.alongside);
+  press_id(b,"bk2");render(b);assert(strstr(html,"Tailscale turns off"));press_id(b,"dismiss");
+  /* No exit node: switching to Clash keeps Tailscale; beside Clash it is noted, not a conflict. */
+  {
+    struct snapshot o;char text[512];
+    snprintf(text,sizeof(text),"S 7 1 0 0 0 0 0 0 1 %llu\nB\ttailscale\t0\t7\t1\t-\t0\t12\t1\t-\t0\t9\t1\t-\t0\t0\t0\n.\n",now);
+    assert(parse_snapshot(text,&o)&&!o.backend.ts_exclusive&&!o.backend.alongside);data.backend=o.backend;
+    press_id(b,"bk2");render(b);assert(strstr(html,"stays on")&&!strstr(html,"Tailscale turns off"));
+    capture_both(b,dir,"proxy-tailscale-keeps");press_id(b,"dismiss");
+    snprintf(text,sizeof(text),"S 7 1 0 0 0 0 0 0 1 %llu\nB\tclash\t0\t7\t1\t-\t0\t12\t1\t-\t0\t9\t1\t-\t0\t0\t1\n.\n",now);
+    assert(parse_snapshot(text,&o)&&o.backend.alongside&&o.backend.active==BK_CLASH);data.backend=o.backend;
+    render(b);assert(strstr(html,"Tailscale also on")&&!strstr(html,"conflict"));
+    capture_both(b,dir,"proxy-tailscale-alongside");
+    data.backend=s.backend;
+  }
   settings_menu=16;assert(!reachable(TAILSCALE));page=MENU;render(b);assert(!strstr(html,"act:tailscale"));
   puts("PASS Tailscale redacted records, explicit third mode, indexed choices, paging, stale controls and backend-off revision");
 }
