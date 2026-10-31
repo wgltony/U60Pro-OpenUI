@@ -46,13 +46,13 @@ static void render_imei(void) {
     linkbox(12,258,222,48,"iedit1",preview&&s->mask[1][0]?s->mask[1]:imei_ui.target[1][0]?imei_ui.target[1]:L("NV1 · Keep / input","NV1 · 保留 / 输入"),edit,PLAIN);
     linkbox(240,258,68,48,"ikeep1",L("Keep","保留"),edit,PLAIN);
   }
-  const int actions[]={IA_PREVIEW,IA_BEGIN,IA_CONTINUE,IA_VERIFY,IA_REBOOT,IA_RESTORE,IA_CANCEL};int count=0,shown=0;
+  const int actions[]={IA_PREVIEW,IA_DEFAULT,IA_BEGIN,IA_CONTINUE,IA_VERIFY,IA_REBOOT,IA_RESTORE,IA_CANCEL};int count=0,shown=0;
   for(size_t i=0;i<sizeof(actions)/sizeof(*actions);i++)if(s->allowed&actions[i])count++;
   int start=count>4?(imei_ui.action_page%((count+2)/3))*3:0,limit=count>4?3:4;
   for(size_t i=0;i<sizeof(actions)/sizeof(*actions);i++)if(s->allowed&actions[i]) {
     int n=shown++;if(n<start||n>=start+limit)continue;
     int slot=n-start,a=actions[i];char id[20];snprintf(id,sizeof(id),"ia%d",a);
-    linkbox(12+(slot%2)*154,312+(slot/2)*54,142,48,id,imei_action_label(a),imei_can(a)&&(a!=IA_PREVIEW||imei_targets_valid()),a==IA_PREVIEW||a==IA_VERIFY?PRIMARY:DANGER);
+    linkbox(12+(slot%2)*154,312+(slot/2)*54,142,48,id,imei_action_label(a),imei_can(a)&&(a!=IA_PREVIEW||imei_targets_valid()),a==IA_PREVIEW||a==IA_DEFAULT||a==IA_VERIFY?PRIMARY:DANGER);
   }
   if(count>4)linkbox(166,366,142,48,"imore",L("More actions","更多操作"),1,PLAIN);
   const char *hint=imei_ui.error[0]?imei_ui.error:!imei_fresh()?L("Unavailable / stale. Refresh status.","不可用 / 状态过期，请刷新状态。"):

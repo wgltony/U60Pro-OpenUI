@@ -1,5 +1,5 @@
 /* Local IMEI input and consent. No timer, render or keyboard completion submits. */
-enum { IA_CHECK=1,IA_PREVIEW=2,IA_BEGIN=4,IA_CONTINUE=8,IA_VERIFY=16,IA_RESTORE=32,IA_REBOOT=64,IA_CANCEL=128 };
+enum { IA_CHECK=1,IA_PREVIEW=2,IA_BEGIN=4,IA_CONTINUE=8,IA_VERIFY=16,IA_RESTORE=32,IA_REBOOT=64,IA_CANCEL=128,IA_DEFAULT=256 };
 static struct {
   char target[2][16],input[16],error[128],token[33];
   unsigned long long rev, sent, seen;
@@ -37,7 +37,7 @@ static int imei_can(int bit) {
     strcmp(s->phase,"unsupported")&&
     (bit!=IA_BEGIN||(imei_hex(s->preview)&&s->expires>0&&imei_clock.preview_rev==s->rev&&!strcmp(imei_clock.preview,s->preview)&&monotonic_ms()<imei_clock.preview_until))&&
     ((bit!=IA_CONTINUE&&bit!=IA_VERIFY&&bit!=IA_RESTORE&&bit!=IA_REBOOT&&bit!=IA_CANCEL)||imei_hex(s->op))&&
-    ((bit!=IA_PREVIEW&&bit!=IA_BEGIN&&bit!=IA_CONTINUE)||
+    ((bit!=IA_PREVIEW&&bit!=IA_DEFAULT&&bit!=IA_BEGIN&&bit!=IA_CONTINUE)||
       ((!s->current[0][0]||imei_luhn(s->current[0]))&&(!s->current[1][0]||imei_luhn(s->current[1]))))&&
     (bit==IA_CHECK||bit==IA_VERIFY||imei_normal_code(s->code));
 }
@@ -59,12 +59,12 @@ static int imei_consent_valid(void) {
 }
 static const char *imei_action_name(int a) {
   return a==IA_CHECK?"check":a==IA_PREVIEW?"preview":a==IA_BEGIN?"begin":a==IA_CONTINUE?"continue":
-    a==IA_VERIFY?"verify":a==IA_RESTORE?"restore":a==IA_REBOOT?"reboot":"cancel";
+    a==IA_VERIFY?"verify":a==IA_RESTORE?"restore":a==IA_REBOOT?"reboot":a==IA_DEFAULT?"restore_default":"cancel";
 }
 static const char *imei_action_label(int a) {
   return a==IA_CHECK?L("CHECK","检查"):a==IA_PREVIEW?L("Preview","预览"):a==IA_BEGIN?L("Begin","开始变更"):
     a==IA_CONTINUE?L("Continue","继续写入"):a==IA_VERIFY?L("Verify","最终验证"):a==IA_RESTORE?L("Restore backup","恢复备份"):
-    a==IA_REBOOT?L("Reboot","重启"):L("Cancel operation","取消操作");
+    a==IA_REBOOT?L("Reboot","重启"):a==IA_DEFAULT?L("Restore default","恢复默认IMEI"):L("Cancel operation","取消操作");
 }
 static void imei_track(void) {
   if(page!=IMEI_PAGE){imei_clear();return;}

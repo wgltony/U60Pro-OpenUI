@@ -306,6 +306,51 @@ impl Store {
     pub fn reload_plan(&self, j: &Journal) -> Result<Plan> {
         self.verify_plan(j)
     }
+    /// Read-only, like load(): a missing root or file is simply no default.
+    pub fn baseline(&self) -> Result<Option<Baseline>> {
+        match fs::symlink_metadata(&self.root) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err("state_unavailable"),
+            Ok(_) => {}
+        }
+        self.ancestors()?;
+        self.directory(&self.root, true)?;
+        let path = self.root.join("default.json");
+        match fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err("state_unavailable"),
+            Ok(_) => {}
+        }
+        let b: Baseline =
+            serde_json::from_slice(&self.read(&path, MAX_FILE)?).map_err(|_| "baseline_invalid")?;
+        b.validate()?;
+        Ok(Some(b))
+    }
+    /// Written once, under the lease, and only while no operation has ever
+    /// existed: after a change the live records are no longer the default.
+    pub fn record_baseline(&self, b: &Baseline) -> Result<()> {
+        b.validate()?;
+        self.ensure()?;
+        let dest = self.root.join("default.json");
+        match fs::symlink_metadata(&dest) {
+            Ok(_) => return Err("baseline_exists"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("state_unavailable"),
+        }
+        if fs::read_dir(self.root.join("operations"))
+            .map_err(|_| "state_unavailable")?
+            .next()
+            .is_some()
+            || fs::symlink_metadata(self.root.join("current.json")).is_ok()
+        {
+            return Err("baseline_unknown");
+        }
+        let bytes = serde_json::to_vec(b).map_err(|_| "persistence_failed")?;
+        let temp = self.root.join(format!(".default-{}", random_id()?));
+        self.exclusive(&temp, &bytes)?;
+        fs::rename(&temp, &dest).map_err(|_| "persistence_failed")?;
+        self.sync_dir(&self.root)
+    }
 }
 pub(super) fn random_id() -> Result<String> {
     let mut bytes = [0u8; 16];

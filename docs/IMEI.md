@@ -44,6 +44,10 @@ Manifest checks, licenses and pinned source are described in the [native-tool do
 
 Restoration may require additional reboots. There is no automatic reboot, startup resume, page-load write, timeout retry or automatic generation of a secondary number. Client freshness is based on local receipt/elapsed time, not synchronized router/browser wall clocks; stale revisions, expired previews and uncertain results still fail closed.
 
+## Restore default IMEI
+
+The first successful CHECK, while no operation has ever existed, records the observed records once in root-private `/data/openui-imei/default.json`, bound to the modem's cid. It is never rewritten: after any operation the live records may no longer be the default, so a default that was not recorded by then is never guessed. When the live records differ from it, **Restore default IMEI** (screen `uimei restore_default <revision>`, API `{"action":"restore_default","revision":N}`) builds an ordinary preview whose targets are that default, only for records that differ. It writes nothing; Begin, both confirmations and the two reboots still apply. A missing, foreign or unsafe default file only hides the option.
+
 ## Recovery and bounded native rollback
 
 Crashes and ambiguous results require a refresh and explicit state-appropriate recovery, not replaying an old request as a new operation. The durable journal binds identity, operation and backup integrity. Known per-record original/target hybrids can be explicitly restored; unknown state is refused. Old unsafe cross-slot plans are rejected without deleting their original backup files.

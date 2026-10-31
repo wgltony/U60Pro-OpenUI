@@ -25,6 +25,10 @@ pub enum Action {
         revision: u64,
         targets: Vec<Option<String>>,
     },
+    /// A preview whose targets are the recorded default, not caller input.
+    RestoreDefault {
+        revision: u64,
+    },
     Begin {
         revision: u64,
         preview_id: String,
@@ -71,6 +75,7 @@ impl Action {
         match self {
             Self::Check { .. } => "check",
             Self::Preview { .. } => "preview",
+            Self::RestoreDefault { .. } => "restore_default",
             Self::Begin { .. } => "begin",
             Self::Continue { .. } => "continue",
             Self::Verify { .. } => "verify",
@@ -83,6 +88,7 @@ impl Action {
         match self {
             Self::Check { revision }
             | Self::Preview { revision, .. }
+            | Self::RestoreDefault { revision }
             | Self::Begin { revision, .. }
             | Self::Continue { revision, .. }
             | Self::Verify { revision, .. }
@@ -191,6 +197,7 @@ struct State {
     journal: Option<Journal>,
     plan: Option<Plan>,
     recovered: bool,
+    baseline: Option<Baseline>,
 }
 impl State {
     fn initial(store: &Store) -> Self {
@@ -204,6 +211,8 @@ impl State {
             journal: None,
             plan: None,
             recovered: false,
+            // An unreadable default only hides restore_default; it never blocks.
+            baseline: store.baseline().ok().flatten(),
         };
         match store.load() {
             Ok(Some((j, p))) => {
@@ -289,6 +298,9 @@ impl State {
                     .is_some_and(|s| now() >= s.stamp && now() - s.stamp <= 60)
                 {
                     a.push("preview");
+                    if self.default_targets().is_some() {
+                        a.push("restore_default");
+                    }
                     if self.preview.as_ref().is_some_and(Preview::fresh) {
                         a.push("begin");
                     }
@@ -330,11 +342,17 @@ impl State {
                 .is_some_and(|s| now() >= s.stamp && now() - s.stamp <= 60)
         {
             a.push("preview");
+            if self.default_targets().is_some() {
+                a.push("restore_default");
+            }
             if self.preview.as_ref().is_some_and(Preview::fresh) {
                 a.push("begin");
             }
         }
         a
+    }
+    fn default_targets(&self) -> Option<Vec<Option<String>>> {
+        self.baseline.as_ref()?.targets(self.snapshot.as_ref()?)
     }
     fn json(&self) -> Value {
         let p = self.preview.as_ref().filter(|p| p.fresh());
@@ -597,6 +615,29 @@ impl Controller {
         }
         Ok(after)
     }
+    fn preview(&self, s: &mut State, targets: &[Option<String>]) -> Result<()> {
+        let old = s.snapshot.as_ref().ok_or("check_required")?;
+        if now() < old.stamp || now() - old.stamp > 60 {
+            return Err("snapshot_expired");
+        }
+        let fresh = self.adapter.inspect()?;
+        fresh.validate()?;
+        if !old.same_source(&fresh) {
+            return Err("snapshot_changed");
+        }
+        let plan = Plan::from_targets(&fresh, targets)?;
+        s.preview = Some(Preview {
+            id: random_id()?,
+            source: fresh.clone(),
+            plan,
+            created: Instant::now(),
+            epoch: now(),
+        });
+        s.snapshot = Some(fresh);
+        s.phase = "preview";
+        s.code = "preview_ready";
+        Ok(())
+    }
     fn run(&self, action: Action, s: &mut State) -> Result<()> {
         // Another process may have completed/changed a durable operation while
         // this process was idle. Never overwrite a different operation authority.
@@ -633,6 +674,14 @@ impl Controller {
                     if config_flag(&current.config)? != 0 {
                         return Err("config_already_enabled");
                     }
+                    if s.baseline.is_none() {
+                        // Best effort: a failure only leaves restore_default unavailable.
+                        if let Ok(b) = Baseline::of(&current) {
+                            if self.store.record_baseline(&b).is_ok() {
+                                s.baseline = Some(b);
+                            }
+                        }
+                    }
                     s.snapshot = Some(current);
                     s.preview = None;
                     s.phase = "checked";
@@ -640,28 +689,10 @@ impl Controller {
                 }
                 Ok(())
             }
-            Action::Preview { targets, .. } => {
-                let old = s.snapshot.as_ref().ok_or("check_required")?;
-                if now() < old.stamp || now() - old.stamp > 60 {
-                    return Err("snapshot_expired");
-                }
-                let fresh = self.adapter.inspect()?;
-                fresh.validate()?;
-                if !old.same_source(&fresh) {
-                    return Err("snapshot_changed");
-                }
-                let plan = Plan::from_targets(&fresh, &targets)?;
-                s.preview = Some(Preview {
-                    id: random_id()?,
-                    source: fresh.clone(),
-                    plan,
-                    created: Instant::now(),
-                    epoch: now(),
-                });
-                s.snapshot = Some(fresh);
-                s.phase = "preview";
-                s.code = "preview_ready";
-                Ok(())
+            Action::Preview { targets, .. } => self.preview(s, &targets),
+            Action::RestoreDefault { .. } => {
+                let targets = s.default_targets().ok_or("default_unavailable")?;
+                self.preview(s, &targets)
             }
             Action::Begin { preview_id, .. } => {
                 let preview = s.preview.take().ok_or("stale_preview")?;
@@ -919,6 +950,7 @@ pub fn screen_records() -> String {
                 .map(|s| match s {
                     "check" => 1,
                     "preview" => 2,
+                    "restore_default" => 256,
                     "begin" => 4,
                     "continue" => 8,
                     "verify" => 16,
@@ -968,6 +1000,7 @@ pub fn parse_screen(line: &str) -> std::result::Result<Action, &'static str> {
     let revision = p[2].parse().map_err(|_| "invalid_revision")?;
     let action = match p[1] {
         "check" if p.len() == 3 => Action::Check { revision },
+        "restore_default" if p.len() == 3 => Action::RestoreDefault { revision },
         "preview" if p.len() == 5 => Action::Preview {
             revision,
             targets: p[3..5]

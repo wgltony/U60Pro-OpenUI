@@ -1,10 +1,11 @@
 /* One typed request per deliberate tap; responses only mean queued, never success. */
 static void imei_send(int action) {
   if(!imei_can(action)||(action==IA_PREVIEW&&!imei_targets_valid())||
-     (action!=IA_CHECK&&action!=IA_PREVIEW&&action!=IA_VERIFY&&(!imei_ui.risk||imei_ui.stage!=2||!imei_consent_valid())))return;
+     (action!=IA_CHECK&&action!=IA_PREVIEW&&action!=IA_DEFAULT&&action!=IA_VERIFY&&(!imei_ui.risk||imei_ui.stage!=2||!imei_consent_valid())))return;
   char req[192]={0},reply[128]={0};const struct imei_info *s=&data.imei;
   if(action==IA_CHECK)snprintf(req,sizeof(req),"uimei check %llu\n",s->rev);
   else if(action==IA_PREVIEW)snprintf(req,sizeof(req),"uimei preview %llu %s %s\n",s->rev,imei_ui.target[0][0]?imei_ui.target[0]:"-",imei_ui.target[1][0]?imei_ui.target[1]:"-");
+  else if(action==IA_DEFAULT)snprintf(req,sizeof(req),"uimei restore_default %llu\n",s->rev);
   else if(action==IA_VERIFY) {if(!imei_hex(s->op))return;snprintf(req,sizeof(req),"uimei verify %llu %s\n",s->rev,s->op);}
   else snprintf(req,sizeof(req),"uimei %s %llu %s 1\n",imei_action_name(action),imei_ui.rev,imei_ui.token);
   imei_ui.sent=s->rev;imei_ui.stage=0;imei_ui.risk=0;imei_ui.error[0]=0;
@@ -43,7 +44,7 @@ static int imei_tap(const char *a) {
     return 1;
   }
   if(!strcmp(a,"irefresh")){if(!imei_ui.sent)imei_refresh();return 1;}
-  if(!strcmp(a,"imore")){int count=0;for(int bit=IA_PREVIEW;bit<=IA_CANCEL;bit*=2)if(data.imei.allowed&bit)count++;if(count>4)imei_ui.action_page=(imei_ui.action_page+1)%((count+2)/3);return 1;}
+  if(!strcmp(a,"imore")){int count=0;for(int bit=IA_PREVIEW;bit<=IA_DEFAULT;bit*=2)if(data.imei.allowed&bit)count++;if(count>4)imei_ui.action_page=(imei_ui.action_page+1)%((count+2)/3);return 1;}
   if(!strcmp(a,"icheck")){imei_send(IA_CHECK);return 1;}
   if(!strcmp(a,"iedit0")||!strcmp(a,"iedit1")) {
     int i=a[5]-'0';if(imei_can(IA_PREVIEW)&&(i==0||!strcmp(data.imei.secondary,"active"))) {
@@ -53,10 +54,10 @@ static int imei_tap(const char *a) {
   if(!strcmp(a,"ikeep0")||!strcmp(a,"ikeep1")){if(imei_can(IA_PREVIEW))relay_wipe(imei_ui.target[a[5]-'0'],16);return 1;}
   if(!strncmp(a,"ia",2)) {
     int action=0;
-    const int allowed[]={IA_PREVIEW,IA_BEGIN,IA_CONTINUE,IA_VERIFY,IA_RESTORE,IA_REBOOT,IA_CANCEL};
+    const int allowed[]={IA_PREVIEW,IA_DEFAULT,IA_BEGIN,IA_CONTINUE,IA_VERIFY,IA_RESTORE,IA_REBOOT,IA_CANCEL};
     for(size_t i=0;i<sizeof(allowed)/sizeof(*allowed);i++){char id[16];snprintf(id,sizeof(id),"ia%d",allowed[i]);if(!strcmp(a,id))action=allowed[i];}
     if(action&&imei_can(action)) {
-      if(action==IA_PREVIEW||action==IA_VERIFY)imei_send(action);
+      if(action==IA_PREVIEW||action==IA_DEFAULT||action==IA_VERIFY)imei_send(action);
       else {const char *token=action==IA_BEGIN?data.imei.preview:data.imei.op;if(!imei_hex(token)||(action==IA_BEGIN&&!data.imei.expires))return 1;
         imei_ui.action=action;imei_ui.rev=data.imei.rev;snprintf(imei_ui.token,sizeof(imei_ui.token),"%s",token);imei_ui.stage=1;imei_ui.risk=0;}
     }return 1;

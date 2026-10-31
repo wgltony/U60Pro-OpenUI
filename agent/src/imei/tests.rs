@@ -1087,3 +1087,124 @@ fn secure_store_rejects_symlinks_hardlinks_and_permissions() {
     std::fs::hard_link(&nv, f.root.join("hardlink")).unwrap();
     assert!(f.controller.store.load().is_err());
 }
+fn allows(f: &Fixture, action: &str) -> bool {
+    f.controller.status()["allowed"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(action))
+}
+fn complete_change(f: &Fixture, boot: u8) {
+    f.begin();
+    f.fake.boot(boot);
+    f.continued();
+    f.fake.boot(boot + 1);
+    f.verify();
+    assert_eq!(f.controller.status()["code"], "verified");
+}
+#[test]
+fn first_check_records_default_and_restore_default_brings_it_back() {
+    let f = Fixture::new(2);
+    f.check();
+    let path = f.root.join("default.json");
+    let recorded = std::fs::read(&path).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // Live records are the default: nothing to restore, and no request is accepted.
+    assert!(!allows(&f, "restore_default"));
+    let refused = f
+        .controller
+        .reserve(&Action::RestoreDefault { revision: f.rev() });
+    assert_eq!(refused.err().unwrap().1["error"], "action_not_allowed");
+    f.preview();
+    complete_change(&f, 2);
+    // A later CHECK never rewrites the default from the changed records.
+    f.act(Action::Check { revision: f.rev() });
+    assert_eq!(std::fs::read(&path).unwrap(), recorded);
+    assert!(allows(&f, "restore_default"));
+    f.act(Action::RestoreDefault { revision: f.rev() });
+    let v = f.controller.status();
+    assert_eq!(v["phase"], "preview");
+    assert_eq!(v["target1_masked"], masked(&synthetic_imei(1)));
+    assert_eq!(v["target2_masked"], masked(&synthetic_imei(2)));
+    // Restoring is an ordinary operation: same confirmation and two reboots.
+    complete_change(&f, 4);
+    assert_eq!(
+        f.fake.state.lock().unwrap().observed,
+        vec![synthetic_imei(1), synthetic_imei(2)]
+    );
+    f.act(Action::Check { revision: f.rev() });
+    assert!(!allows(&f, "restore_default"));
+    assert_eq!(std::fs::read(&path).unwrap(), recorded);
+}
+#[test]
+fn restore_default_only_targets_records_that_differ() {
+    let f = Fixture::new(2);
+    f.check();
+    f.act(Action::Preview {
+        revision: f.rev(),
+        targets: vec![Some(synthetic_imei(10)), None],
+    });
+    complete_change(&f, 2);
+    f.act(Action::Check { revision: f.rev() });
+    f.act(Action::RestoreDefault { revision: f.rev() });
+    let v = f.controller.status();
+    assert_eq!(v["target1_masked"], masked(&synthetic_imei(1)));
+    assert_eq!(v["target2_masked"], masked(&synthetic_imei(2)));
+    let p = f.controller.state.lock().unwrap().preview.clone().unwrap();
+    assert_eq!(p.plan.target[1], p.plan.original[1]);
+}
+#[test]
+fn default_is_never_guessed_after_an_operation_or_from_a_bad_file() {
+    let f = Fixture::new(1);
+    f.check();
+    let path = f.root.join("default.json");
+    let good = std::fs::read(&path).unwrap();
+    // Legacy state: an operation exists but no default was ever recorded.
+    std::fs::remove_file(&path).unwrap();
+    f.controller.state.lock().unwrap().baseline = None;
+    f.preview();
+    complete_change(&f, 2);
+    f.act(Action::Check { revision: f.rev() });
+    assert!(!path.exists());
+    assert!(!allows(&f, "restore_default"));
+    let restarted = Controller::new(f.fake.clone(), Store::testing(f.root.clone()));
+    assert!(restarted.state.lock().unwrap().baseline.is_none());
+    // A tampered, foreign or unsafe default is ignored without blocking anything.
+    let foreign = String::from_utf8(good.clone())
+        .unwrap()
+        .replace(&"1".repeat(32), &"9".repeat(32));
+    for (bytes, mode) in [
+        (b"{}".to_vec(), 0o600),
+        (foreign.into_bytes(), 0o600),
+        (good.clone(), 0o644),
+    ] {
+        std::fs::write(&path, &bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let c = Controller::new(f.fake.clone(), Store::testing(f.root.clone()));
+        assert_eq!(c.status()["code"], "verified");
+        let check = Action::Check {
+            revision: c.status()["revision"].as_u64().unwrap(),
+        };
+        let work = c.reserve(&check).unwrap();
+        c.execute(check, work);
+        assert!(!c.status()["allowed"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("restore_default")));
+        std::fs::remove_file(&path).unwrap();
+    }
+    assert!(f.fake.calls().iter().all(|c| *c != "nv_restore"));
+}
+#[test]
+fn restore_default_screen_command_is_exact() {
+    assert!(parse_screen("uimei restore_default 7").is_ok());
+    assert!(parse_screen("uimei restore_default 7 1").is_err());
+    assert!(parse_screen("uimei restore_default 0").is_err());
+    assert!(serde_json::from_str::<Action>(r#"{"action":"restore_default","revision":1}"#).is_ok());
+    assert!(serde_json::from_str::<Action>(
+        r#"{"action":"restore_default","revision":1,"targets":[null,null]}"#
+    )
+    .is_err());
+}

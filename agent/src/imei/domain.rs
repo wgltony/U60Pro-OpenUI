@@ -430,3 +430,52 @@ impl Journal {
         Ok(())
     }
 }
+/// The records first seen before any operation existed: the device's default.
+/// Bound to the modem's cid only, so helper or firmware updates keep it.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Baseline {
+    pub schema: u8,
+    pub cid: String,
+    pub imei: Vec<String>,
+}
+impl Baseline {
+    pub fn of(s: &Snapshot) -> Result<Self> {
+        let b = Self {
+            schema: 1,
+            cid: s.identity.cid.clone(),
+            imei: s.observed.clone(),
+        };
+        b.validate()?;
+        Ok(b)
+    }
+    pub fn validate(&self) -> Result<()> {
+        if self.schema != 1
+            || !hex(&self.cid, 32)
+            || !(1..=2).contains(&self.imei.len())
+            || self.imei.iter().any(|v| !valid_imei(v))
+            || (self.imei.len() == 2 && self.imei[0] == self.imei[1])
+        {
+            return Err("baseline_invalid");
+        }
+        Ok(())
+    }
+    /// Per-record targets that bring `s` back to this default; None when it
+    /// already matches or describes a different modem or record count.
+    pub fn targets(&self, s: &Snapshot) -> Option<Vec<Option<String>>> {
+        if self.cid != s.identity.cid || self.imei.len() != s.observed.len() {
+            return None;
+        }
+        let mut t: Vec<_> = self
+            .imei
+            .iter()
+            .zip(&s.observed)
+            .map(|(d, o)| (d != o).then(|| d.clone()))
+            .collect();
+        if t.iter().all(Option::is_none) {
+            return None;
+        }
+        t.resize(2, None);
+        Some(t)
+    }
+}

@@ -56,7 +56,7 @@ static int parse_imei(char *line,struct imei_info *out) {
      !imei_phase(f[4])||!imei_code(f[5])||!imei_optional(f[6],0)||!imei_optional(f[7],0)||
      (strcmp(f[8],"active")&&strcmp(f[8],"inactive")&&strcmp(f[8],"unknown"))||
      !imei_optional(f[9],1)||!imei_optional(f[10],1)||!imei_optional(f[11],2)||!imei_optional(f[12],2)||
-     !imei_number(f[13],255,&allowed)||!imei_number(f[14],60,&expires))return 0;
+     !imei_number(f[13],511,&allowed)||!imei_number(f[14],60,&expires))return 0;
   v.has=1;v.busy=(int)busy;v.allowed=(int)allowed;v.expires=(int)expires;
   COPY(v.phase,f[4]);COPY(v.code,f[5]);COPY(v.secondary,f[8]);
   if(strcmp(f[6],"-"))COPY(v.current[0],f[6]);

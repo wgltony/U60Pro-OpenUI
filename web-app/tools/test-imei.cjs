@@ -123,6 +123,23 @@ test('preview sends exactly two keep/input targets and queued response is not su
   state.remote = { ...state.remote, revision: 8, phase: 'preview', code: 'preview_ready', allowed: ['begin'] }; await session.refresh(); assert.equal(session.view.waiting, false)
 })
 
+test('restore default sends only the revision, needs valid originals and renders only when offered', async () => {
+  const { session, state } = setup(); state.remote.allowed = ['check', 'preview', 'restore_default']; await session.refresh()
+  session.edit(0, fixed[2]); await session.submit('restore_default')
+  assert.deepEqual(state.writes, [{ action: 'restore_default', revision: 7 }]); assert.equal(session.view.waiting, true)
+  const bad = setup(); bad.state.remote = { ...bad.state.remote, imei1: '111111111111118', allowed: ['restore_default'] }; await bad.session.refresh()
+  assert.equal(bad.session.can('restore_default'), false); await bad.session.submit('restore_default'); assert.equal(bad.state.writes.length, 0)
+  const none = setup(); await none.session.refresh(); assert.equal(none.session.can('restore_default'), false)
+  for (const lang of ['zh', 'en']) {
+    const l = loader(lang), { ImeiControls } = l.load('features/signal/ImeiPage.tsx'), { ImeiSession } = l.load('data/imei.ts'), label = lang === 'zh' ? '恢复默认 IMEI' : 'Restore default IMEI'
+    for (const allowed of [['check', 'preview'], ['check', 'preview', 'restore_default']]) {
+      const s = new ImeiSession({ read: async () => ({ ...fixture(), allowed }), write: async () => { throw new Error('must not write during rendering') } }, () => {}, () => 1_000_000)
+      await s.refresh()
+      assert.equal(renderToStaticMarkup(React.createElement(ImeiControls, { view: plain(s.view), session: s })).includes(label), allowed.includes('restore_default'))
+    }
+  }
+})
+
 test('all typed action bodies and explicit two-stage consent with exact confirmation text', async () => {
   for (const action of ['check', 'begin', 'continue', 'verify', 'restore', 'reboot', 'cancel']) {
     const { session, state } = setup(); state.remote.allowed = [action]; await session.refresh()

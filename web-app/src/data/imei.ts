@@ -1,6 +1,6 @@
 // One shared backend, cached reads only. This dependency-free session never retries a POST.
 export const imeiPhases = ['idle', 'checking', 'checked', 'preview', 'preparing', 'reboot_to_enable', 'ready_to_write', 'writing', 'reboot_to_verify', 'complete', 'recovery_required', 'unsupported', 'error'] as const
-export const imeiActions = ['check', 'preview', 'begin', 'continue', 'verify', 'restore', 'reboot', 'cancel'] as const
+export const imeiActions = ['check', 'preview', 'restore_default', 'begin', 'continue', 'verify', 'restore', 'reboot', 'cancel'] as const
 export type ImeiActionName = typeof imeiActions[number]
 export type ImeiPhase = typeof imeiPhases[number]
 export interface ImeiStatus {
@@ -10,7 +10,7 @@ export interface ImeiStatus {
   target1_masked: string | null; target2_masked: string | null
   allowed: ImeiActionName[]; preview_expires_in: number
 }
-export type ImeiAction = { action: 'check'; revision: number }
+export type ImeiAction = { action: 'check' | 'restore_default'; revision: number }
   | { action: 'preview'; revision: number; targets: [string | null, string | null] }
   | { action: 'begin'; revision: number; preview_id: string; acknowledge_risk: true; confirm_text: string }
   | { action: 'continue' | 'restore' | 'cancel'; revision: number; operation_id: string; acknowledge_risk: true; confirm_text: string }
@@ -77,7 +77,7 @@ export class ImeiSession {
     const s = this.view.status
     return this.fresh() && !!s && !this.uncertain && !this.view.working && !this.view.waiting && !s.busy && s.phase !== 'unsupported' &&
       s.allowed.includes(action) && (action === 'check' || action === 'verify' || normalCodes.has(s.code)) &&
-      (!['preview', 'begin', 'continue'].includes(action) || (!s.imei1 || validImei(s.imei1)) && (!s.imei2 || validImei(s.imei2))) &&
+      (!['preview', 'restore_default', 'begin', 'continue'].includes(action) || (!s.imei1 || validImei(s.imei1)) && (!s.imei2 || validImei(s.imei2))) &&
       (action !== 'begin' || (token(s.preview_id) && s.preview_expires_in > 0 && this.previewBinding?.revision === s.revision && this.previewBinding.token === s.preview_id && this.now() < this.previewBinding.until)) &&
       (!['continue', 'restore', 'cancel', 'reboot', 'verify'].includes(action) || token(s.operation_id))
   }
@@ -125,7 +125,8 @@ export class ImeiSession {
     if (!this.can(action) || this.reading) return
     const s = this.view.status!, c = this.view.consent
     let body: ImeiAction
-    if (action === 'check') body = { action, revision: s.revision }
+    // restore_default carries no targets: the router previews its own recorded default.
+    if (action === 'check' || action === 'restore_default') body = { action, revision: s.revision }
     else if (action === 'preview') {
       if (!validTargets(s, this.view.targets)) return
       body = { action, revision: s.revision, targets: [...this.view.targets] }

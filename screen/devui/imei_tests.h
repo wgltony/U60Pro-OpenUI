@@ -11,7 +11,7 @@ static int imei_record_test(const char **fields,int count,struct imei_info *out)
   return parse_imei(text,out);
 }
 static void imei_geometry(void) {
-  const char *ids[]={"icheck","irefresh","iedit0","ikeep0","iedit1","ikeep1","ia2","ia4","ia8","ia16","ia32","ia64","ia128","imore"};
+  const char *ids[]={"icheck","irefresh","iedit0","ikeep0","iedit1","ikeep1","ia2","ia4","ia8","ia16","ia32","ia64","ia128","ia256","imore"};
   int r[16][4],count=0;
   for(size_t i=0;i<sizeof(ids)/sizeof(*ids);i++) {
     char selector[24];int x,y,w,h;snprintf(selector,sizeof(selector),"#%s",ids[i]);
@@ -26,7 +26,7 @@ static void imei_tests(struct drm_buf *b,const char *dir) {
   const char *f[]={"I1","7","1","0","idle","not_checked","-","-","unknown","-","-","-","-","1","0","extra"};
   assert(imei_record_test(f,15,&info)&&info.has&&!info.current[0][0]&&!info.op[0]);
   assert(!imei_record_test(f,14,&info)&&!info.has);assert(!imei_record_test(f,16,&info));
-  const char *bad[][2]={{"1","0"},{"1","9007199254740992"},{"1","18446744073709551616"},{"1","7x"},{"2","-1"},{"2","0"},{"3","01"},{"3","true"},{"4","new_phase"},{"5","Bad_code"},{"5","<b>"},{"6","11111111111111"},{"6","１１１１１１１１１１１１１１９"},{"8","enabled"},{"9","AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},{"10","123"},{"11","**********33337"},{"12","***********abcd"},{"13","256"},{"13","1junk"},{"14","61"},{"14","-1"}};
+  const char *bad[][2]={{"1","0"},{"1","9007199254740992"},{"1","18446744073709551616"},{"1","7x"},{"2","-1"},{"2","0"},{"3","01"},{"3","true"},{"4","new_phase"},{"5","Bad_code"},{"5","<b>"},{"6","11111111111111"},{"6","１１１１１１１１１１１１１１９"},{"8","enabled"},{"9","AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},{"10","123"},{"11","**********33337"},{"12","***********abcd"},{"13","512"},{"13","1junk"},{"14","61"},{"14","-1"}};
   for(size_t i=0;i<sizeof(bad)/sizeof(*bad);i++){int k=atoi(bad[i][0]);const char *old=f[k];f[k]=bad[i][1];assert(!imei_record_test(f,15,&info)&&!info.has);f[k]=old;}
   assert(imei_luhn("111111111111119")&&!imei_luhn("111111111111118")&&!imei_luhn("000000000000000"));
   char duplicate[]="S 7 1 0 0 0 0 0 0 1 1\nI1\t7\t1\t0\tidle\tnot_checked\t-\t-\tunknown\t-\t-\t-\t-\t1\t0\nI1\t7\t1\t0\tidle\tnot_checked\t-\t-\tunknown\t-\t-\t-\t-\t1\t0\n.\n";
@@ -43,6 +43,11 @@ static void imei_tests(struct drm_buf *b,const char *dir) {
   for(const char *p=target;*p;p++){char id[8];snprintf(id,sizeof(id),"ik%c",*p);press_id(b,id);}
   press_id(b,"ikok");assert(imei_ui.key==-1&&!strcmp(imei_ui.target[0],target)&&!test_request[0]);
   assert(imei_targets_valid());press_id(b,"ia2");expect_request("uimei preview 7 333333333333337 -\n");
+  /* Restore default carries no targets of its own: one tap queues a preview, never a write. */
+  imei_fixture("checked","ready",IA_CHECK|IA_PREVIEW|IA_DEFAULT);capture_both(b,dir,"imei-restore-default");imei_geometry();
+  press_id(b,"ia256");expect_request("uimei restore_default 7\n");assert(!imei_ui.stage&&imei_ui.sent==7);
+  imei_fixture("checked","ready",IA_DEFAULT);data.imei.current[0][14]='8';assert(!imei_can(IA_DEFAULT));imei_tap("ia256");assert(!test_request[0]);
+  imei_fixture("checked","ready",IA_PREVIEW);imei_tap("ia256");assert(!test_request[0]);
   imei_fixture("checked","ready",IA_PREVIEW);press_id(b,"iedit0");press_id(b,"ik3");press_id(b,"ikbs");assert(!imei_ui.input[0]);press_id(b,"ik4");press_id(b,"ikclear");assert(!imei_ui.input[0]);press_id(b,"ikcancel");assert(!imei_ui.input[0]&&!test_request[0]);
   snprintf(imei_ui.target[0],16,"%s",data.imei.current[0]);assert(!imei_targets_valid());
   snprintf(imei_ui.target[0],16,"%s",data.imei.current[1]);assert(!imei_targets_valid());
@@ -101,12 +106,12 @@ static void imei_tests(struct drm_buf *b,const char *dir) {
   imei_fixture("checked","ready",255);data.imei.busy=1;assert(!imei_can(IA_CHECK)&&!imei_can(IA_PREVIEW));
   imei_fixture("checked","ready",255);data.imei.has=0;assert(!imei_can(IA_CHECK));
   imei_fixture("checked","ready",255);data.imei.current[0][14]='8';capture_both(b,dir,"imei-invalid-original");assert(!imei_can(IA_PREVIEW)&&!imei_can(IA_BEGIN)&&!imei_can(IA_CONTINUE));
-  imei_fixture("checked","ready",255);for(int i=0;i<3;i++){capture_both(b,dir,i==0?"imei-many-actions-1":i==1?"imei-many-actions-2":"imei-many-actions-3");imei_geometry();press_id(b,"imore");}
+  imei_fixture("checked","ready",511);for(int i=0;i<3;i++){capture_both(b,dir,i==0?"imei-many-actions-1":i==1?"imei-many-actions-2":"imei-many-actions-3");imei_geometry();press_id(b,"imore");}
   imei_fixture("idle","not_checked",IA_CHECK);stub_job="OK 7\n";press_id(b,"icheck");assert(imei_ui.uncertain&&!imei_ui.sent&&imei_ui.error[0]);
   snprintf(sent,sizeof(sent),"%s",test_log);imei_tap("icheck");assert(!strcmp(sent,test_log));capture_both(b,dir,"imei-outcome-unknown");
   imei_fixture("checked","ready",IA_PREVIEW);snprintf(imei_ui.target[0],16,"%s",target);press_id(b,"iedit0");go(SIGNAL_PAGE);assert(!imei_ui.target[0][0]&&!imei_ui.input[0]&&imei_ui.key==-1);
   go(IMEI_PAGE);capture_both(b,dir,"imei-reopened");assert(!imei_ui.target[0][0]&&!test_request[0]);
   snprintf(imei_ui.target[0],16,"%s",target);snprintf(data.imei.phase,sizeof(data.imei.phase),"complete");imei_track();assert(!imei_ui.target[0][0]);
   imei_clear();page=MENU;stub_job="OK 1\n";
-  puts("PASS IMEI strict I1/15 fields/duplicates/overflow, 320x480 zh/en fixtures, explicit CHECK only, numeric local-only OK, exact typed daemon commands, keep/Luhn/topology/cross-original collision, two consents, revisions/tokens/monotonic expiry, +/- epoch offsets, delayed responses/local age, polling cannot renew tokens, stale/busy/unavailable, no replay and unmount clearing (synthetic only)");
+  puts("PASS IMEI strict I1/15 fields/duplicates/overflow, 320x480 zh/en fixtures, explicit CHECK only, restore default as a preview, numeric local-only OK, exact typed daemon commands, keep/Luhn/topology/cross-original collision, two consents, revisions/tokens/monotonic expiry, +/- epoch offsets, delayed responses/local age, polling cannot renew tokens, stale/busy/unavailable, no replay and unmount clearing (synthetic only)");
 }

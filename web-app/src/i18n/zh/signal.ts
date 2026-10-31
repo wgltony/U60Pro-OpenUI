@@ -34,6 +34,8 @@ export default {
   'Keep exact original record': '精确保留原始记录',
   'New IMEI: 15 ASCII digits, valid Luhn': '新 IMEI：15 位 ASCII 数字并通过 Luhn 校验',
   'Preview targets': '预览目标值',
+  'Restore default IMEI': '恢复默认 IMEI',
+  'Default IMEI is the value recorded at the first CHECK, before any change. Restoring it builds a preview; the change itself still needs both confirmations and two reboots.': '默认 IMEI 是首次检查时（任何变更之前）记录的值。恢复默认会先生成预览，实际写入仍需两次确认和两次重启。',
   'Preview expires in {seconds}s': '预览将在 {seconds} 秒后过期',
   'Begin IMEI change': '开始 IMEI 变更',
   'Continue IMEI change': '继续 IMEI 变更',
