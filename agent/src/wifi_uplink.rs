@@ -39,6 +39,18 @@ const PRIO_SOURCE: &str = "10429";
 /// Main without its default route, then the uplink table: only while online.
 const PRIO_MAIN: &str = "10430";
 const PRIO_ALL: &str = "10431";
+/// Tailscale marks its own packets (0x80000) and lets them see only main and default before
+/// an unreachable rule (5210-5250). While online they get the same pair as everything else,
+/// just ahead of those; without a SIM, main has no default route at all.
+const TS_MARK: &str = "0x80000/0xff0000";
+const PRIO_TS_MAIN: &str = "5207";
+const PRIO_TS: &str = "5208";
+/// The router's own resolver list. The firmware fills it from the cellular link only, so
+/// without a SIM it stays empty and the router's own lookups (Clash, NTP, Tailscale) fail.
+/// While online an empty one gets the uplink's resolver, tagged so going offline removes
+/// only that; one the firmware filled is left alone.
+const RESOLV: &str = "/tmp/resolv.conf.d/resolv.conf.auto";
+const RESOLV_TAG: &str = "# openui-uplink";
 const PREFIX: &str = "OUUP";
 /// Fwmark bits of the WireGuard (0x40000000) and Clash (0x20000000) policies. Their
 /// devices keep their own DNS redirect.
@@ -1263,15 +1275,26 @@ fn cleanup_script() -> String {
             "while {bin} -w 2 -t {table} -C {hook} -j {c} 2>/dev/null; do {bin} -w 2 -t {table} -D {hook} -j {c} || break; done\n{bin} -w 2 -t {table} -F {c} 2>/dev/null || true\n{bin} -w 2 -t {table} -X {c} 2>/dev/null || true\n"
         ));
     }
-    for prio in [PRIO_SOURCE, PRIO_MAIN, PRIO_ALL] {
+    for prio in [PRIO_SOURCE, PRIO_MAIN, PRIO_ALL, PRIO_TS_MAIN, PRIO_TS] {
         out.push_str(&format!(
             "while ip -4 rule del priority {prio} 2>/dev/null; do :; done\n"
         ));
     }
     out.push_str(&format!(
-        "ip -4 route flush table {TABLE} 2>/dev/null || true\n"
+        "ip -4 route flush table {TABLE} 2>/dev/null || true\n{}",
+        resolver_release()
     ));
     out
+}
+
+/// Empties the resolver list only while it is still the one the uplink wrote.
+fn resolver_release() -> String {
+    format!("if grep -q '^{RESOLV_TAG}' {RESOLV} 2>/dev/null; then : > {RESOLV}; fi\n")
+}
+
+/// Whether the router has no resolver of its own: the firmware's list exists but is empty.
+fn resolver_missing() -> bool {
+    fs::read_to_string(RESOLV).is_ok_and(|s| !s.lines().any(|l| l.starts_with("nameserver")))
 }
 
 /// The uplink table and the source rule, for a lease.
@@ -1300,6 +1323,13 @@ while ip -4 rule del priority {PRIO_MAIN} 2>/dev/null; do :; done
 while ip -4 rule del priority {PRIO_ALL} 2>/dev/null; do :; done
 ip -4 rule add priority {PRIO_MAIN} table main suppress_prefixlength 0
 ip -4 rule add priority {PRIO_ALL} table {TABLE}
+while ip -4 rule del priority {PRIO_TS_MAIN} 2>/dev/null; do :; done
+while ip -4 rule del priority {PRIO_TS} 2>/dev/null; do :; done
+ip -4 rule add priority {PRIO_TS_MAIN} fwmark {TS_MARK} table main suppress_prefixlength 0
+ip -4 rule add priority {PRIO_TS} fwmark {TS_MARK} table {TABLE}
+if [ -f {RESOLV} ] && {{ grep -q '^{RESOLV_TAG}' {RESOLV} || ! grep -q '^nameserver' {RESOLV}; }}; then
+\tprintf '{RESOLV_TAG}\\nnameserver {dns}\\n' > {RESOLV}
+fi
 iptables -w 2 -t nat -F {p}_DNS
 iptables -w 2 -t nat -F {p}_OUT
 ip6tables -w 2 -F {p}_V6
@@ -1344,17 +1374,26 @@ fn offline_script() -> String {
     format!(
         "while ip -4 rule del priority {PRIO_MAIN} 2>/dev/null; do :; done
 while ip -4 rule del priority {PRIO_ALL} 2>/dev/null; do :; done
+while ip -4 rule del priority {PRIO_TS_MAIN} 2>/dev/null; do :; done
+while ip -4 rule del priority {PRIO_TS} 2>/dev/null; do :; done
 iptables -w 2 -t nat -F {p}_DNS 2>/dev/null || true
 iptables -w 2 -t nat -F {p}_OUT 2>/dev/null || true
 ip6tables -w 2 -F {p}_V6 2>/dev/null || true
-"
+{}",
+        resolver_release()
     )
 }
 
 fn rules_present(online: bool) -> bool {
     let rules = egress::run("ip", &["-4", "rule", "show"]).unwrap_or_default();
     let has = |prio: &str| rules.lines().any(|l| l.starts_with(&format!("{prio}:")));
-    has(PRIO_SOURCE) && (!online || (has(PRIO_MAIN) && has(PRIO_ALL)))
+    has(PRIO_SOURCE)
+        && (!online
+            || (has(PRIO_MAIN)
+                && has(PRIO_ALL)
+                && has(PRIO_TS_MAIN)
+                && has(PRIO_TS)
+                && !resolver_missing()))
 }
 
 /// What the connectivity check found.
@@ -2880,9 +2919,10 @@ mod tests {
             assert_eq!(rt.view.state, State::Unavailable);
         }
         assert!(cleanup_script().contains(&format!("route flush table {TABLE}")));
-        for p in [PRIO_SOURCE, PRIO_MAIN, PRIO_ALL] {
+        for p in [PRIO_SOURCE, PRIO_MAIN, PRIO_ALL, PRIO_TS_MAIN, PRIO_TS] {
             assert!(cleanup_script().contains(&format!("priority {p}")));
         }
+        assert!(cleanup_script().contains(&resolver_release()));
     }
     #[test]
     fn firewall_rehook_restores_dynamic_dns_and_ipv6() {
@@ -3094,6 +3134,23 @@ BSS 02:00:00:00:00:05(on wlan0)\n\tfreq: 2412\n\tsignal: -40.00 dBm\n\tcapabilit
     }
 
     #[test]
+    fn online_gives_tailscale_and_the_router_the_uplink() {
+        let l = parse_lease("ip=10.9.0.2\nmask=24\nrouter=10.9.0.1\ndns=10.9.0.1\n").unwrap();
+        let on = online_script(&l);
+        assert!(on.contains(&format!(
+            "rule add priority {PRIO_TS_MAIN} fwmark {TS_MARK} table main suppress_prefixlength 0"
+        )));
+        assert!(on.contains(&format!(
+            "rule add priority {PRIO_TS} fwmark {TS_MARK} table {TABLE}"
+        )));
+        // Ahead of tailscaled's own fwmark rules (5210 main ... 5250 unreachable).
+        assert!(PRIO_TS_MAIN < PRIO_TS && PRIO_TS < "5210");
+        assert!(on.contains("printf '# openui-uplink\\nnameserver 10.9.0.1\\n' > /tmp/"));
+        let off = offline_script();
+        assert!(off.contains(&format!("rule del priority {PRIO_TS}")));
+        assert!(off.contains(&resolver_release()) && resolver_release().contains(RESOLV_TAG));
+    }
+    #[test]
     fn policy_scripts_stay_on_owned_names() {
         let l = parse_lease("ip=10.9.0.2\nmask=24\nrouter=10.9.0.1\ndns=10.9.0.1\n").unwrap();
         let all = [
@@ -3109,7 +3166,7 @@ BSS 02:00:00:00:00:05(on wlan0)\n\tfreq: 2412\n\tsignal: -40.00 dBm\n\tcapabilit
         }
         for line in all.lines().filter(|l| l.contains(" rule ")) {
             assert!(
-                [PRIO_SOURCE, PRIO_MAIN, PRIO_ALL]
+                [PRIO_SOURCE, PRIO_MAIN, PRIO_ALL, PRIO_TS_MAIN, PRIO_TS]
                     .iter()
                     .any(|p| line.contains(&format!("priority {p}"))),
                 "{line}"
