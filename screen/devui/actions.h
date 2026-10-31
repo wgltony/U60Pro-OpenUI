@@ -366,7 +366,7 @@ static void tap(int x,int y) {
       usb_draft=a[3]-'0';need_draw=1;
     } else if(!strcmp(a,"usbapply")&&pick>=0&&pick!=cur) {
       char req[64];snprintf(req,sizeof(req),"tool usb_mode %s\n",usb_modes[pick]);
-      usb_draft=-1;usb_target=pick;usb_target_until=(unsigned long long)time(NULL)+USB_SWITCH_WAIT_S;
+      usb_draft=-1;usb_target=pick;usb_target_until=(unsigned long long)(monotonic_ms()/1000)+USB_SWITCH_WAIT_S;
       send_job(req,JOB_TOOL,0);
     } else if(!strcmp(a,"ttl0")){ttl_draft=-1;send_job("tool ttl 0\n",JOB_TOOL,0);}
     else if(!strcmp(a,"ttl64")){ttl_draft=-1;send_job("tool ttl 64\n",JOB_TOOL,0);}

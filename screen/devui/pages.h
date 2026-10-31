@@ -954,12 +954,15 @@ static void render_signal(void) {
   int can=!blocked()&&h->has;
   header(L("Signal","信号"));
   add("<div class=\"box card\" style=\"left:12px;top:72px;width:296px;height:108px\"></div>");
-  snprintf(tmp,sizeof(tmp),"%s · %s",h->radio[0]?h->radio:"--",h->band[0]?h->band:"--");
-  kv_row(80,L("Network","网络"),tmp,"accent");
+  if(h->sim==0)snprintf(tmp,sizeof(tmp),"%s",L("No SIM","无 SIM 卡"));
+  else snprintf(tmp,sizeof(tmp),"%s · %s",h->radio[0]?h->radio:"--",h->band[0]?h->band:"--");
+  kv_row(80,L("Network","网络"),tmp,h->sim==0?"warn":"accent");
   if(h->rsrp==NO_FIGURE)snprintf(tmp,sizeof(tmp),"--");
+  else if(h->sinr==NO_FIGURE)snprintf(tmp,sizeof(tmp),"%lld dBm / --",h->rsrp);
   else snprintf(tmp,sizeof(tmp),"%lld dBm / %lld dB",h->rsrp,h->sinr);
   kv_row(104,"RSRP / SINR",tmp,h->rsrp==NO_FIGURE?"":h->rsrp>-95?"good":h->rsrp>-110?"warn":"bad");
-  snprintf(tmp,sizeof(tmp),"%lld dB · PCI %s",h->rsrq,h->pci[0]?h->pci:"-");
+  if(h->rsrq==NO_FIGURE)snprintf(tmp,sizeof(tmp),"-- · PCI %s",h->pci[0]?h->pci:"-");
+  else snprintf(tmp,sizeof(tmp),"%lld dB · PCI %s",h->rsrq,h->pci[0]?h->pci:"-");
   kv_row(128,"RSRQ / PCI",tmp,"");
   snprintf(tmp,sizeof(tmp),"LTE %s · NR %s",h->lte_bands[0]?h->lte_bands:"-",h->nr_bands[0]?h->nr_bands:"-");
   kv_row(152,L("Carriers","载波"),tmp,"");

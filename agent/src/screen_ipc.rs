@@ -1022,7 +1022,8 @@ pub fn diag_records(v: &Value) -> String {
     }
     out
 }
-/// `H\trssi\trsrp\trsrq\tsinr\tradio\tband\tnet_select\tlte_bands\tnr_bands\tpci\tkbps_down\tkbps_up\tcpu_pct\tmem_pct\ttemp_mc\tbloat_cnt\twifi_2g_on\twifi_5g_on\twifi_clients\twifi_ssid\tusb_mode\tusb_adb\tttl_val\tchg_enabled\tchg_limit_on\tchg_max\tchg_stop\tchg_start\tbatt_mv\tbatt_ma\tbatt_health\tusb_lan_on\tusb_lan_state\tusb_lan_iface\twifi_pct_2g\twifi_pct_5g\twifi_dbm_2g\twifi_dbm_5g`
+/// `H\trssi\trsrp\trsrq\tsinr\tradio\tband\tnet_select\tlte_bands\tnr_bands\tpci\tkbps_down\tkbps_up\tcpu_pct\tmem_pct\ttemp_mc\tbloat_cnt\twifi_2g_on\twifi_5g_on\twifi_clients\twifi_ssid\tusb_mode\tusb_adb\tttl_val\tchg_enabled\tchg_limit_on\tchg_max\tchg_stop\tchg_start\tbatt_mv\tbatt_ma\tbatt_health\tusb_lan_on\tusb_lan_state\tusb_lan_iface\twifi_pct_2g\twifi_pct_5g\twifi_dbm_2g\twifi_dbm_5g\tcarrier\tsim`
+/// Signal figures are `-` when unknown (no SIM); `sim` is 1 present, 0 absent, `-` unknown.
 /// Extended Pocket OS telemetry record for Signal, Wi-Fi, Power, Toolbox, and System subpages.
 /// `G step down up`: the Signal page's speed chart, kbit/s per `step` seconds as comma
 /// lists, oldest first. Empty until the sampler has its first point.
@@ -1046,12 +1047,18 @@ pub fn toolbox_record(v: &Value) -> String {
     let b = |k: &str| u8::from(v[k] == true);
     let w = |k: &str, max: usize| word(v[k].as_str().unwrap_or(""), max);
     let t = |k: &str, max: usize| text_bytes(v[k].as_str().unwrap_or(""), max);
+    let f = |k: &str| v[k].as_i64().map_or("-".into(), |n| n.to_string());
+    let sim = match v["sim"].as_bool() {
+        Some(true) => "1",
+        Some(false) => "0",
+        None => "-",
+    };
     format!(
-        "H\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-        i("rssi"),
-        i("rsrp"),
-        i("rsrq"),
-        i("sinr"),
+        "H\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        f("rssi"),
+        f("rsrp"),
+        f("rsrq"),
+        f("sinr"),
         w("radio", 12),
         t("band", 24),
         w("net_select", 16),
@@ -1086,6 +1093,8 @@ pub fn toolbox_record(v: &Value) -> String {
         u("wifi_pct_5g"),
         u("wifi_dbm_2g"),
         u("wifi_dbm_5g"),
+        t("carrier", 32),
+        sim,
     )
 }
 
@@ -2096,12 +2105,23 @@ mod tests {
             "wifi_pct_2g": 100,
             "wifi_pct_5g": 50,
             "wifi_dbm_2g": 19,
-            "wifi_dbm_5g": 15
+            "wifi_dbm_5g": 15,
+            "carrier": "T-Mobile",
+            "sim": true
         }));
         assert_eq!(
             h,
-            "H\t-65\t-92\t-10\t18\tNR5G-SA\tN78\t5g_sa_nsa\t1,3,8\t41,78\t105\t125000\t32000\t14\t42\t38500\t3\t1\t1\t5\tZTE-U60Pro\trndis\t1\t64\t1\t1\t80\t80\t70\t4120\t850\tGood\t1\t1\trndis0\t100\t50\t19\t15\n"
+            "H\t-65\t-92\t-10\t18\tNR5G-SA\tN78\t5g_sa_nsa\t1,3,8\t41,78\t105\t125000\t32000\t14\t42\t38500\t3\t1\t1\t5\tZTE-U60Pro\trndis\t1\t64\t1\t1\t80\t80\t70\t4120\t850\tGood\t1\t1\trndis0\t100\t50\t19\t15\tT-Mobile\t1\n"
         );
+        // Unknown figures and SIM state are `-`, never a made-up 0 dBm.
+        let empty = toolbox_record(&json!({}));
+        assert!(empty.starts_with("H\t-\t-\t-\t-\t-\t") && empty.ends_with("\t0\t0\t-\t-\n"));
+        assert!(toolbox_record(&json!({"sim": false})).ends_with("\t-\t0\n"));
+        let mut sim = json!({"sim_states": "sim undetected"});
+        assert!(crate::handlers::sim_absent(&sim));
+        sim =
+            json!({"sim_states": "modem_init_complete", "modem_main_state": "modem_init_complete"});
+        assert!(!crate::handlers::sim_absent(&sim) && !crate::handlers::sim_absent(&json!({})));
     }
 }
 

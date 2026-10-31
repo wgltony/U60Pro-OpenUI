@@ -92,7 +92,7 @@ function StatusStrip({ onNavigate, className = '' }: { onNavigate: (g: Group) =>
     <div className={`no-scrollbar flex min-w-0 items-center gap-0.5 overflow-x-auto ${className}`}>
       <StatusChip onClick={() => onNavigate('signal')} title={t('Signal')}>
         <ISignal size={14} className={tone} />
-        <span className="font-semibold text-ink">{sig?.type ?? '—'}</span>
+        <span className="font-semibold text-ink">{sig?.no_sim ? t('No SIM') : sig?.type ?? '—'}</span>
         {rsrp != null && <span className="tnum">{rsrp} dBm</span>}
       </StatusChip>
       {spd && (

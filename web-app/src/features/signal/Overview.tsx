@@ -248,7 +248,9 @@ export default function Overview() {
         <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
           <div>
             <p className="text-[10px] font-semibold uppercase tracking-wider text-ink3">{t('Connection')}</p>
-            <p className="mt-0.5 text-sm font-bold text-ink">{data.type ?? '\u2014'}</p>
+            <p className={`mt-0.5 text-sm font-bold ${data.no_sim ? 'text-warn' : 'text-ink'}`}>
+              {data.no_sim ? t('No SIM') : data.type ?? '\u2014'}
+            </p>
           </div>
           <div>
             <p className="text-[10px] font-semibold uppercase tracking-wider text-ink3">{t('Provider')}</p>

@@ -103,6 +103,10 @@ struct toolbox_info {
   /* Further appended: transmit power percent and dBm per band (0 = unknown). */
   int has_wifi_power;
   unsigned long long wifi_pct_2g, wifi_pct_5g, wifi_dbm_2g, wifi_dbm_5g;
+  /* Further appended: the serving network's name ("T-Mobile"); empty when unknown. */
+  char carrier[49];
+  /* Further appended: 1 a SIM is in, 0 none (figures are then `-`), -1 unknown. */
+  int sim;
 };
 struct group_row { int index, selectable, members, now; char type[16], name[193], now_name[193]; };
 /* state: -1 no answer, 0 loading, 1 ready, 2 Clash not running. */
@@ -337,10 +341,10 @@ static int parse_wifi_blocked(char **f, int n, struct wifi_blocked *b) {
 static void parse_toolbox(char **f, int n, struct toolbox_info *h) {
   if (n < 32) return;
   h->has = 1;
-  h->rssi = strtoll(f[1], NULL, 10);
-  h->rsrp = strtoll(f[2], NULL, 10);
-  h->rsrq = strtoll(f[3], NULL, 10);
-  h->sinr = strtoll(f[4], NULL, 10);
+  h->rssi = figure_field(f[1]);
+  h->rsrp = figure_field(f[2]);
+  h->rsrq = figure_field(f[3]);
+  h->sinr = figure_field(f[4]);
   COPY(h->radio, f[5]);
   COPY(h->band, f[6]);
   COPY(h->net_select, f[7]);
@@ -381,6 +385,8 @@ static void parse_toolbox(char **f, int n, struct toolbox_info *h) {
     h->wifi_dbm_2g = u64_field(f[37]);
     h->wifi_dbm_5g = u64_field(f[38]);
   }
+  if (n >= 40 && strcmp(f[39], "-")) copy_name(h->carrier, sizeof(h->carrier), f[39]);
+  h->sim = n >= 41 && strcmp(f[40], "-") ? atoi(f[40]) != 0 : -1;
 }
 /* Reply to "groups <offset>": G state generation total offset, g rows. */
 static int parse_groups(char *buf, struct groups_view *out) {

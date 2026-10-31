@@ -132,6 +132,19 @@ fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+/// Seconds for intervals, from CLOCK_MONOTONIC. This firmware's wall clock steps by hours
+/// (carrier NITZ local time against its own SNTP at UTC+8), and after a backward step every
+/// `now() - last` check stayed 0, freezing the panel's figures until the clock caught up.
+/// A day is added so that 0 still reads as long ago right after boot.
+fn mono() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid, writable timespec for the call.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    ts.tv_sec as u64 + 86_400
+}
 fn owner() -> Option<i32> {
     let pid = fs::read_to_string(format!("{DIR}/owner"))
         .ok()?
@@ -361,7 +374,7 @@ fn store_wireguard(data: &Value, pass: u64) {
     }
     p.wireguard = head;
     p.devices = devices;
-    p.wireguard_at = now();
+    p.wireguard_at = mono();
     p.wireguard_data = data.clone();
 }
 /// Waits for the WireGuard lock.
@@ -376,7 +389,7 @@ fn refresh_wireguard() {
 /// saved revision and state (read without the lock) and a current stamp.
 fn bridge_wireguard() {
     let at = PARTS.lock().unwrap().wireguard_at;
-    if at == 0 || now().saturating_sub(at) < 6 {
+    if at == 0 || mono().saturating_sub(at) < 6 {
         return;
     }
     let Ok(summary) = wireguard::summary() else {
@@ -427,7 +440,7 @@ fn refresh_system(state: &AppState) {
         let mut parts = PARTS.lock().unwrap();
         parts.toolbox.clear();
         parts.wifi.clear();
-    } else if now().saturating_sub(TOOLBOX_AT.load(Ordering::Relaxed)) >= TOOLBOX_EVERY {
+    } else if mono().saturating_sub(TOOLBOX_AT.load(Ordering::Relaxed)) >= TOOLBOX_EVERY {
         refresh_toolbox(state, false);
     }
 }
@@ -484,7 +497,7 @@ fn uci_u64(map: &std::collections::HashMap<String, String>, key: &str) -> u64 {
         .unwrap_or(0)
 }
 fn refresh_toolbox(state: &AppState, force: bool) {
-    TOOLBOX_AT.store(now(), Ordering::Relaxed);
+    TOOLBOX_AT.store(mono(), Ordering::Relaxed);
     let speed = state.speed.sample();
     let memory = system::read_meminfo();
     let cpu = state.cpu.sample();
@@ -512,9 +525,9 @@ fn refresh_toolbox(state: &AppState, force: bool) {
         .count();
     let ttl = {
         let mut cached = TTL.lock().unwrap();
-        if force || cached.0 == 0 || now().saturating_sub(cached.0) >= TTL_EVERY {
+        if force || cached.0 == 0 || mono().saturating_sub(cached.0) >= TTL_EVERY {
             let (_, v) = crate::server::ttl_status();
-            *cached = (now(), v["data"]["ttl_value"].as_u64().unwrap_or(0));
+            *cached = (mono(), v["data"]["ttl_value"].as_u64().unwrap_or(0));
         }
         cached.1
     };
@@ -525,10 +538,14 @@ fn refresh_toolbox(state: &AppState, force: bool) {
     let top = state.proc_tracker.sample();
     let text = |k: &str| reading(sig, k);
     let either = |nr: &str, lte: &str| nr_or_lte(sig, nr, lte);
+    // No figures without a SIM: the modem's emergency-camping level is not a signal.
+    let no_sim = sig["sim_absent"] == true;
     let num = |nr: &str, lte: &str| {
-        either(nr, lte)
-            .and_then(|s| s.trim().parse::<f64>().ok())
-            .map_or(0, |n| n.round() as i64)
+        (!no_sim).then(|| {
+            either(nr, lte)
+                .and_then(|s| s.trim().parse::<f64>().ok())
+                .map_or(0, |n| n.round() as i64)
+        })
     };
     let word = |s: Option<String>| s.unwrap_or_else(|| "-".into());
     let limit = chg_d["charge_limit"].as_u64().unwrap_or(100);
@@ -574,6 +591,11 @@ fn refresh_toolbox(state: &AppState, force: bool) {
         "wifi_pct_5g": uci_u64(&wireless, "wifi1.txpowerpercent"),
         "wifi_dbm_2g": uci_u64(&wireless, "wifi0.txpower"),
         "wifi_dbm_5g": uci_u64(&wireless, "wifi1.txpower"),
+        // The serving network's name for the DevUI top bar (`T-Mobile`); `-` without one.
+        "carrier": text("network_provider")
+            .or_else(|| text("network_provider_fullname"))
+            .filter(|_| !no_sim),
+        "sim": sig["sim_absent"].as_bool().map(|absent| !absent),
     }));
     let wifi = {
         let clients = CLIENTS.lock().unwrap();
@@ -634,7 +656,7 @@ fn store_core(pass: u64, core: String) {
     }
 }
 fn proxies_wanted() -> bool {
-    now().saturating_sub(PROXY_INTEREST.load(Ordering::Relaxed)) < 10
+    mono().saturating_sub(PROXY_INTEREST.load(Ordering::Relaxed)) < 10
 }
 /// Asks the core for its groups (up to its 10 s controller timeout).
 fn refresh_proxies() {
@@ -650,7 +672,7 @@ fn refresh_proxies() {
 fn store_proxies(pass: u64, cache: Cache) {
     let mut p = PROXIES.lock().unwrap();
     if newest(&mut p.pass, pass) {
-        p.at = now();
+        p.at = mono();
         p.cache = cache;
     }
 }
@@ -1048,11 +1070,11 @@ fn power(action: Power) -> String {
     "OK\n".into()
 }
 fn request(line: &str) -> String {
-    INTEREST.store(now(), Ordering::Relaxed);
+    INTEREST.store(mono(), Ordering::Relaxed);
     match ipc::parse(line) {
         Ok(Request::Status) => status(),
         Ok(Request::Groups { offset }) => {
-            PROXY_INTEREST.store(now(), Ordering::Relaxed);
+            PROXY_INTEREST.store(mono(), Ordering::Relaxed);
             ipc::groups_page(&PROXIES.lock().unwrap().cache, offset)
         }
         Ok(Request::Nodes {
@@ -1060,7 +1082,7 @@ fn request(line: &str) -> String {
             group,
             offset,
         }) => {
-            PROXY_INTEREST.store(now(), Ordering::Relaxed);
+            PROXY_INTEREST.store(mono(), Ordering::Relaxed);
             ipc::nodes_page(&PROXIES.lock().unwrap().cache, generation, group, offset)
                 .unwrap_or_else(|e| format!("ERR {e}\n"))
         }
@@ -1092,18 +1114,18 @@ pub fn start(state: Arc<AppState>) {
     crate::screen_shortcut::start();
     crate::screen_touch::start();
     open_after_boot();
-    let polled = || now().saturating_sub(INTEREST.load(Ordering::Relaxed)) < 10;
+    let polled = || mono().saturating_sub(INTEREST.load(Ordering::Relaxed)) < 10;
     let clients_state = state.clone();
     // WireGuard and devices: `wireguard::get` waits while a switch holds its lock.
     std::thread::spawn(move || {
         let mut refreshed = 0;
         loop {
             if polled() {
-                if now().saturating_sub(refreshed) >= 10 {
+                if mono().saturating_sub(refreshed) >= 10 {
                     let (_, v) = network_ext::network_clients(&clients_state);
                     *CLIENTS.lock().unwrap() =
                         v["data"]["clients"].as_array().cloned().unwrap_or_default();
-                    refreshed = now();
+                    refreshed = mono();
                 }
                 refresh_wireguard();
             }
@@ -1121,7 +1143,7 @@ pub fn start(state: Arc<AppState>) {
     });
     // Clash groups, only while the panel shows the node pages.
     std::thread::spawn(|| loop {
-        if proxies_wanted() && now().saturating_sub(PROXIES.lock().unwrap().at) >= 3 {
+        if proxies_wanted() && mono().saturating_sub(PROXIES.lock().unwrap().at) >= 3 {
             refresh_proxies();
         }
         std::thread::sleep(Duration::from_secs(1));

@@ -406,8 +406,24 @@ pub fn dashboard(state: &AppState) -> (u16, Value) {
     (200, json!({"ok": true, "data": result}))
 }
 
+/// The radio reading, with `sim_absent` added when the SIM state could be read. Without a
+/// SIM the modem still camps on a cell for emergency calls and reports its level, which
+/// is not a usable signal.
 pub fn read_radio(source: &Observed<Value>) -> Sample<Value> {
     source.read(SIGNAL_TTL, || {
-        ubus::call("zte_nwinfo_api", "nwinfo_get_netinfo", Some("{}"))
+        let mut v = ubus::call("zte_nwinfo_api", "nwinfo_get_netinfo", Some("{}"))?;
+        if let (Some(o), Ok(sim)) = (
+            v.as_object_mut(),
+            ubus::call("zwrt_zte_mdm.api", "get_sim_info", Some("{}")),
+        ) {
+            o.insert("sim_absent".into(), json!(sim_absent(&sim)));
+        }
+        Ok(v)
     })
+}
+/// `sim undetected` / `modem_sim_undetected`: the tray is empty.
+pub fn sim_absent(sim: &Value) -> bool {
+    ["sim_states", "modem_main_state"]
+        .iter()
+        .any(|k| sim[*k].as_str().is_some_and(|s| s.contains("undetected")))
 }

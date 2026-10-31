@@ -152,6 +152,7 @@ static int usb_draft = -1;
 /* USB page: the mode an applied switch moves to (-1: none), until the H record shows it or
  * the wait runs out. The agent replies before the switch runs, so the job ends first. */
 static int usb_target = -1;
+/* Monotonic seconds: the wall clock can step by hours on this firmware. */
 static unsigned long long usb_target_until;
 #define USB_SWITCH_WAIT_S 30
 /* USB page: a custom TTL being dialed with -/+ but not applied yet (-1: none, use presets). */
@@ -345,7 +346,7 @@ static int parse_snapshot(char *buf, struct snapshot *out) {
       if(imei_seen++ || !parse_imei(line,&s.imei))imei_bad=1;
     }
     else if (line[0] && strchr("ABKkUMXxEQqRHGTthLlwIi", line[0]) && line[1] == '\t') {
-      char *f[48]; /* H has 39 fields */
+      char *f[48]; /* H has 41 fields */
       int n = split_tabs(line, f, 48);
       switch (f[0][0]) {
       case 'A': parse_admin(f, n, &s.admin); break;

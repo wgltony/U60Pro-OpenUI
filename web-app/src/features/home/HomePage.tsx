@@ -186,7 +186,11 @@ export default function HomePage({ onNavigate }: { onNavigate?: (g: 'uplink' | '
           label={t('Signal strength')}
           foot={
             <div className="flex flex-wrap items-center gap-1.5">
-              <span className={`font-semibold ${qualityText(quality)}`}>{qualityLabel(quality)}</span>
+              {signal?.no_sim ? (
+                <span className="font-semibold text-warn">{t('No SIM')}</span>
+              ) : (
+                <span className={`font-semibold ${qualityText(quality)}`}>{qualityLabel(quality)}</span>
+              )}
               {primary?.band && <Chip tone={primary.band.startsWith('n') ? 'nr' : 'lte'}>{primary.band}</Chip>}
               {primary?.pci != null && primary.pci > 0 && <span className="tnum">PCI {primary.pci}</span>}
             </div>

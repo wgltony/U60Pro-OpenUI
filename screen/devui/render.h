@@ -180,7 +180,7 @@ static int usb_mode_index(const char *mode) {
 /* An applied USB switch the H record does not show yet. */
 static int usb_switching(void) {
   if(usb_target<0)return 0;
-  if(usb_mode_index(data.toolbox.usb_mode)==usb_target||(unsigned long long)time(NULL)>=usb_target_until){usb_target=-1;return 0;}
+  if(usb_mode_index(data.toolbox.usb_mode)==usb_target||(unsigned long long)(monotonic_ms()/1000)>=usb_target_until){usb_target=-1;return 0;}
   return 1;
 }
 /* Overview's USB LAN switch; no record (older agent) or a stale one is a label, not OFF. */
@@ -290,6 +290,7 @@ static void tile_state(int p, char *buf, size_t n, const char **cls) {
     else snprintf(buf,n,L("%llu online","%llu 台在线"),h->wifi_clients);
     return;
   case SIGNAL_PAGE:
+    if(h->has&&h->sim==0){*cls="warn";snprintf(buf,n,"%s",L("No SIM","无 SIM 卡"));return;}
     if(!h->has||h->rsrp==NO_FIGURE){snprintf(buf,n,"--");return;}
     *cls=h->rsrp>-95?"good":h->rsrp>-110?"warn":"bad";snprintf(buf,n,"%lld dBm",h->rsrp); return;
   case USB_PAGE:
@@ -351,10 +352,15 @@ static void build_html(void) {
     const struct toolbox_info *tb=&data.toolbox;
     add("<div class=\"box card\" style=\"left:10px;top:64px;width:300px;height:84px\"></div>");
     battery_badge(24,78,0);
-    if(tb->has&&tb->rsrp!=NO_FIGURE) {
-      snprintf(tmp,sizeof(tmp),"%s %lld dBm",tb->radio[0]?tb->radio:"5G",tb->rsrp);
-      snprintf(rx,sizeof(rx),"head right %s",tb->rsrp>-95?"good":tb->rsrp>-110?"warn":"bad");
-      sbox(130,76,166,20,rx,tmp);
+    if(tb->has&&(tb->sim==0||tb->rsrp!=NO_FIGURE)) {
+      /* The carrier and four bars; the Signal page keeps the figures. Without a carrier
+       * name (older agent, no service) the radio type stands in; without a SIM, unlit. */
+      long long r=tb->sim==0?NO_FIGURE:tb->rsrp;
+      int lit=r==NO_FIGURE?0:r>=-85?4:r>=-95?3:r>=-105?2:r>=-115?1:0;
+      const char *tone=tone_color(r>-95?"good":r>-110?"warn":"bad");
+      if(tb->sim==0)sbox(130,76,140,20,"head right warn",L("No SIM","无 SIM 卡"));
+      else sbox(130,76,140,20,"head right",tb->carrier[0]?tb->carrier:tb->radio[0]?tb->radio:"5G");
+      for(int i=0;i<4;i++)rect(277+i*5,79+(3-i)*3,3,6+i*3,"",i<lit?tone:"#323a47");
     } else if(data.uptime) {
       if(data.uptime>=86400)snprintf(tmp,sizeof(tmp),L("Up %llud %lluh","已运行 %llu 天 %llu 时"),data.uptime/86400,data.uptime/3600%24);
       else snprintf(tmp,sizeof(tmp),L("Up %lluh %llum","已运行 %llu 时 %llu 分"),data.uptime/3600,data.uptime/60%60);

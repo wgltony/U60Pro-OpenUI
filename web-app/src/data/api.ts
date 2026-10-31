@@ -330,7 +330,7 @@ export function mapSignal(d: Record<string, unknown>): SignalInfo {
   const is4g = netType === '4G' || netType === 'LTE' || netType === 'NSA' || netType === 'ENDC'
   const rawCellId = is4g && d.cell_id ? d.cell_id : d.nr5g_cell_id || d.cell_id
 
-  return {
+  const info: SignalInfo = {
     type: netType,
     carrier: (d.network_provider_fullname || d.network_provider) as string | undefined,
     signal_bars: d.signalbar ? parseInt(d.signalbar as string) : undefined,
@@ -344,6 +344,21 @@ export function mapSignal(d: Record<string, unknown>): SignalInfo {
     raw_nr_band_lock: `SA=${String(d.nr5g_sa_band_lock ?? '')} NSA=${String(d.nr5g_nsa_band_lock ?? '')}`,
     rsrp: parseNum(d.lte_rsrp) ?? parseNum(d.nr5g_rsrp),
     band: pccBandStr,
+  }
+  // Without a SIM the modem still camps on a cell for emergency calls; that level is not
+  // a usable signal, so none is shown.
+  if (d.sim_absent !== true) return info
+  return {
+    ...info,
+    type: undefined,
+    carrier: undefined,
+    signal_bars: 0,
+    cell_id: undefined,
+    lte_carriers: [],
+    nr_carriers: [],
+    rsrp: undefined,
+    band: undefined,
+    no_sim: true,
   }
 }
 

@@ -29,6 +29,8 @@ export interface SignalInfo {
   raw_nr_band_lock?: string
   rsrp?: number
   band?: string
+  /** The agent read an empty SIM tray: no carriers or level are shown. */
+  no_sim?: boolean
 }
 
 export interface BatteryInfo {
