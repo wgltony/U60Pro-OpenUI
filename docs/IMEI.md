@@ -14,7 +14,7 @@ Targets must be 15 ASCII digits, nonzero and Luhn-valid. Original data must also
 
 ## Opt-in installation
 
-The published v1.2.2 assets do not contain this feature. The development source has an explicit optional-helper path:
+Since v1.2.4 the released agent and panels include the controller, but release assets never include the native helpers; without them the page reports the backend as unavailable. Helpers come only from an explicit source build:
 
 ```sh
 # Review only first; run from this feature's source checkout.
