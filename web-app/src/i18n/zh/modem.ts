@@ -25,6 +25,8 @@ export default {
   'No manual APN profiles': '暂无手动 APN 配置',
   'Add the exact settings supplied by your carrier.': '请按运营商提供的参数准确填写。',
   'Active': '活动',
+  'Manual mode choice': '手动模式所选',
+  'Not connected': '未连接',
   'Activate': '激活',
   'Switch to another APN before deleting this profile': '请先切换到其他 APN，再删除此配置',
   'Add APN profile': '添加 APN 配置',

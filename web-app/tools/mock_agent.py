@@ -343,7 +343,7 @@ STATE = {
         "dhcp_start": "192.168.0.2", "dhcp_end": "192.168.0.253",
         "lease_seconds": 86400,
     },
-    "apn_mode": {"apn_mode": 1},
+    "apn_mode": {"apn_mode": 1, "in_use": {"profilename": "Telstra", "wanapn": "telstra.internet", "profileId": "manu1"}},
 }
 
 

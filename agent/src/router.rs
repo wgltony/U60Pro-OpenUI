@@ -180,7 +180,24 @@ pub fn router_lan_confirm(state: &AppState, body: &[u8]) -> (u16, Value) {
 
 pub fn router_apn_mode_get(_state: &AppState) -> (u16, Value) {
     match ubus::call("zwrt_apn_object", "get_apn_mode", Some("{}")) {
-        Ok(data) => (200, json!({"ok": true, "data": data})),
+        Ok(mut data) => {
+            // The manual list's isEnable is only the Manual-mode choice; the
+            // profile the modem actually dials is bound to a connection cid.
+            let slots: Vec<Value> = (0..=2)
+                .filter_map(|cid| {
+                    ubus::call(
+                        "zwrt_apn_object",
+                        "get_apn_at_cid",
+                        Some(&json!({ "cid": cid }).to_string()),
+                    )
+                    .ok()
+                })
+                .collect();
+            if let Some(obj) = data.as_object_mut() {
+                obj.insert("in_use".into(), apn_in_use(&slots));
+            }
+            (200, json!({"ok": true, "data": data}))
+        }
         Err(e) => (503, json!({"ok": false, "error": e})),
     }
 }
@@ -402,6 +419,25 @@ impl ApnProfileId {
     }
 }
 
+/// The first valid connection slot with an APN, as {profilename, wanapn, profileId}.
+fn apn_in_use(slots: &[Value]) -> Value {
+    slots
+        .iter()
+        .find(|slot| {
+            slot.get("isValid")
+                .is_some_and(|v| v.as_u64() == Some(1) || v.as_str() == Some("1"))
+                && slot
+                    .get("wanapn")
+                    .and_then(Value::as_str)
+                    .is_some_and(|apn| !apn.is_empty())
+        })
+        .map(|slot| {
+            let text = |key: &str| slot.get(key).and_then(Value::as_str).unwrap_or("");
+            json!({"profilename": text("profilename"), "wanapn": text("wanapn"), "profileId": text("profileId")})
+        })
+        .unwrap_or(Value::Null)
+}
+
 fn apn_profile_is_active(data: &Value, profile_id: &str) -> bool {
     data.get("apnListArray")
         .and_then(Value::as_array)
@@ -472,6 +508,19 @@ mod tests {
             ..profile
         };
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn apn_in_use_is_the_first_valid_dialing_slot() {
+        let empty = json!({"profilename": "", "wanapn": "", "profileId": "", "isValid": 0});
+        let auto = json!({"profilename": "Carrier", "wanapn": "carrier.apn", "profileId": "auto00101", "isEnable": false, "isValid": 1});
+        assert_eq!(
+            apn_in_use(&[empty.clone(), auto, empty.clone()]),
+            json!({"profilename": "Carrier", "wanapn": "carrier.apn", "profileId": "auto00101"})
+        );
+        let blank_valid = json!({"wanapn": "", "isValid": 1});
+        assert_eq!(apn_in_use(&[empty, blank_valid]), Value::Null);
+        assert_eq!(apn_in_use(&[]), Value::Null);
     }
 
     #[test]

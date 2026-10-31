@@ -11,26 +11,21 @@ const AUTH_LABELS: Record<number, string> = { 0: N_('None'), 1: 'PAP', 2: 'CHAP'
 
 // ── APN mode ──────────────────────────────────────────────────────────────────
 
-function ApnMode() {
-  const [mode, setMode] = useState<number | null>(null)
-  const [busy, setBusy] = useState(false)
+interface InUse { profilename: string; wanapn: string; profileId: string }
 
-  useEffect(() => {
-    api.apnModeGet()
-      .then((d) => setMode(Number(d?.apn_mode) || 0))
-      .catch(() => {})
-  }, [])
+function ApnMode({ mode, inUse, onChanged }: { mode: number | null; inUse: InUse | null; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false)
 
   async function apply(newMode: number) {
     setBusy(true)
     try {
       await api.apnModeSet({ apn_mode: newMode })
-      setMode(newMode)
       toast(newMode === 0 ? t('APN set to automatic') : t('APN set to manual'))
     } catch (e) {
       toastError(e)
     } finally {
       setBusy(false)
+      onChanged()
     }
   }
 
@@ -59,13 +54,23 @@ function ApnMode() {
           {t('Manual')}
         </button>
       </div>
+      <p className="tnum mt-3 text-[12px] text-ink2">
+        {t('In use')}:{' '}
+        {inUse ? (
+          <span className="font-semibold text-ink">
+            {inUse.profilename || inUse.wanapn} ({inUse.wanapn})
+          </span>
+        ) : (
+          t('Not connected')
+        )}
+      </p>
     </Card>
   )
 }
 
 // ── Profiles ──────────────────────────────────────────────────────────────────
 
-function Profiles() {
+function Profiles({ mode, onChanged }: { mode: number | null; onChanged: () => void }) {
   const [profiles, setProfiles] = useState<ApnProfile[]>([])
   const [loading, setLoading] = useState(true)
   const [adding, setAdding] = useState(false)
@@ -124,6 +129,7 @@ function Profiles() {
       await api.apnActivate({ profileId: id })
       toast(t('APN activated — connection may briefly drop'))
       fetchProfiles()
+      onChanged()
     } catch (e) {
       toastError(e)
     }
@@ -154,13 +160,14 @@ function Profiles() {
               <div
                 key={p.profileId}
                 className={`flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2 ${
-                  p.isEnable ? 'border-accent/30 bg-accent/4' : 'border-line/8'
+                  p.isEnable && mode === 1 ? 'border-accent/30 bg-accent/4' : 'border-line/8'
                 }`}
               >
                 <div className="min-w-0">
                   <p className="flex items-center gap-2 text-[13px] font-semibold text-ink">
                     <span className="truncate">{p.profilename}</span>
-                    {p.isEnable && <Chip tone="ok">{t('Active')}</Chip>}
+                    {/* isEnable is only the Manual-mode choice; in Automatic mode the SIM's APN is used. */}
+                    {p.isEnable && (mode === 1 ? <Chip tone="ok">{t('Active')}</Chip> : <Chip>{t('Manual mode choice')}</Chip>)}
                   </p>
                   <p className="tnum mt-0.5 truncate text-[12px] text-ink2">
                     {p.wanapn} — {PDP_LABELS[p.pdpType] ?? '?'} / {t(AUTH_LABELS[p.pppAuthMode] ?? '?')}
@@ -168,7 +175,7 @@ function Profiles() {
                   </p>
                 </div>
                 <div className="flex shrink-0 gap-1.5">
-                  {!p.isEnable && (
+                  {!(p.isEnable && mode === 1) && (
                     <Button size="sm" variant="primary" onClick={() => activateProfile(p.profileId)}>
                       {t('Activate')}
                     </Button>
@@ -234,10 +241,27 @@ function Profiles() {
 }
 
 export default function ApnTab() {
+  const [mode, setMode] = useState<number | null>(null)
+  const [inUse, setInUse] = useState<InUse | null>(null)
+
+  const fetchMode = useCallback(() => {
+    api.apnModeGet()
+      .then((d) => {
+        setMode(Number(d?.apn_mode) || 0)
+        const u = d?.in_use as InUse | null | undefined
+        setInUse(u && typeof u.wanapn === 'string' && u.wanapn ? u : null)
+      })
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    fetchMode()
+  }, [fetchMode])
+
   return (
     <div className="space-y-3">
-      <ApnMode />
-      <Profiles />
+      <ApnMode mode={mode} inUse={inUse} onChanged={fetchMode} />
+      <Profiles mode={mode} onChanged={fetchMode} />
     </div>
   )
 }
