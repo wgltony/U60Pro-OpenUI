@@ -655,21 +655,12 @@ impl Controller {
             Action::Check { .. } => {
                 s.preview = None;
                 let current = self.inspect_bound(s)?;
-                if let Some(j) = &s.journal {
-                    // A changed boot is observed, not caused. CHECK never mutates.
-                    let plan = s.plan.as_ref().ok_or("backup_invalid")?;
-                    if !j.uncertain
-                        && !s.recovered
-                        && j.stage == Stage::RebootEnable
-                        && current.records == plan.original
-                        && current.config == plan.candidate
-                    {
-                        s.snapshot = Some(current);
-                        s.operation_phase();
-                    } else {
-                        s.snapshot = Some(current);
-                        s.operation_phase();
-                    }
+                if s.journal.is_some() {
+                    // A changed boot is observed, not caused. CHECK never mutates;
+                    // operation_phase() derives the phase from the new snapshot.
+                    s.plan.as_ref().ok_or("backup_invalid")?;
+                    s.snapshot = Some(current);
+                    s.operation_phase();
                 } else {
                     if config_flag(&current.config)? != 0 {
                         return Err("config_already_enabled");
@@ -983,7 +974,7 @@ pub fn screen_records() -> String {
 pub fn parse_screen(line: &str) -> std::result::Result<Action, &'static str> {
     if line.len() > 192
         || line.is_empty()
-        || line.bytes().any(|b| b < 32 || b > 126)
+        || line.bytes().any(|b| !(32..=126).contains(&b))
         || line.contains("  ")
         || line.ends_with(' ')
         || line.starts_with(' ')
