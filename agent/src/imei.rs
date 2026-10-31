@@ -161,12 +161,9 @@ impl Action {
                 }
             }
             Self::Reboot {
-                acknowledge_reboot, ..
-            } => {
-                if !*acknowledge_reboot {
-                    return Err("confirmation_required");
-                }
-            }
+                acknowledge_reboot: false,
+                ..
+            } => return Err("confirmation_required"),
             _ => {}
         }
         Ok(())

@@ -251,8 +251,18 @@ impl Store {
         }
         let split = j.count * 128;
         let p = Plan {
-            original: nv[..split].chunks_exact(128).map(|s| s.to_vec()).collect(),
-            target: nv[split..].chunks_exact(128).map(|s| s.to_vec()).collect(),
+            original: nv[..split]
+                .as_chunks::<128>()
+                .0
+                .iter()
+                .map(|s| s.to_vec())
+                .collect(),
+            target: nv[split..]
+                .as_chunks::<128>()
+                .0
+                .iter()
+                .map(|s| s.to_vec())
+                .collect(),
             config: cfg[..CONFIG_SIZE].to_vec(),
             candidate: cfg[CONFIG_SIZE..].to_vec(),
         };

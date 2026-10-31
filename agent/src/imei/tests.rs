@@ -148,7 +148,12 @@ impl Adapter for Fake {
                 } else {
                     &d[..split]
                 };
-                s.records = selected.chunks_exact(128).map(|b| b.to_vec()).collect();
+                s.records = selected
+                    .as_chunks::<128>()
+                    .0
+                    .iter()
+                    .map(|b| b.to_vec())
+                    .collect();
                 s.observed = s.records.iter().map(|r| decode(r).unwrap()).collect();
             }
         }
