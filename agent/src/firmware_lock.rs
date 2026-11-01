@@ -279,8 +279,10 @@ pub fn start() {
             state.error = error;
         }
         std::thread::spawn(|| {
-            for n in 0.. {
+            let mut n: u64 = 0;
+            loop {
                 tick(n);
+                n = n.wrapping_add(1);
                 std::thread::sleep(Duration::from_secs(1));
             }
         });
