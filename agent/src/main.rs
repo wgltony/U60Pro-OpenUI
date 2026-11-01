@@ -19,6 +19,7 @@ mod device_ext;
 mod egress;
 mod esim;
 mod event_bus;
+mod firmware_lock;
 mod handlers;
 mod imei;
 mod lan;
@@ -110,6 +111,7 @@ fn main() {
     clash_cfopt::start();
     wifi_uplink::start();
     admin_services::start();
+    firmware_lock::start();
     screen::start(state.clone());
 
     usb::remember_boot_composition();

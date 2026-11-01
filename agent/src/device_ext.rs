@@ -51,7 +51,9 @@ pub fn device_battery_detail(_state: &AppState) -> (u16, Value) {
     let read_i64 = |name: &str| -> Option<i64> { read_sysfs(name)?.parse().ok() };
 
     let capacity = read_i64("capacity");
-    let status = read_sysfs("status");
+    let status = read_sysfs("status").map(|s| {
+        crate::system::effective_battery_status(s, crate::charge_policy::charging_stopped())
+    });
     let voltage_uv = read_i64("voltage_now");
     let voltage_max_uv = read_i64("voltage_max");
     let voltage_ocv_uv = read_i64("voltage_ocv");
@@ -169,13 +171,9 @@ pub fn charge_control_get(state: &AppState) -> (u16, Value) {
         read_sysfs("/sys/class/power_supply/battery/capacity").and_then(|value| value.parse().ok());
 
     // Inverted firmware semantics: direct_power_supply_mode "enable" = charging STOPPED
-    let charging_stopped = ubus::call("zwrt_bsp.charger", "list", Some("{}"))
-        .ok()
-        .and_then(|v| {
-            v["direct_power_supply_mode"]
-                .as_str()
-                .map(|s| s == "enable")
-        });
+    let charging_stopped = crate::charge_policy::stopped_state().ok();
+    let battery_status =
+        battery_status.map(|s| crate::system::effective_battery_status(s, charging_stopped));
     let battery_available = capacity.is_some() || battery_status.is_some();
     let charger_available = charging_stopped.is_some();
 

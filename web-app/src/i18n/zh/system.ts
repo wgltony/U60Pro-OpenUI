@@ -237,4 +237,20 @@ export default {
   'Relay state changes, Tailscale state and actions, Wi-Fi blocks and agent messages. Times are UTC.': '无线中继状态变化、Tailscale 状态与操作、Wi-Fi 拉黑以及 Agent 消息。时间为 UTC。',
   'When the hotspot band shared with the relay is paused and given back. Times are UTC.': '与中继同频段的热点何时被暂停、何时恢复。时间为 UTC。',
   'Kept on the router in two files of up to 512 KiB each; the newest 400 lines are shown.': '保存在路由器上的两个文件中（每个最多 512 KiB），此处显示最新 400 行。',
+
+  // Firmware update lock
+  'Firmware update lock': '固件升级锁',
+  'Stops ZTE firmware updates from the stock web page, the ZTE app, carrier management and automatic checks. Turn it off before updating on purpose.': '阻止通过原厂网页、中兴 App、运营商远程管理和自动检查升级中兴固件。确实要升级时请先关闭。',
+  'Turn off the firmware update lock?': '关闭固件升级锁？',
+  'The stock web page, the ZTE app and carrier management can then install firmware again. An update can remove the boot hooks and SSH keys this dashboard depends on.': '关闭后，原厂网页、中兴 App 和运营商远程管理可以再次安装固件。升级可能删除本面板依赖的开机启动项和 SSH 密钥。',
+  'Firmware updates are locked.': '已锁定固件升级。',
+  'Firmware update lock is off.': '固件升级锁已关闭。',
+  'Failed to change the firmware update lock': '更改固件升级锁失败',
+  'Update servers': '升级服务器',
+  'Blocked': '已屏蔽',
+  'Not blocked': '未屏蔽',
+  'Automatic updates': '自动升级',
+  'Packages removed': '已删除的升级包',
+  '{count} (last {time})': '{count} 个（最近 {time}）',
+  'A firmware install is already running. The lock never interrupts one; keep the device powered until it finishes.': '已有固件正在安装。升级锁不会中断安装，请保持供电直到完成。',
 } satisfies Dict

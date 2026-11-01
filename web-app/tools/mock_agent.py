@@ -81,7 +81,8 @@ def dashboard_batch():
         },
         "battery": {
             "capacity": 78,
-            "status": "Charging",
+            # Like agent/src/system.rs: a held charger is "Not charging", not "Charging".
+            "status": STATE["charge_control"]["battery_status"],
             "voltage_uv": 4_210_000,
             "temperature": 330,  # tenths of a degree
             "current_ua": 1_450_000,
@@ -232,7 +233,7 @@ def usb_defaults():
 def battery_detail():
     return {
         "available": True,
-        "capacity": 78, "status": "Charging",
+        "capacity": 78, "status": STATE["charge_control"]["battery_status"],
         "voltage_mv": 4210, "voltage_max_mv": 4500, "voltage_ocv_mv": 4190,
         "current_ma": 1450, "power_mw": 6105, "temperature_c": 33.0,
         "charge_type": "Fast", "health": "Good", "cycle_count": 214,
@@ -1101,6 +1102,22 @@ def admin_services_set(body):
     return admin_services()
 
 
+FIRMWARE_LOCK = {"revision": 0, "enabled": False, "servers_blocked": False, "auto_update_off": True,
+                 "upgrade_state": "fota_idle", "installing": False, "blocked": 0, "last_blocked": None, "error": None}
+
+
+def firmware_lock_set(body):
+    """Mirrors agent/src/firmware_lock.rs::put."""
+    if set(body) != {"revision", "enabled"} or not isinstance(body["enabled"], bool) \
+            or not isinstance(body["revision"], int) or isinstance(body["revision"], bool):
+        raise ValueError("Invalid firmware lock request")
+    if body["revision"] != FIRMWARE_LOCK["revision"]:
+        raise ValueError("Firmware lock changed; reload status")
+    FIRMWARE_LOCK.update({"revision": FIRMWARE_LOCK["revision"] + 1, "enabled": body["enabled"],
+                          "servers_blocked": body["enabled"]})
+    return FIRMWARE_LOCK
+
+
 def usb_lan():
     on = USB_LAN["enabled"]
     return {"enabled": on, "active": on, "linked": on, "interface": "usb0" if on else None, "mode": "ecm" if on else None}
@@ -1115,6 +1132,7 @@ def usb_lan_set(body):
 
 ROUTES_PUT = {
     "/api/admin/services": admin_services_set,
+    "/api/firmware/lock": firmware_lock_set,
     "/api/usb/lan": usb_lan_set,
     "/api/wifi/blocked": blocklist_set,
     "/api/tailscale": tailscale_set,
@@ -1341,6 +1359,7 @@ def imei_unavailable():
 ROUTES_GET = {
     "/api/imei": imei_unavailable,
     "/api/admin/services": admin_services,
+    "/api/firmware/lock": lambda: FIRMWARE_LOCK,
     "/api/usb/lan": usb_lan,
     "/api/tailscale": tailscale_status,
     "/api/proxy": proxy_status,

@@ -229,6 +229,16 @@ pub struct BatteryInfo {
     pub temperature: i64,
 }
 
+/// The kernel says "Charging" whenever a charger is attached, even while the
+/// firmware charge switch (charge limit or manual stop) holds charging off.
+pub fn effective_battery_status(raw: String, stopped: Option<bool>) -> String {
+    if raw == "Charging" && stopped == Some(true) {
+        "Not charging".into()
+    } else {
+        raw
+    }
+}
+
 pub fn read_battery() -> Option<BatteryInfo> {
     let base = "/sys/class/power_supply/battery";
     let read_str = |name: &str| -> String {
@@ -244,7 +254,7 @@ pub fn read_battery() -> Option<BatteryInfo> {
         return None;
     }
     Some(BatteryInfo {
-        status,
+        status: effective_battery_status(status, crate::charge_policy::charging_stopped()),
         capacity: read_i64("capacity"),
         voltage_uv: read_i64("voltage_now"),
         current_ua: read_i64("current_now"),
@@ -904,6 +914,16 @@ fn read_proc_name_rss(pid: u32) -> Option<(String, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_charger_is_not_reported_as_charging() {
+        let status = |raw: &str, stopped| effective_battery_status(raw.into(), stopped);
+        assert_eq!(status("Charging", Some(true)), "Not charging");
+        assert_eq!(status("Charging", Some(false)), "Charging");
+        assert_eq!(status("Charging", None), "Charging");
+        assert_eq!(status("Discharging", Some(true)), "Discharging");
+        assert_eq!(status("Full", Some(true)), "Full");
+    }
 
     /// These payloads are consumed directly by the dashboard, so their key sets
     /// are a contract. Renaming a field here means updating

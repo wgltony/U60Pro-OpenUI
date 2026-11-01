@@ -9,6 +9,7 @@ import { ILogout, IPower, IRefresh, IRestart } from '../../icons'
 import { Button, Toggle } from '../../ui/controls'
 import { confirm, toast, toastError } from '../../ui/feedback'
 import { Card, Row } from '../../ui/primitives'
+import FirmwareLockSection from './FirmwareLockSection'
 import ServiceAccessSection from './ServiceAccessSection'
 
 // ── USB mode + powerbank ──────────────────────────────────────────────────────
@@ -279,6 +280,7 @@ export default function SettingsTab({ onLogout }: { onLogout: () => void }) {
 
       <UsbSection />
       <ServiceAccessSection />
+      <FirmwareLockSection />
 
       <Card title={t('Service controls')}>
         <div className="flex flex-wrap items-center gap-2">

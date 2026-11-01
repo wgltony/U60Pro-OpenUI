@@ -506,7 +506,9 @@ firmware-specific and re-read it on every new build.
 
 ### 6.4 Update, then rebuild
 
-Only after §6.2. Use the stock UI's manual update. Never `abctl --set_active`.
+Only after §6.2. If the dashboard's firmware update lock (System → Settings) is on,
+turn it off first: it blocks the update servers and removes downloaded packages.
+Use the stock UI's manual update. Never `abctl --set_active`.
 
 Post-update recovery sequence (assuming ADB or SSH is available again; if the
 device booted to stock without root, reassess §3 and suffix availability first).

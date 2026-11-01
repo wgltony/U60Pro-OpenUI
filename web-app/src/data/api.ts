@@ -9,6 +9,7 @@ import { get, post, put, req, upload } from './client'
 import type {
   AtSendResult,
   AdminServiceUpdate,
+  FirmwareLock,
   ProxyStatus,
   ProxySwitch,
   TailscaleStatus,
@@ -366,6 +367,7 @@ function mapBattery(d: Record<string, unknown>): BatteryInfo {
   return {
     percent: d.capacity as number,
     charging: d.status === 'Charging',
+    status: typeof d.status === 'string' ? d.status : undefined,
     voltage_mv: d.voltage_uv ? Math.round((d.voltage_uv as number) / 1000) : undefined,
     temperature_c: d.temperature ? (d.temperature as number) / 10 : undefined,
     current_ma: d.current_ua ? Math.round((d.current_ua as number) / 1000) : undefined,
@@ -660,6 +662,8 @@ function mapHome(d: Record<string, unknown>): HomeData {
 export const api = {
   adminServices: () => get('/api/admin/services').then(parseAdminServices),
   adminServiceSet: (body: AdminServiceUpdate) => req('PUT', '/api/admin/services', body).then(parseAdminServices),
+  firmwareLock: () => get('/api/firmware/lock').then(d => d as unknown as FirmwareLock),
+  firmwareLockSet: (body: { revision: number; enabled: boolean }) => put('/api/firmware/lock', body).then(d => d as unknown as FirmwareLock),
   screenSettings: () => get('/api/screen/settings').then(d => d as unknown as DevUISettings),
   screenSettingsSet: (body: Omit<DevUISettings, 'revision'> & { expected_revision: number }) => req('PUT', '/api/screen/settings', body).then(d => d as unknown as DevUISettings),
   screenLanguageSet: (language: 'zh' | 'en') => req('PUT', '/api/screen/language', { language }).then(d => d as unknown as DevUISettings),

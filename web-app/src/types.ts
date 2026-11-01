@@ -36,6 +36,8 @@ export interface SignalInfo {
 export interface BatteryInfo {
   percent: number
   charging: boolean
+  /** Kernel status, except "Not charging" while the charge switch holds a connected charger off. */
+  status?: string
   voltage_mv?: number
   temperature_c?: number
   current_ma?: number
@@ -146,6 +148,17 @@ export interface AdminServiceUpdate {
   service: AdminService
   action: AdminServiceAction
   enabled: boolean
+}
+export interface FirmwareLock {
+  revision: number
+  enabled: boolean
+  servers_blocked: boolean
+  auto_update_off: boolean | null
+  upgrade_state: string | null
+  installing: boolean
+  blocked: number
+  last_blocked: number | null
+  error: string | null
 }
 
 /** USB LAN sharing: the saved choice and whether the USB interface is bridged now. */

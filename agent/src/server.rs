@@ -444,6 +444,8 @@ pub fn route(
         // Owned native services: normal authenticated dispatch, no login exemptions.
         (&Method::Get, "/api/admin/services") => crate::admin_services::get(),
         (&Method::Put, "/api/admin/services") => crate::admin_services::put(body),
+        (&Method::Get, "/api/firmware/lock") => crate::firmware_lock::get(),
+        (&Method::Put, "/api/firmware/lock") => crate::firmware_lock::put(body),
         // USB
         (&Method::Get, "/api/usb/status") => usb::usb_status(state),
         (&Method::Put, "/api/usb/mode") => usb::usb_mode_set(state, body),

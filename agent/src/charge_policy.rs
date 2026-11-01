@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -53,13 +54,28 @@ trait Charger: Send + Sync {
 }
 struct Hardware;
 
-fn stopped_state() -> Result<bool, String> {
-    let value = ubus::call("zwrt_bsp.charger", "list", Some("{}"))?;
-    match value["direct_power_supply_mode"].as_str() {
-        Some("enable") => Ok(true), // Firmware semantics are inverted.
-        Some("disable") => Ok(false),
-        _ => Err("charger control state is unavailable".into()),
+/// Last charger switch state read from the firmware: 0 unknown, 1 allowed, 2 stopped.
+static LAST_STOPPED: AtomicU8 = AtomicU8::new(0);
+
+/// Whether charging was stopped at the last read, without another ubus call.
+/// The kernel keeps reporting "Charging" while the switch holds the charger off.
+pub fn charging_stopped() -> Option<bool> {
+    match LAST_STOPPED.load(Ordering::Relaxed) {
+        1 => Some(false),
+        2 => Some(true),
+        _ => None,
     }
+}
+
+pub fn stopped_state() -> Result<bool, String> {
+    let value = ubus::call("zwrt_bsp.charger", "list", Some("{}"))?;
+    let stopped = match value["direct_power_supply_mode"].as_str() {
+        Some("enable") => true, // Firmware semantics are inverted.
+        Some("disable") => false,
+        _ => return Err("charger control state is unavailable".into()),
+    };
+    LAST_STOPPED.store(if stopped { 2 } else { 1 }, Ordering::Relaxed);
+    Ok(stopped)
 }
 impl Charger for Hardware {
     fn snapshot(&self) -> Result<Snapshot, String> {
@@ -162,6 +178,8 @@ impl ChargeLimitEnforcer {
     pub fn start(self: &Arc<Self>, events: mpsc::Receiver<Value>) {
         let enforcer = Arc::clone(self);
         std::thread::spawn(move || {
+            // Seed the cached switch state even when no limit is enforced.
+            let _ = stopped_state();
             let mut unplugged = false;
             loop {
                 enforcer.reconcile(unplugged);

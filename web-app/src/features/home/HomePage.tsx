@@ -257,7 +257,9 @@ export default function HomePage({ onNavigate }: { onNavigate?: (g: 'uplink' | '
               {battery?.percent != null ? `${battery.percent}%` : '—'}
             </p>
             <p className={`text-[12px] font-semibold ${battery?.charging ? 'text-ok' : 'text-ink2'}`}>
-              {battery?.charging ? t('Charging') : t('On battery')}
+              {battery?.charging ? t('Charging')
+                : battery?.status === 'Not charging' ? t('Charging stopped')
+                  : battery?.status === 'Full' ? t('Full') : t('On battery')}
             </p>
           </div>
           <Meter

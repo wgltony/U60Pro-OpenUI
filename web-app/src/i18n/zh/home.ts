@@ -18,6 +18,7 @@ export default {
   'Battery': '电池',
   'Charging': '充电中',
   'On battery': '电池供电',
+  'Charging stopped': '已停止充电',
   'Carriers': '载波',
   'No active LTE carrier': '无活动的 LTE 载波',
   'No active NR carrier': '无活动的 NR 载波',
