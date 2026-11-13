@@ -13,6 +13,7 @@ mod clash_core;
 mod clash_ctl;
 mod clash_diag;
 mod clash_sub;
+mod clock_sync;
 mod connection_logger;
 mod csv_utils;
 mod device_ext;
@@ -103,6 +104,9 @@ fn main() {
         .arg("/data/local/tmp/start_ttl.sh")
         .bounded_output();
 
+    // Before Tailscale: a clock stuck in the past after a battery-less reboot breaks its
+    // TLS sign-in. Syncs the system clock in the background, for everything, not just this.
+    clock_sync::start();
     tailscale::start();
     wireguard::start();
     // Before the supervisor: an interrupted core update may have left its files or lock.

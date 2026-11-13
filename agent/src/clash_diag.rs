@@ -57,7 +57,7 @@ fn skipped(id: &str) -> Value {
 }
 
 /// Seconds since the epoch for an HTTP date such as "Fri, 09 Oct 2026 18:23:59 GMT".
-fn http_date(text: &str) -> Option<i64> {
+pub(crate) fn http_date(text: &str) -> Option<i64> {
     let parts: Vec<&str> = text.split_whitespace().collect();
     let [_, day, month, year, time, ..] = parts.as_slice() else {
         return None;
