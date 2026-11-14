@@ -487,9 +487,9 @@ static void build_html(void) {
     }
     /* Bottom bar: the way out, and what the power key and idling do. */
     linkbox(10,426,116,48,"stock",L("Stock UI","原厂界面"),1,PLAIN);
-    box(138,431,172,18,"small muted",L("Power: tap sleeps, hold for menu","电源键：短按息屏，长按菜单"));
-    if(settings_sleep) snprintf(tmp,sizeof(tmp),L("Screen turns off after %d s idle.","空闲 %d 秒后熄屏"),settings_idle);
-    else snprintf(tmp,sizeof(tmp),L("Stock UI returns after %d s idle.","空闲 %d 秒后返回原厂界面"),settings_idle);
+    box(138,431,172,18,"small muted",L("Power: sleep · hold: menu","电源键：短按息屏，长按菜单"));
+    if(settings_sleep) snprintf(tmp,sizeof(tmp),L("Sleeps after %d s idle","空闲 %d 秒后熄屏"),settings_idle);
+    else snprintf(tmp,sizeof(tmp),L("Stock UI after %d s idle","空闲 %d 秒后返回原厂界面"),settings_idle);
     box(138,451,172,18,"small faint",tmp);
   } else if(page==WG) {
     header("WireGuard");

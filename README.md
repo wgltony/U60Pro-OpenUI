@@ -61,7 +61,7 @@ bash install.sh               # 安装；加 --with-tailscale 同时安装 Tails
 
 | | | | |
 | --- | --- | --- | --- |
-| ![主菜单](docs/images/readme/zh/screen-menu.png)<br>主菜单（九宫格） | ![无线中继](docs/images/readme/zh/screen-relay.png)<br>无线中继 | ![键盘](docs/images/readme/zh/screen-keyboard.png)<br>屏幕键盘输入密码 | ![已连接设备](docs/images/readme/zh/screen-wifi-devices.png)<br>已连接设备与踢出 |
+| ![主菜单](docs/images/readme/zh/screen-menu.png)<br>首页：上行、网速、代理、在线设备与功能入口 | ![无线中继](docs/images/readme/zh/screen-relay.png)<br>无线中继 | ![键盘](docs/images/readme/zh/screen-keyboard.png)<br>屏幕键盘输入密码 | ![已连接设备](docs/images/readme/zh/screen-wifi-devices.png)<br>已连接设备与踢出 |
 | ![Tailscale](docs/images/readme/zh/screen-tailscale.png)<br>Tailscale 出口节点 | ![Clash](docs/images/readme/zh/screen-clash.png)<br>Clash 模式与节点 | ![WireGuard](docs/images/readme/zh/screen-wireguard.png)<br>WireGuard | ![eSIM](docs/images/readme/zh/screen-esim.png)<br>eSIM 切换 |
 | ![信号](docs/images/readme/zh/screen-signal.png)<br>信号、网络制式与速率曲线 | ![电池](docs/images/readme/zh/screen-battery.png)<br>电池与充电上限 | ![概览](docs/images/readme/zh/screen-overview.png)<br>概览与 USB 网络共享 | ![电源菜单](docs/images/readme/zh/screen-power-menu.png)<br>长按电源键菜单 |
 
@@ -69,12 +69,14 @@ bash install.sh               # 安装；加 --with-tailscale 同时安装 Tails
 
 - **代理**：WireGuard、Clash、Tailscale 三选一转发流量，切换前确认，失败自动恢复原状。每种都有分步设置向导。
   - **Clash**：固定版本的 Clash.Meta（mihomo）内核和地理数据随安装一起部署；最多 5 个订阅，节点分组与测速，
-    规则 / 全局 / 直连，按设备分流，连接和日志查看。见 [Clash 文档](docs/CLASH.md)。
+    规则 / 全局 / 直连，按设备分流，连接和日志查看。
+    **Cloudflare 优选 IP**：对走 Cloudflare 的节点，先在边缘粗筛，再让候选地址真实经过节点测首字节和下载，选出主选和备选，原域名兜底；完整测试每天最多一次，上行切换时重测。见 [Clash 文档](docs/CLASH.md)。
   - **WireGuard**：导入服务商的 `.conf`，保存多个配置，所有设备或指定设备走隧道。见 [WireGuard 文档](docs/WIREGUARD.md)。
   - **Tailscale**（`--with-tailscale`）：在网页上用登录链接或认证密钥登录、退出；Tailscale 模式（经出口节点上网）；
-    **远程管理**（子网路由，在任何地方通过 tailnet 访问路由器和局域网，可与 Clash / WireGuard 同时使用）。
+    **远程管理**（子网路由，在任何地方通过 tailnet 访问路由器和局域网，可与 Clash / WireGuard 同时使用）；
+    Clash 或 WireGuard 接管的设备同样能访问 tailnet。
 - **无线中继**：连上已有的 Wi-Fi（家里、酒店、办公室）当作上网通道，省下蜂窝流量；上游断开或不能上网时自动回到蜂窝网络。
-  可保存 8 个网络按顺序连接，支持需要网页认证的热点。
+  可保存 8 个网络按顺序连接，支持需要网页认证的热点；每个网络可选“避开 DFS 信道”（默认关闭）。
   本分支为规避已观测到的 AP/STA 冲突，中继时由守护暂停与上游同频段的热点，保留另一频段；这是当前策略，不是对所有固件或硬件能力的绝对结论。守护会提交 UCI，并在 `/data` 留持久恢复标记；开启前准备另一频段或 USB 备用管理通道。
   见 [Wi-Fi 中继文档](docs/WIFI-UPLINK.md)。
 - **Wi-Fi 与客户端**：2.4G / 5G 开关、发射功率；查看已连接设备，在网页或触摸屏上拉黑 / 解除拉黑（按设备名识别随机 MAC）。
@@ -85,7 +87,8 @@ bash install.sh               # 安装；加 --with-tailscale 同时安装 Tails
 - **电池与系统**：充电上限、温度和资源监控、清理厂商服务和释放内存、关机和重启。
 - **USB**：USB 网络共享开关，RNDIS / ECM 模式切换。
 - **日志与诊断**：路由器滚动日志（中继、Tailscale、拉黑事件），信号记录和连接事件记录（CSV 下载），AT 控制台。
-- **触摸屏菜单（DevUI）**：设备 320×480 屏幕上的菜单，语言跟随网页。最多显示九个功能（五个以上排成九宫格），
+- **触摸屏菜单（DevUI）**：设备 320×480 屏幕上的菜单，语言跟随网页，平滑字体。首页直接显示当前上行、实时网速、代理状态和在线设备数；
+  下方最多显示九个功能（五个以上排成九宫格），
   在网页上选择显示哪些。见[屏幕文档](docs/SCREEN.md)。
 - **有校验的部署**：核对设备身份和文件校验和，保留快照并在观测到部署失败时尝试恢复；不是任何失败都精确恢复的保证。新快照包含当前 UCI / 自有 sidecar 生命周期覆盖，旧快照只有旧覆盖范围，见[回退边界](docs/DEPLOYMENT.md#rollback-scope-and-limits)。
 

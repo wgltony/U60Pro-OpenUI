@@ -62,7 +62,7 @@ bash install.sh               # 安裝；加 --with-tailscale 同時安裝 Tails
 
 | | | | |
 | --- | --- | --- | --- |
-| ![主選單](docs/images/readme/zh/screen-menu.png)<br>主選單（九宮格） | ![無線中繼](docs/images/readme/zh/screen-relay.png)<br>無線中繼 | ![鍵盤](docs/images/readme/zh/screen-keyboard.png)<br>螢幕鍵盤輸入密碼 | ![已連線裝置](docs/images/readme/zh/screen-wifi-devices.png)<br>已連線裝置與踢出 |
+| ![主選單](docs/images/readme/zh/screen-menu.png)<br>首頁：上行、網速、代理、線上裝置與功能入口 | ![無線中繼](docs/images/readme/zh/screen-relay.png)<br>無線中繼 | ![鍵盤](docs/images/readme/zh/screen-keyboard.png)<br>螢幕鍵盤輸入密碼 | ![已連線裝置](docs/images/readme/zh/screen-wifi-devices.png)<br>已連線裝置與踢出 |
 | ![Tailscale](docs/images/readme/zh/screen-tailscale.png)<br>Tailscale 出口節點 | ![Clash](docs/images/readme/zh/screen-clash.png)<br>Clash 模式與節點 | ![WireGuard](docs/images/readme/zh/screen-wireguard.png)<br>WireGuard | ![eSIM](docs/images/readme/zh/screen-esim.png)<br>eSIM 切換 |
 | ![訊號](docs/images/readme/zh/screen-signal.png)<br>訊號、網路模式與速率曲線 | ![電池](docs/images/readme/zh/screen-battery.png)<br>電池與充電上限 | ![概覽](docs/images/readme/zh/screen-overview.png)<br>概覽與 USB 網路共享 | ![電源選單](docs/images/readme/zh/screen-power-menu.png)<br>長按電源鍵選單 |
 
@@ -70,12 +70,14 @@ bash install.sh               # 安裝；加 --with-tailscale 同時安裝 Tails
 
 - **代理**：WireGuard、Clash、Tailscale 三選一轉送流量，切換前確認，失敗自動還原。每種都有分步設定精靈。
   - **Clash**：固定版本的 Clash.Meta（mihomo）核心和地理資料隨安裝一起部署；最多 5 個訂閱，節點群組與測速，
-    規則 / 全域 / 直連，依裝置分流，連線與日誌檢視。見 [Clash 文件](docs/CLASH.md)。
+    規則 / 全域 / 直連，依裝置分流，連線與日誌檢視。
+    **Cloudflare 優選 IP**：對走 Cloudflare 的節點，先在邊緣粗篩，再讓候選位址實際經過節點測首位元組和下載，選出主選和備選，原網域兜底；完整測試每天最多一次，上行切換時重測。見 [Clash 文件](docs/CLASH.md)。
   - **WireGuard**：匯入服務商的 `.conf`，儲存多個設定，所有裝置或指定裝置走通道。見 [WireGuard 文件](docs/WIREGUARD.md)。
   - **Tailscale**（`--with-tailscale`）：在網頁上用登入連結或驗證金鑰登入、登出；Tailscale 模式（經出口節點上網）；
-    **遠端管理**（子網路由，在任何地方透過 tailnet 存取路由器和區域網路，可與 Clash / WireGuard 同時使用）。
+    **遠端管理**（子網路由，在任何地方透過 tailnet 存取路由器和區域網路，可與 Clash / WireGuard 同時使用）；
+    Clash 或 WireGuard 接管的裝置同樣能存取 tailnet。
 - **無線中繼**：連上既有的 Wi-Fi（家裡、飯店、辦公室）當作上網通道，省下行動數據；上游斷線或無法上網時自動回到行動網路。
-  最多儲存 8 個網路依序連線，支援需要網頁驗證的熱點。
+  最多儲存 8 個網路依序連線，支援需要網頁驗證的熱點；每個網路可選「避開 DFS 頻道」（預設關閉）。
   本分支為規避已觀察到的 AP/STA 衝突，中繼時由守護暫停與上游同頻段的熱點，保留另一頻段；這是目前策略，不是對所有韌體或硬體能力的絕對結論。守護會提交 UCI，並在 `/data` 留持久復原標記；開啟前準備另一頻段或 USB 備用管理通道。
   見 [Wi-Fi 中繼文件](docs/WIFI-UPLINK.md)。
 - **Wi-Fi 與用戶端**：2.4G / 5G 開關、發射功率；檢視已連線裝置，在網頁或觸控螢幕上封鎖 / 解除封鎖（依裝置名稱識別隨機 MAC）。
@@ -86,7 +88,8 @@ bash install.sh               # 安裝；加 --with-tailscale 同時安裝 Tails
 - **電池與系統**：充電上限、溫度與資源監控、停止廠商服務與釋放記憶體、關機與重新開機。
 - **USB**：USB 網路共享開關，RNDIS / ECM 模式切換。
 - **日誌與診斷**：路由器輪替日誌（中繼、Tailscale、封鎖事件），訊號記錄與連線事件記錄（CSV 下載），AT 主控台。
-- **觸控選單（DevUI）**：裝置 320×480 螢幕上的選單，語言跟隨網頁。最多顯示九個功能（五個以上排成九宮格），
+- **觸控選單（DevUI）**：裝置 320×480 螢幕上的選單，語言跟隨網頁，平滑字型。首頁直接顯示目前上行、即時網速、代理狀態和線上裝置數；
+  下方最多顯示九個功能（五個以上排成九宮格），
   在網頁上選擇要顯示哪些。見[螢幕文件](docs/SCREEN.md)。
 - **有校驗的部署**：核對裝置身分和檔案校驗碼，保留快照並在觀測到部署失敗時嘗試復原；不是任何失敗都精確還原的保證。新快照包含目前 UCI / 自有 sidecar 生命週期覆蓋，舊快照只有舊覆蓋範圍，見[回退邊界](docs/DEPLOYMENT.md#rollback-scope-and-limits)。
 

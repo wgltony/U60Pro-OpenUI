@@ -1890,7 +1890,7 @@ static void esim_tests(struct drm_buf *b,const char *dir) {
   char sleep_w[]="V 44 90 200 2 80 zh\nW 44 90 200 2 208 zh 1\n.\n",bad_sleep[]="V 45 90 200 2 80 zh\nW 45 90 200 2 208 zh 2\n.\n";
   assert(parse_snapshot(sleep_w,&prefs)&&update_settings(&prefs)&&settings_sleep&&settings_zh&&settings_menu==208);
   page=MENU;capture(b,dir,"menu-sleep");assert(strstr(html,"空闲 90 秒后熄屏"));
-  settings_zh=0;capture(b,dir,"en-menu-sleep");assert(strstr(html,"Screen turns off after 90 s idle."));settings_zh=1;
+  settings_zh=0;capture(b,dir,"en-menu-sleep");assert(strstr(html,"Sleeps after 90 s idle"));settings_zh=1;
   assert(parse_snapshot(bad_sleep,&prefs)&&update_settings(&prefs)&&!settings_sleep&&settings_menu==80);
   settings_zh=1;settings_menu=208;
   page=MENU;capture_both(b,dir,"menu-esim");assert(strstr(html,"act:esim")&&strstr(html,"Hong Kong"));

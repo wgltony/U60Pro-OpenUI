@@ -79,7 +79,7 @@ the touchscreen preview build); none show a real device.
 
 | | | | |
 | --- | --- | --- | --- |
-| ![Main menu](docs/images/readme/en/screen-menu.png)<br>Main menu (3×3) | ![Wi-Fi relay](docs/images/readme/en/screen-relay.png)<br>Wi-Fi relay | ![Keyboard](docs/images/readme/en/screen-keyboard.png)<br>On-screen keyboard | ![Connected devices](docs/images/readme/en/screen-wifi-devices.png)<br>Connected devices, kick |
+| ![Main menu](docs/images/readme/en/screen-menu.png)<br>Home: uplink, speed, proxy, devices online and the features | ![Wi-Fi relay](docs/images/readme/en/screen-relay.png)<br>Wi-Fi relay | ![Keyboard](docs/images/readme/en/screen-keyboard.png)<br>On-screen keyboard | ![Connected devices](docs/images/readme/en/screen-wifi-devices.png)<br>Connected devices, kick |
 | ![Tailscale](docs/images/readme/en/screen-tailscale.png)<br>Tailscale exit nodes | ![Clash](docs/images/readme/en/screen-clash.png)<br>Clash mode and nodes | ![WireGuard](docs/images/readme/en/screen-wireguard.png)<br>WireGuard | ![eSIM](docs/images/readme/en/screen-esim.png)<br>eSIM switching |
 | ![Signal](docs/images/readme/en/screen-signal.png)<br>Signal, network mode and speed chart | ![Battery](docs/images/readme/en/screen-battery.png)<br>Battery and charge limit | ![Overview](docs/images/readme/en/screen-overview.png)<br>Overview and USB LAN | ![Power menu](docs/images/readme/en/screen-power-menu.png)<br>Power-button menu |
 
@@ -89,16 +89,22 @@ the touchscreen preview build); none show a real device.
   first and a failure restores the previous state. Each has a step-by-step setup guide.
   - **Clash**: a pinned Clash.Meta (mihomo) core and geo data are installed with
     everything else; up to five subscriptions, node groups and delay tests, rule / global
-    / direct modes, per-device routing, connections and logs. See [Clash](docs/CLASH.md).
+    / direct modes, per-device routing, connections and logs. **Cloudflare IP
+    optimization** for nodes behind Cloudflare: a coarse pass at the edge, then the
+    candidates carry a real request and a short download through the node itself; the
+    fastest becomes the pick, the runner-up a backup and the domain the last resort. A
+    full run happens at most once a day, and again when the uplink changes.
+    See [Clash](docs/CLASH.md).
   - **WireGuard**: import your provider's `.conf`, keep several configurations, route all
     devices or chosen ones. See [WireGuard](docs/WIREGUARD.md).
   - **Tailscale** (`--with-tailscale`): sign in on the web page with a link or an auth
     key, sign out; Tailscale mode (internet through an exit node); **remote management**
     (a subnet route: reach the router and its LAN from anywhere on your tailnet, alongside
-    Clash or WireGuard).
+    Clash or WireGuard). Devices that Clash or WireGuard routes reach the tailnet too.
 - **Wi-Fi relay**: use an existing Wi-Fi network (home, hotel, office) as the internet
   connection and save mobile data; when it drops or has no internet, traffic returns to
-  cellular. Up to eight saved networks, tried in order; captive-portal logins supported.
+  cellular. Up to eight saved networks, tried in order; captive-portal logins supported;
+  each network can be told to avoid DFS channels (off by default).
   To avoid observed AP/STA conflicts, this fork's guard pauses the hotspot on the
   upstream's band while relaying and retains the other band. This is the current policy,
   not an absolute claim about all firmware or hardware capabilities. The guard commits
@@ -123,7 +129,9 @@ the touchscreen preview build); none show a real device.
 - **Logs and diagnostics**: rotating router log (relay, Tailscale and blocklist events),
   signal and connection-event loggers with CSV download, AT console.
 - **Touchscreen menu (DevUI)**: a menu on the device's 320×480 screen in the dashboard's
-  language, with up to nine features (five or more as a 3×3 grid) chosen on the web page.
+  language, in a smooth text face. Home shows the uplink in use, the live speed, the proxy
+  and the devices online; below it, up to nine features (five or more as a 3×3 grid)
+  chosen on the web page.
   See [screen documentation](docs/SCREEN.md).
 - **Checked deployment**: every deployment verifies the device and each file's checksum,
   keeps a snapshot and attempts recovery on observed deployment failures, not exact
