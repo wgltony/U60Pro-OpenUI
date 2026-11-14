@@ -263,11 +263,29 @@ fn cli(args: &[&str]) -> Result<Value, String> {
     // Raw status/prefs can contain private material. Never log or return them.
     serde_json::from_slice(&output.stdout).map_err(|_| "Invalid Tailscale daemon response".into())
 }
+/// One read from the daemon's local API on its socket: the same JSON the CLI prints,
+/// without starting a 30 MB program for it. The supervisor asks every 15 s.
+fn local(path: &str) -> Result<Value, String> {
+    let (code, v) = clash_ctl::request_with_host(
+        Path::new(SOCKET),
+        "GET",
+        path,
+        None,
+        Duration::from_secs(5),
+        "local-tailscaled.sock",
+    )
+    .map_err(|_| "Cannot query Tailscale daemon")?;
+    if !(200..300).contains(&code) || !v.is_object() {
+        return Err("Tailscale daemon query failed".into());
+    }
+    Ok(v)
+}
+// The CLI stays as the fallback, for a daemon whose local API answers differently.
 fn status() -> Result<Value, String> {
-    cli(&["status", "--json"])
+    local("/localapi/v0/status").or_else(|_| cli(&["status", "--json"]))
 }
 fn prefs() -> Result<Value, String> {
-    cli(&["debug", "prefs"])
+    local("/localapi/v0/prefs").or_else(|_| cli(&["debug", "prefs"]))
 }
 fn accept_dns(running: bool, exit: &str) -> bool {
     running && !exit.is_empty()

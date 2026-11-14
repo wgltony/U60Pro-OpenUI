@@ -59,6 +59,11 @@ pub const MAX_NETWORKS: usize = 8;
 const LOOP: Duration = Duration::from_secs(3);
 /// The connectivity check while online, and while associated but offline.
 const CHECK_EVERY: Duration = Duration::from_secs(10);
+/// How often the chains' hooks are checked. Only a firmware firewall reload drops them,
+/// and the check costs eight processes, so it does not run on every pass. Until the
+/// next check LAN devices are without the uplink; the stock INPUT and FORWARD policies
+/// still keep the upstream network out meanwhile.
+const HOOKS_EVERY: Duration = Duration::from_secs(15);
 const FAILS_TO_DROP: u32 = 3;
 const PASSES_TO_JOIN: u32 = 2;
 /// How long a lost association may last before the lease is given up.
@@ -220,6 +225,11 @@ struct Network {
     password: String,
     #[serde(default)]
     hidden: bool,
+    /// Join only access points on channels without radar detection (off by default).
+    /// A same-name access point on a DFS channel is then never chosen. Left out of the
+    /// saved file while off, so an older agent still reads it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    avoid_dfs: bool,
 }
 
 impl std::fmt::Debug for Network {
@@ -229,6 +239,7 @@ impl std::fmt::Debug for Network {
             .field("ssid", &self.ssid)
             .field("security", &self.security)
             .field("hidden", &self.hidden)
+            .field("avoid_dfs", &self.avoid_dfs)
             .field("password", &"[redacted]")
             .finish()
     }
@@ -255,6 +266,9 @@ struct NetworkEdit {
     password: Option<String>,
     #[serde(default)]
     hidden: bool,
+    /// Omitted keeps the saved choice of the same network (off for a new one).
+    #[serde(default)]
+    avoid_dfs: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -343,6 +357,9 @@ fn edited(old: &Settings, u: Update) -> Result<Settings, String> {
                 security: e.security,
                 password,
                 hidden: e.hidden,
+                avoid_dfs: e
+                    .avoid_dfs
+                    .unwrap_or_else(|| saved.is_some_and(|n| n.avoid_dfs)),
             });
         }
         next.networks = networks;
@@ -465,6 +482,20 @@ fn hex(bytes: &[u8]) -> String {
 
 /// Names and SAE passwords are written as hex, which the supplicant reads for any
 /// string field, so no user text is ever quoted into the file.
+/// The 2.4 GHz channels and the 5 GHz channels that need no radar detection (36–48 and
+/// 149–177), as a supplicant `freq_list`. On a DFS channel the driver cannot move the
+/// same-band hotspot along with the uplink, and radar makes the upstream change channel.
+fn non_dfs_frequencies() -> String {
+    (1..=13)
+        .map(|c| 2407 + 5 * c)
+        .chain([2484])
+        .chain([36, 40, 44, 48].map(|c| 5000 + 5 * c))
+        .chain((149..=177).step_by(4).map(|c| 5000 + 5 * c))
+        .map(|f: u32| f.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn supplicant_config(s: &Settings) -> String {
     let mut out = format!("ctrl_interface={RUN}/ctrl\nupdate_config=0\nap_scan=1\n");
     let count = s.networks.len();
@@ -477,6 +508,9 @@ fn supplicant_config(s: &Settings) -> String {
         ));
         if n.hidden {
             out.push_str("\tscan_ssid=1\n");
+        }
+        if n.avoid_dfs {
+            out.push_str(&format!("\tfreq_list={}\n", non_dfs_frequencies()));
         }
         match n.security {
             Security::Open => out.push_str("\tkey_mgmt=NONE\n"),
@@ -1384,8 +1418,13 @@ ip6tables -w 2 -F {p}_V6 2>/dev/null || true
     )
 }
 
-fn rules_present(online: bool) -> bool {
-    let rules = egress::run("ip", &["-4", "rule", "show"]).unwrap_or_default();
+fn ip_rules() -> String {
+    egress::run("ip", &["-4", "rule", "show"]).unwrap_or_default()
+}
+
+/// Whether `rules` (the output of `ip -4 rule show`) holds the lease's source rule and,
+/// for `online`, everything that puts traffic on the uplink.
+fn rules_present(rules: &str, online: bool) -> bool {
     let has = |prio: &str| rules.lines().any(|l| l.starts_with(&format!("{prio}:")));
     has(PRIO_SOURCE)
         && (!online
@@ -1412,21 +1451,45 @@ enum Probe {
 /// resolver, which answers even when that network has no internet.
 /// Whether a body is the endpoint's real answer.
 type Answer = fn(&str) -> bool;
-const PROBES: [(Ipv4Addr, &str, Answer); 3] = [
+/// What an endpoint's real answer looks like.
+#[derive(Clone, Copy)]
+enum Expect {
+    /// 200 with a body the function recognises.
+    Body(Answer),
+    /// A permanent redirect to exactly this address: the endpoint's own move to HTTPS,
+    /// which no login portal sends.
+    Redirect(&'static str),
+}
+impl Expect {
+    fn met(self, status: u16, location: Option<&str>, body: &str) -> bool {
+        match self {
+            Expect::Body(valid) => status == 200 && valid(body),
+            Expect::Redirect(to) => matches!(status, 301 | 308) && location == Some(to),
+        }
+    }
+}
+/// The last one is outside mainland China, so the check does not hang on one region's
+/// resolvers being reachable from wherever the upstream network is.
+const PROBES: [(Ipv4Addr, &str, Expect); 4] = [
     (
         Ipv4Addr::new(223, 5, 5, 5),
         "/resolve?name=www.taobao.com&type=1",
-        alidns_answer,
+        Expect::Body(alidns_answer),
     ),
     (
         Ipv4Addr::new(119, 29, 29, 29),
         "/d?dn=www.taobao.com",
-        dnspod_answer,
+        Expect::Body(dnspod_answer),
     ),
     (
         Ipv4Addr::new(223, 6, 6, 6),
         "/resolve?name=www.taobao.com&type=1",
-        alidns_answer,
+        Expect::Body(alidns_answer),
+    ),
+    (
+        Ipv4Addr::new(1, 1, 1, 1),
+        "/cdn-cgi/trace",
+        Expect::Redirect("https://1.1.1.1/cdn-cgi/trace"),
     ),
 ];
 /// Opened by a browser when a portal gave no address of its own; any portal intercepts it.
@@ -1446,12 +1509,12 @@ fn dnspod_answer(body: &str) -> bool {
 /// rule, so it works whichever link carries other traffic.
 fn probe(ip: Ipv4Addr) -> Probe {
     let mut portal = None;
-    for (target, path, valid) in PROBES {
+    for (target, path, expect) in PROBES {
         let Some((status, location, body)) = http_get(ip, target, path, Duration::from_secs(3))
         else {
             continue;
         };
-        if status == 200 && valid(&body) {
+        if expect.met(status, location.as_deref(), &body) {
             return Probe::Online;
         }
         if portal.is_none() {
@@ -1735,6 +1798,8 @@ struct Runtime {
     /// The online rules and DNS redirect are in place (online, or login mode).
     routing: bool,
     last_check: Option<Instant>,
+    /// When the hooks were last checked or installed.
+    last_hooks: Option<Instant>,
     lost_since: Option<Instant>,
     /// The phy seen on the previous pass: a vdev is only added to a stable radio.
     last_phy: Option<String>,
@@ -1821,6 +1886,7 @@ fn teardown(rt: &mut Runtime) {
     delete_iface();
     let _ = sh(&cleanup_script());
     rt.created = false;
+    rt.last_hooks = None;
     rt.written = None;
     rt.view.link = None;
     rt.view.signal = None;
@@ -2018,6 +2084,7 @@ fn step(rt: &mut Runtime, s: &Settings) -> Result<(), String> {
         prepare_run_dir()?;
         sh(&firewall_script())?;
         create_iface(&radio)?;
+        rt.last_hooks = Some(Instant::now());
         rt.created = true;
         rt.written = None;
         (rt.view.rx_base, rt.view.tx_base) = counters();
@@ -2025,13 +2092,16 @@ fn step(rt: &mut Runtime, s: &Settings) -> Result<(), String> {
             "uplink: client interface added on {}",
             radio.phy.unwrap_or_default()
         ));
-    } else if egress::run("sh", &["-c", &hooks_check()]).is_err() {
-        // Rebuilding flushes DNS/OUT/V6. Restore dynamic rules in the same checked
-        // script, rather than trusting routing=true and leaving those chains empty.
-        sh(&firewall_restore_script(
-            rt.view.lease.as_ref(),
-            rt.routing,
-        )?)?;
+    } else if rt.last_hooks.is_none_or(|t| t.elapsed() >= HOOKS_EVERY) {
+        rt.last_hooks = Some(Instant::now());
+        if egress::run("sh", &["-c", &hooks_check()]).is_err() {
+            // Rebuilding flushes DNS/OUT/V6. Restore dynamic rules in the same checked
+            // script, rather than trusting routing=true and leaving those chains empty.
+            sh(&firewall_restore_script(
+                rt.view.lease.as_ref(),
+                rt.routing,
+            )?)?;
+        }
     }
     let was_running = rt.supplicant.is_some();
     if was_running && !alive(&mut rt.supplicant) {
@@ -2089,7 +2159,12 @@ fn step(rt: &mut Runtime, s: &Settings) -> Result<(), String> {
         ));
         return Ok(());
     }
-    if rt.view.lease.as_ref() != Some(&lease) || !rules_present(false) {
+    // One read of the rules serves both checks of a pass, unless the pass rewrote them.
+    let mut rules = Some(ip_rules());
+    if rt.view.lease.as_ref() != Some(&lease)
+        || !rules_present(rules.as_deref().unwrap_or(""), false)
+    {
+        rules = None;
         go_offline(rt);
         sh(&lease_script(&lease))?;
         rt.view.lease = Some(lease.clone());
@@ -2131,7 +2206,7 @@ fn step(rt: &mut Runtime, s: &Settings) -> Result<(), String> {
         }
     }
     let route = rt.view.online || login_active();
-    if route && (!rt.routing || !rules_present(true)) {
+    if route && (!rt.routing || !rules_present(&rules.take().unwrap_or_else(ip_rules), true)) {
         let was_routing = rt.routing;
         install_online(&mut rt.routing, &lease, sh)?;
         if !was_routing && !rt.view.online {
@@ -2157,6 +2232,11 @@ fn step(rt: &mut Runtime, s: &Settings) -> Result<(), String> {
         _ => None,
     };
     Ok(())
+}
+
+/// Whether traffic is on the Wi-Fi uplink right now (otherwise it is on cellular).
+pub(crate) fn online() -> bool {
+    SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()).online
 }
 
 fn publish(view: &Snapshot) {
@@ -2206,6 +2286,7 @@ pub fn start() {
             fails: 0,
             routing: false,
             last_check: None,
+            last_hooks: None,
             lost_since: None,
             last_phy: None,
             created: false,
@@ -2291,7 +2372,7 @@ fn response(s: &Settings) -> Value {
         "rx_bytes": rx,
         "tx_bytes": tx,
         "networks": s.networks.iter().map(|n| json!({"id": n.id, "ssid": n.ssid, "security": n.security,
-            "hidden": n.hidden, "has_password": !n.password.is_empty()})).collect::<Vec<_>>(),
+            "hidden": n.hidden, "avoid_dfs": n.avoid_dfs, "has_password": !n.password.is_empty()})).collect::<Vec<_>>(),
         "max_networks": MAX_NETWORKS,
         "tools": {"wpa_supplicant": find_tool("wpa_supplicant").is_some(), "udhcpc": find_tool("udhcpc").is_some()},
     })
@@ -2321,6 +2402,7 @@ fn relay_edited(
             security: n.security,
             password: None,
             hidden: n.hidden,
+            avoid_dfs: None,
         })
         .collect();
     let (revision, enabled, force) = match action {
@@ -2370,6 +2452,7 @@ fn relay_edited(
             ssid: ssid.clone(),
             security: *security,
             hidden: *hidden,
+            avoid_dfs: None,
             password: password.0.clone(),
         }),
         RelayAction::SaveScan {
@@ -2386,6 +2469,7 @@ fn relay_edited(
                 ssid: seen.ssid.clone(),
                 security,
                 hidden: false,
+                avoid_dfs: None,
                 password: password.0.clone(),
             })
         }
@@ -2672,6 +2756,7 @@ mod tests {
             security,
             password: password.into(),
             hidden: false,
+            avoid_dfs: false,
         }
     }
 
@@ -2890,6 +2975,7 @@ mod tests {
             fails: 0,
             routing: false,
             last_check: None,
+            last_hooks: None,
             lost_since: None,
             last_phy: None,
             created: false,
@@ -2975,6 +3061,41 @@ mod tests {
             "psk={}",
             wpa_psk("pa\"ss#word", "Café \"x\" #1".as_bytes())
         )));
+    }
+
+    #[test]
+    fn avoiding_dfs_is_opt_in_and_survives_edits_that_omit_it() {
+        let mut s = Settings {
+            revision: 4,
+            enabled: true,
+            networks: vec![net(1, "Home", Security::Wpa2, "homepassword")],
+        };
+        // Off by default: any channel is joined and the saved file keeps its old shape.
+        assert!(!supplicant_config(&s).contains("freq_list"));
+        assert!(!serde_json::to_string(&s).unwrap().contains("avoid_dfs"));
+        let on: Update = serde_json::from_value(json!({"expected_revision": 4,
+            "networks": [{"id": 1, "ssid": "Home", "security": "wpa2", "avoid_dfs": true}]}))
+        .unwrap();
+        s = edited(&s, on).unwrap();
+        let conf = supplicant_config(&s);
+        let list = conf
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("freq_list="))
+            .unwrap();
+        let has = |f: &str| list.split(' ').any(|x| x == f);
+        assert!(has("2412") && has("2472") && has("5180") && has("5240") && has("5745"));
+        assert!(has("5785") && has("5885"));
+        assert!(!has("5260") && !has("5320") && !has("5500") && !has("5720"));
+        // The screen's edits carry no such field: the saved choice stays.
+        let keep: Update = serde_json::from_value(json!({"expected_revision": 5,
+            "networks": [{"id": 1, "ssid": "Home", "security": "wpa2"}]}))
+        .unwrap();
+        s = edited(&s, keep).unwrap();
+        assert!(s.networks[0].avoid_dfs);
+        let off: Update = serde_json::from_value(json!({"expected_revision": 6,
+            "networks": [{"id": 1, "ssid": "Home", "security": "wpa2", "avoid_dfs": false}]}))
+        .unwrap();
+        assert!(!edited(&s, off).unwrap().networks[0].avoid_dfs);
     }
 
     #[test]
@@ -3080,6 +3201,13 @@ BSS 02:00:00:00:00:05(on wlan0)\n\tfreq: 2412\n\tsignal: -40.00 dBm\n\tcapabilit
         assert!(dnspod_answer("49.79.229.97;49.79.229.98\n"));
         assert!(!dnspod_answer(""));
         assert!(!dnspod_answer("<html>login</html>"));
+        let cloudflare = PROBES[3].2;
+        assert!(cloudflare.met(301, Some("https://1.1.1.1/cdn-cgi/trace"), "<html>"));
+        assert!(!cloudflare.met(302, Some("http://portal.example/login"), ""));
+        assert!(!cloudflare.met(301, Some("https://portal.example/"), ""));
+        assert!(!cloudflare.met(200, None, "<html>Please log in</html>"));
+        assert!(PROBES[0].2.met(200, None, r#"{"Status":0}"#));
+        assert!(!PROBES[0].2.met(302, None, r#"{"Status":0}"#));
         let (status, location, body) = parse_http(
             "HTTP/1.1 302 Found\r\nLocation: http://portal.example/login?x=1\r\nContent-Length: 0\r\n\r\n",
         )

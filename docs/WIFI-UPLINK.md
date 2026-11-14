@@ -67,7 +67,10 @@ the guard is not a guarantee that all hotspot changes disappear.
    public resolvers' HTTP endpoints, by IP so no DNS is needed:
    `http://223.5.5.5/resolve?name=www.taobao.com&type=1` (AliDNS, JSON with
    `"Status":0`), else `http://119.29.29.29/d?dn=www.taobao.com` (DNSPod, a list of
-   addresses), else `http://223.6.6.6/resolve?…`. The expected answer means online. A
+   addresses), else `http://223.6.6.6/resolve?…`, else `http://1.1.1.1/cdn-cgi/trace`
+   (Cloudflare, whose answer is its own permanent redirect to the same address over
+   HTTPS; it is outside mainland China, so the check does not depend on one region).
+   The expected answer means online. A
    redirect or any other page means a **captive portal**: the network wants a web login,
    and its `Location` (or a URL in a meta refresh or script) is the login page. Nothing
    answering means no internet. Not port 53: DNS leaving over the uplink is redirected
@@ -83,10 +86,11 @@ the guard is not a guarantee that all hotspot changes disappear.
    and login mode ends. It also ends when the window runs out, when it is ended, or when
    the relay is turned off. The portal sees the router's uplink address, so one login
    covers every device behind it.
-8. **Recovery.** Every 3 s (and at once after a save) the supervisor re-hooks chains a
-   firmware firewall reload dropped, restores missing rules, restarts a supplicant or
+8. **Recovery.** Every 3 s (and at once after a save) the supervisor restores missing
+   rules, restarts a supplicant or
    DHCP client that exited, and rebuilds everything when the interface vanished with a
-   firmware Wi-Fi reload. At start it removes a previous agent's online rules and
+   firmware Wi-Fi reload. Every 15 s it re-hooks chains a firmware firewall reload
+   dropped. At start it removes a previous agent's online rules and
    processes for `ou-sta0`, and puts traffic back on Wi-Fi only after its own checks.
 
 ## Band guard and management access
@@ -107,7 +111,12 @@ reboot. Enabling the same band from the UI while still associated will be undone
 by the guard. Between network associations it keeps the current pause.
 
 When the relay interface is gone and the **180-second boot grace** has elapsed,
-the running guard gives back the recorded AP and commits its enabled state. If
+the running guard gives back the recorded AP and commits its enabled state: at
+once when the relay is saved as off, and otherwise only after the interface
+stayed away for **90 seconds** (`ABSENT_GRACE`). The interface also vanishes for
+a moment on an agent restart, a reconnect and every firmware Wi-Fi reload;
+giving the band back then would start a second Wi-Fi reload that removes the
+new relay interface. If
 a Wi-Fi reload removed that AP interface, restoration can require a firmware
 Wi-Fi reload. Moving the upstream to the other band restores the previous AP
 before pausing the new same-band AP. A stopped/absent guard cannot act on its
@@ -128,12 +137,16 @@ boot-critical services or vendor sync-barrier daemons. See [Safety](SAFETY.md).
   `signal`), the lease (`ip`, `prefix`, `gateway`, `dns`), `online`, `online_since`
   (device time), `online_for` (seconds; the B31 clock runs 8 h ahead, so clients use
   this), `rx_bytes`/`tx_bytes` since the interface was added, `networks` (`id`, `ssid`,
-  `security`, `hidden`, `has_password`; never the password), `max_networks` (8) and
+  `security`, `hidden`, `avoid_dfs`, `has_password`; never the password), `max_networks` (8) and
   `tools` (whether `wpa_supplicant` and `udhcpc` were found).
 - `PUT /api/wifi/uplink`: `{expected_revision, enabled?, networks?}`; `networks` is the
-  whole list in preference order, each `{id?, ssid, security, password?, hidden}` with
+  whole list in preference order, each `{id?, ssid, security, password?, hidden,
+  avoid_dfs?}` with
   `security` one of `open`, `wpa2`, `wpa3`, `wpa2_wpa3`. A missing password (or the
   `••••••••` placeholder) keeps the saved one of that `id`. A stale revision answers 409.
+  `avoid_dfs` (off by default; omitted keeps the saved choice) joins that network only
+  on 2.4 GHz or on 5 GHz channels 36–48 and 149–177, for an upstream that has access
+  points of the same name on both DFS and non-DFS channels.
   Names are 1–32 bytes without control characters; passwords 8–63 printable ASCII
   characters, or 64 hex digits (not for WPA3).
 - `POST /api/wifi/uplink/login`: `{enabled}` starts (ten minutes) or ends login mode;

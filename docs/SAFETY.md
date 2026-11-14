@@ -216,7 +216,7 @@ restoration, boot grace and backup management are described in
 
 The optional `openui-screen` supervisor may stop `zte_topsw_devui` only after
 verified boot synchronization and only for a panel session the owner opened: from
-the webpage, with the two-finger hold or four presses on the device, or once per
+the webpage, with four presses on the device, or once per
 boot when opening at startup is chosen. It never disables the init service. It
 records brightness and touch-service state before stopping UI, and restores on
 exit, on idle when the stock UI is the chosen idle action, after fifteen seconds

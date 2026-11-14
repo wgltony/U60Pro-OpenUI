@@ -56,9 +56,10 @@ pub struct Settings {
     /// Screen language; follows the web panel's language switch.
     #[serde(default = "default_language")]
     pub language: String,
-    /// Two fingers held still on the lit stock UI open DevUI (`screen_touch`).
-    #[serde(default = "enabled")]
-    pub touch_enabled: bool,
+    /// The two-finger hold this build no longer has: read from files saved before, so
+    /// they still load, and never written back.
+    #[serde(default, skip_serializing, rename = "touch_enabled")]
+    _removed_touch: serde::de::IgnoredAny,
     /// Open DevUI once the stock UI has come up after a boot.
     #[serde(default)]
     pub open_at_boot: bool,
@@ -82,7 +83,7 @@ impl Default for Settings {
             home_page: "menu".into(),
             menu_items: DEFAULT_MENU.map(String::from).to_vec(),
             language: default_language(),
-            touch_enabled: true,
+            _removed_touch: serde::de::IgnoredAny,
             open_at_boot: false,
             idle_sleep: true,
         }
@@ -284,8 +285,10 @@ struct Update {
     menu_items: Vec<String>,
     /// Optional: the language normally changes through `PUT /api/screen/language`.
     language: Option<String>,
+    /// Sent by pages from before the two-finger hold was removed; accepted and ignored.
+    #[serde(default, rename = "touch_enabled")]
+    _removed_touch: Option<bool>,
     /// Optional for pages from before these settings; an absent value keeps the saved one.
-    touch_enabled: Option<bool>,
     open_at_boot: Option<bool>,
     idle_sleep: Option<bool>,
 }
@@ -309,7 +312,7 @@ fn prepare(old: &Settings, body: &[u8]) -> Prepared {
         home_page: u.home_page,
         menu_items: u.menu_items,
         language: u.language.unwrap_or_else(|| old.language.clone()),
-        touch_enabled: u.touch_enabled.unwrap_or(old.touch_enabled),
+        _removed_touch: serde::de::IgnoredAny,
         open_at_boot: u.open_at_boot.unwrap_or(old.open_at_boot),
         idle_sleep: u.idle_sleep.unwrap_or(old.idle_sleep),
     };
@@ -588,21 +591,26 @@ mod tests {
         );
     }
     #[test]
-    fn touch_boot_and_idle_choices() {
+    fn boot_and_idle_choices() {
         let fresh = Settings::default();
-        assert!(fresh.touch_enabled && !fresh.open_at_boot && fresh.idle_sleep);
+        assert!(!fresh.open_at_boot && fresh.idle_sleep);
+        // A file saved when the two-finger hold existed still loads; the key is not kept.
+        let with_touch: Settings = serde_json::from_value(json!({"revision":9,"shortcut_enabled":true,"brightness":128,"idle_seconds":120,"home_page":"menu","menu_items":["overview"],"language":"zh","touch_enabled":false,"open_at_boot":false,"idle_sleep":true})).unwrap();
+        assert!(with_touch.shortcut_enabled && with_touch.revision == 9);
+        assert!(!serde_json::to_string(&with_touch)
+            .unwrap()
+            .contains("touch"));
         // Settings saved before these choices existed get the defaults.
         let saved: Settings = serde_json::from_value(json!({"revision":3,"shortcut_enabled":true,"brightness":128,"idle_seconds":120,"home_page":"menu","menu_items":["overview"],"language":"en"})).unwrap();
-        assert!(saved.touch_enabled && !saved.open_at_boot && saved.idle_sleep);
+        assert!(!saved.open_at_boot && saved.idle_sleep);
         // A page that does not know them keeps the saved values.
         let old = Settings {
-            touch_enabled: false,
             open_at_boot: true,
             idle_sleep: false,
             ..Settings::default()
         };
         let kept = prepare(&old, &serde_json::to_vec(&body()).unwrap()).unwrap();
-        assert!(!kept.touch_enabled && kept.open_at_boot && !kept.idle_sleep);
+        assert!(kept.open_at_boot && !kept.idle_sleep);
         assert!(
             kept.projection()
                 .ends_with("W 2 90 160 4 17 zh 0\nY 2 90 160 4 17 zh 0\n"),
@@ -614,7 +622,8 @@ mod tests {
         b["open_at_boot"] = json!(false);
         b["idle_sleep"] = json!(true);
         let chosen = prepare(&old, &serde_json::to_vec(&b).unwrap()).unwrap();
-        assert!(chosen.touch_enabled && !chosen.open_at_boot && chosen.idle_sleep);
+        // An older page's two-finger switch is accepted and changes nothing.
+        assert!(!chosen.open_at_boot && chosen.idle_sleep);
         // Only W and Y carry the idle action; C and V keep the six fields older screens read.
         let projection = chosen.projection();
         assert_eq!(

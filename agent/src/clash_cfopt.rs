@@ -1,10 +1,23 @@
 //! Cloudflare IP optimization for Clash nodes that run through Cloudflare (VLESS, VMess
-//! or Trojan over WebSocket or gRPC with TLS, on a port Cloudflare proxies). In the spirit
-//! of CloudflareSpeedTest, but sized for a mobile link: TCP-connect a few hundred sampled
-//! edge addresses, check the fastest with a TLS request for the node's own domain, and
-//! speed-test the best three with 2 MB each. The profile then carries, for each such node,
-//! a copy pointed at the winner and the original, in a fallback group under the node's
-//! own name: groups and rules keep working, and a failing address falls back to DNS.
+//! or Trojan over WebSocket or gRPC with TLS, on a port Cloudflare proxies), sized for a
+//! mobile link. Two stages:
+//!
+//! 1. Coarse, at the edge: TCP-connect a few hundred sampled addresses and check the
+//!    fastest with a TLS request for the node's own domain, which also names the data
+//!    center. This costs a few hundred kilobytes and only shortlists.
+//! 2. Through the node: a few finalists (one per data center first, plus the addresses
+//!    in use) each carry a real request and a short download through a throwaway core
+//!    that listens on loopback only. What the edge answers says nothing about the leg
+//!    from that data center to the node's own server, and that leg is where addresses
+//!    differ: two that look alike at the edge can be seconds apart through the node.
+//!
+//! The pick is the lowest time to first byte among finalists whose download is not far
+//! behind the best; the runner-up becomes the backup. The profile then carries, for each
+//! such node, a copy on the pick, a copy on the backup and the original, in a fallback
+//! group under the node's own name: groups and rules keep working, and a failing address
+//! falls back to the next. Between full runs a single delay check through the running
+//! core confirms the pick still holds, so a metered link is not spent on re-testing; a
+//! change of uplink (Wi-Fi relay or cellular) starts a full run of its own.
 //! Runs on its own thread (the HTTP server has few workers); pages poll the state.
 use crate::{clash, clash_ctl, storage};
 use serde::{Deserialize, Serialize};
@@ -53,17 +66,34 @@ const PROBE_THREADS: usize = 24;
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(1000);
 /// Addresses checked with a TLS request after the TCP round.
 const SHORTLIST: usize = 10;
-/// Addresses speed-tested, and the size of each test.
-const SPEED_TESTS: usize = 3;
-const SPEED_BYTES: u64 = 2_000_000;
-/// A new address must beat the current one by this much to replace it, so the core is
+/// New addresses tested through the node, besides the ones in use and the DNS answer.
+const FINALISTS: usize = 4;
+/// Requests per finalist for the time to first byte; the fastest counts.
+const TTFB_TRIES: usize = 3;
+/// Download through the node per finalist: on the Wi-Fi relay, and on cellular data.
+const DOWNLOAD_WIFI: u64 = 4_000_000;
+const DOWNLOAD_CELL: u64 = 1_000_000;
+/// A finalist whose download is under this share of the best one is out.
+const SPEED_SHARE: f64 = 0.5;
+/// A new address must beat the one in use by this much to replace it, so the core is
 /// not reloaded (and connections reset) for noise.
-const SPEED_MARGIN: f64 = 1.15;
-const LATENCY_MARGIN_MS: u32 = 15;
+const TTFB_MARGIN: f64 = 1.15;
+const TTFB_MARGIN_MS: u32 = 40;
+/// Download that warms the path up before anything is measured.
+const WARM_UP: u64 = 500_000;
+/// The throwaway core: its directory (on tmpfs) and the first loopback port.
+const TEST_DIR: &str = "/tmp/openui-cfopt";
+const TEST_PORT: u16 = 17900;
+/// A full run at least this often; in between, a due run is a delay check when the pick
+/// still answers within `HOLD_FACTOR` (plus `HOLD_SLACK_MS`) of its delay when chosen.
+const FULL_EVERY_SECS: u64 = 24 * 3600;
+const HOLD_FACTOR: f64 = 1.5;
+const HOLD_SLACK_MS: u32 = 150;
 /// Wait after a failed automatic run before trying again.
 const RETRY_SECS: u64 = 1800;
 /// Name suffixes of the two halves of an optimized node.
 pub(crate) const CF_TAG: &str = "CF优选";
+pub(crate) const BAK_TAG: &str = "CF备选";
 pub(crate) const DNS_TAG: &str = "原域名";
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
@@ -96,8 +126,12 @@ pub(crate) struct Probe {
     ip: String,
     colo: String,
     connect_ms: u32,
+    /// TLS handshake at the edge (stage 1).
     tls_ms: Option<u32>,
+    /// Download through the node, kbit/s (stage 2).
     speed_kbps: Option<u32>,
+    /// Time to first byte of a new HTTPS request through the node (stage 2).
+    ttfb_ms: Option<u32>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Node {
@@ -109,7 +143,14 @@ pub(crate) struct Node {
 #[serde(default)]
 struct State {
     applied: Option<Probe>,
+    /// The runner-up, second in the fallback group.
+    backup: Option<Probe>,
     applied_at: u64,
+    /// The uplink the pick was measured on: `wifi` or `cell`.
+    uplink: String,
+    /// When stage 2 last ran, and the pick's delay through the running core then.
+    full_run: u64,
+    ref_delay_ms: Option<u32>,
     /// The node's own DNS answer, measured the same way, for comparison.
     baseline: Option<Probe>,
     candidates: Vec<Probe>,
@@ -273,9 +314,47 @@ fn resolve(domain: &str, port: u16) -> Vec<Ipv4Addr> {
         .unwrap_or_default()
 }
 
+/// A copy of node `m` under `name`, connecting to `ip` instead of its domain. The address
+/// replaces the domain, so TLS and WebSocket must still name it.
+fn pointed(m: &Mapping, domain: &str, name: &str, ip: &str) -> Mapping {
+    let mut copy = m.clone();
+    copy.insert("name".into(), name.into());
+    copy.insert("server".into(), ip.into());
+    let sni = if text(m, "type") == Some("trojan") {
+        "sni"
+    } else {
+        "servername"
+    };
+    if text(m, sni).is_none() {
+        copy.insert(sni.into(), domain.into());
+    }
+    if text(m, "network") == Some("ws") {
+        let mut ws = copy
+            .get("ws-opts")
+            .and_then(Yaml::as_mapping)
+            .cloned()
+            .unwrap_or_default();
+        let mut headers = ws
+            .get("headers")
+            .and_then(Yaml::as_mapping)
+            .cloned()
+            .unwrap_or_default();
+        if !headers
+            .keys()
+            .any(|k| k.as_str().is_some_and(|k| k.eq_ignore_ascii_case("host")))
+        {
+            headers.insert("Host".into(), domain.into());
+            ws.insert("headers".into(), Yaml::Mapping(headers));
+            copy.insert("ws-opts".into(), Yaml::Mapping(ws));
+        }
+    }
+    copy
+}
+
 /// Points each optimized node at `ip`: the node's name becomes a fallback group of a copy
-/// on `ip` and the original. Returns how many nodes changed.
-pub(crate) fn apply_to(map: &mut Mapping, nodes: &[Node], ip: &str) -> usize {
+/// on `ip`, a copy on `backup` when there is one, and the original. Returns how many
+/// nodes changed.
+pub(crate) fn apply_to(map: &mut Mapping, nodes: &[Node], ip: &str, backup: Option<&str>) -> usize {
     let shapes = shaped(map);
     let mut names: HashSet<String> = HashSet::new();
     for k in ["proxies", "proxy-groups"] {
@@ -294,6 +373,7 @@ pub(crate) fn apply_to(map: &mut Mapping, nodes: &[Node], ip: &str) -> usize {
     let Some(proxies) = map.get_mut("proxies").and_then(Yaml::as_sequence_mut) else {
         return 0;
     };
+    let backup = backup.filter(|b| *b != ip);
     let mut groups = vec![];
     let mut i = 0;
     while i < proxies.len() {
@@ -304,56 +384,35 @@ pub(crate) fn apply_to(map: &mut Mapping, nodes: &[Node], ip: &str) -> usize {
         let name = text(m, "name").unwrap_or("").to_string();
         let wanted = nodes.iter().find(|n| n.name == name);
         let shape = shapes.iter().find(|n| n.name == name);
-        let (cf, dns) = (format!("{name} | {CF_TAG}"), format!("{name} | {DNS_TAG}"));
+        let (cf, bak, dns) = (
+            format!("{name} | {CF_TAG}"),
+            format!("{name} | {BAK_TAG}"),
+            format!("{name} | {DNS_TAG}"),
+        );
         match (wanted, shape) {
-            (Some(n), Some(s)) if n == s && !names.contains(&cf) && !names.contains(&dns) => {
+            (Some(n), Some(s))
+                if n == s && ![&cf, &bak, &dns].iter().any(|x| names.contains(*x)) =>
+            {
                 let mut original = m.clone();
                 original.insert("name".into(), dns.clone().into());
-                let mut copy = m.clone();
-                copy.insert("name".into(), cf.clone().into());
-                copy.insert("server".into(), ip.into());
-                // The address replaces the domain, so TLS and WebSocket must still name it.
-                let sni = if text(m, "type") == Some("trojan") {
-                    "sni"
-                } else {
-                    "servername"
-                };
-                if text(m, sni).is_none() {
-                    copy.insert(sni.into(), n.domain.clone().into());
+                let mut members = vec![Yaml::Mapping(pointed(m, &n.domain, &cf, ip))];
+                let mut order: Vec<Yaml> = vec![cf.into()];
+                if let Some(b) = backup {
+                    members.push(Yaml::Mapping(pointed(m, &n.domain, &bak, b)));
+                    order.push(bak.into());
                 }
-                if text(m, "network") == Some("ws") {
-                    let mut ws = copy
-                        .get("ws-opts")
-                        .and_then(Yaml::as_mapping)
-                        .cloned()
-                        .unwrap_or_default();
-                    let mut headers = ws
-                        .get("headers")
-                        .and_then(Yaml::as_mapping)
-                        .cloned()
-                        .unwrap_or_default();
-                    if !headers
-                        .keys()
-                        .any(|k| k.as_str().is_some_and(|k| k.eq_ignore_ascii_case("host")))
-                    {
-                        headers.insert("Host".into(), n.domain.clone().into());
-                        ws.insert("headers".into(), Yaml::Mapping(headers));
-                        copy.insert("ws-opts".into(), Yaml::Mapping(ws));
-                    }
-                }
-                proxies[i] = Yaml::Mapping(copy);
-                proxies.insert(i + 1, Yaml::Mapping(original));
+                members.push(Yaml::Mapping(original));
+                order.push(dns.into());
+                let count = members.len();
+                proxies.splice(i..=i, members);
                 let mut g = Mapping::new();
                 g.insert("name".into(), name.into());
                 g.insert("type".into(), "fallback".into());
-                g.insert(
-                    "proxies".into(),
-                    Yaml::Sequence(vec![cf.into(), dns.into()]),
-                );
+                g.insert("proxies".into(), Yaml::Sequence(order));
                 g.insert("url".into(), clash::DELAY_URL.into());
                 g.insert("interval".into(), 300.into());
                 groups.push(Yaml::Mapping(g));
-                i += 2;
+                i += count;
             }
             _ => i += 1,
         }
@@ -376,7 +435,14 @@ pub(crate) fn rewrite(map: &mut Mapping) -> bool {
     }
     let st = load_state();
     match &st.applied {
-        Some(p) => apply_to(map, &st.nodes, &p.ip) > 0,
+        Some(p) => {
+            apply_to(
+                map,
+                &st.nodes,
+                &p.ip,
+                st.backup.as_ref().map(|b| b.ip.as_str()),
+            ) > 0
+        }
         None => false,
     }
 }
@@ -462,57 +528,251 @@ fn parse_trace(out: &str, ip: Ipv4Addr) -> Option<Probe> {
         connect_ms: ms(connect).unwrap_or(0),
         tls_ms: ms(tls).filter(|t| *t > 0),
         speed_kbps: None,
+        ttfb_ms: None,
     })
 }
-/// Downloads `SPEED_BYTES` from Cloudflare's speed test at `ip`; kbit/s and bytes received.
-fn speed(ip: &str) -> (Option<u32>, u64) {
-    let resolve = format!("speed.cloudflare.com:443:{ip}");
-    let url = format!("https://speed.cloudflare.com/__down?bytes={SPEED_BYTES}");
-    let out = curl(
-        &[
-            "-s",
-            "--resolve",
-            &resolve,
-            "-m",
-            "10",
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code} %{speed_download} %{size_download}",
-            &url,
-        ],
-        13,
-    );
-    parse_speed(&out)
-}
-fn parse_speed(out: &str) -> (Option<u32>, u64) {
+/// What curl reports for a download of `wanted` bytes: kbit/s when the measurement
+/// counts, and the bytes received.
+fn parse_speed(out: &str, wanted: u64) -> (Option<u32>, u64) {
     let mut f = out.split_whitespace();
     let code = f.next().unwrap_or("");
     let rate = f.next().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
     let size = f.next().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) as u64;
     // A timed-out download still measured something once it got far enough.
-    let ok = (code == "200" || size >= SPEED_BYTES / 10) && rate > 0.0;
+    let ok = (code == "200" || size >= wanted / 10) && rate > 0.0 && size > 0;
     (ok.then(|| (rate * 8.0 / 1000.0).round() as u32), size)
 }
-/// The pick between the current address and the best new one: the current one stays
-/// unless the new one is clearly better.
-fn choose(current: Option<&Probe>, best: &Probe, speed_test: bool) -> bool {
-    let Some(cur) = current else { return true };
-    if cur.ip == best.ip {
-        return false;
+/// `"<status> <seconds to first byte>"` of a request that reached its target.
+fn parse_ttfb(out: &str) -> Option<u32> {
+    let mut f = out.split_whitespace();
+    let code = f.next()?;
+    let secs = f.next()?.parse::<f64>().ok()?;
+    (matches!(code, "200" | "204") && secs > 0.0).then(|| (secs * 1000.0).round() as u32)
+}
+
+// ---------- Through the node ----------
+
+/// The uplink carrying the router's traffic, which the measurements describe.
+fn uplink() -> &'static str {
+    if crate::wifi_uplink::online() {
+        "wifi"
+    } else {
+        "cell"
     }
-    match (
-        speed_test,
-        cur.speed_kbps,
-        best.speed_kbps,
-        cur.tls_ms,
-        best.tls_ms,
-    ) {
-        (true, Some(c), Some(b), _, _) => f64::from(b) >= f64::from(c) * SPEED_MARGIN,
-        (true, None, Some(_), _, _) => true,
-        (_, _, _, Some(c), Some(b)) => b + LATENCY_MARGIN_MS <= c,
-        _ => false,
+}
+/// The throwaway core's profile: one copy of `node` per address, each behind its own
+/// loopback listener, and nothing of the user's (no TUN, DNS, controller or rules).
+fn test_profile(node: &Mapping, domain: &str, ips: &[Ipv4Addr]) -> Mapping {
+    let mut map = Mapping::new();
+    map.insert("allow-lan".into(), false.into());
+    map.insert("mode".into(), "rule".into());
+    map.insert("log-level".into(), "warning".into());
+    map.insert("ipv6".into(), false.into());
+    let mut dns = Mapping::new();
+    dns.insert("enable".into(), false.into());
+    map.insert("dns".into(), Yaml::Mapping(dns));
+    let (mut proxies, mut listeners) = (vec![], vec![]);
+    for (i, ip) in ips.iter().enumerate() {
+        let name = format!("c{i}");
+        proxies.push(Yaml::Mapping(pointed(node, domain, &name, &ip.to_string())));
+        let mut l = Mapping::new();
+        l.insert("name".into(), format!("l{i}").into());
+        l.insert("type".into(), "mixed".into());
+        l.insert("listen".into(), "127.0.0.1".into());
+        l.insert("port".into(), (i32::from(TEST_PORT) + i as i32).into());
+        l.insert("proxy".into(), name.into());
+        listeners.push(Yaml::Mapping(l));
     }
+    map.insert("proxies".into(), Yaml::Sequence(proxies));
+    map.insert("listeners".into(), Yaml::Sequence(listeners));
+    map.insert("rules".into(), Yaml::Sequence(vec!["MATCH,DIRECT".into()]));
+    map
+}
+/// The throwaway core; dropping it stops the process and removes its directory.
+struct TestCore(std::process::Child);
+impl Drop for TestCore {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+        let _ = fs::remove_dir_all(TEST_DIR);
+    }
+}
+/// Removes what a run that did not live to clean up left behind: its core, when the
+/// recorded process still is that core, and its directory.
+fn sweep_test_core() {
+    let pid = fs::read_to_string(format!("{TEST_DIR}/pid"))
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .filter(|p| *p > 1);
+    if let Some(pid) = pid {
+        let ours = fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| {
+            let c = String::from_utf8_lossy(&c);
+            c.starts_with(clash::MIHOMO) && c.contains(TEST_DIR)
+        });
+        if ours {
+            // SAFETY: a plain signal to a process just identified as the leftover core.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+    let _ = fs::remove_dir_all(TEST_DIR);
+}
+fn start_test_core(profile: &Mapping, listeners: usize) -> Result<TestCore, String> {
+    use std::os::unix::fs::DirBuilderExt;
+    const FAILED: &str = "Cannot start the test core for the node measurements";
+    sweep_test_core();
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(TEST_DIR)
+        .map_err(|_| FAILED)?;
+    let config = format!("{TEST_DIR}/config.yaml");
+    let text = serde_norway::to_string(profile).map_err(|_| FAILED)?;
+    // The profile holds the node's credentials: private file in a private directory.
+    storage::atomic_write(Path::new(&config), text.as_bytes()).map_err(|_| FAILED)?;
+    let child = Command::new(clash::MIHOMO)
+        .args(["-d", TEST_DIR, "-f", &config])
+        .env("GOMEMLIMIT", "64MiB")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|_| FAILED)?;
+    let _ = fs::write(format!("{TEST_DIR}/pid"), child.id().to_string());
+    let mut core = TestCore(child);
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let up = |i: usize| {
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, TEST_PORT + i as u16));
+        TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+    };
+    while Instant::now() < deadline {
+        if !matches!(core.0.try_wait(), Ok(None)) {
+            break;
+        }
+        if (0..listeners).all(up) {
+            return Ok(core);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Err(FAILED.into())
+}
+/// One finalist through the node, by its listener: the best time to first byte of a few
+/// new HTTPS requests, then a download of `bytes` (none when 0). Also the bytes received.
+fn through(port: u16, bytes: u64) -> (Option<u32>, Option<u32>, u64) {
+    let proxy = format!("http://127.0.0.1:{port}");
+    let mut ttfb: Option<u32> = None;
+    for _ in 0..TTFB_TRIES {
+        let out = curl(
+            &[
+                "-s",
+                "-o",
+                "/dev/null",
+                "-m",
+                "8",
+                "-x",
+                &proxy,
+                "-w",
+                "%{http_code} %{time_starttransfer}",
+                clash::DELAY_URL,
+            ],
+            10,
+        );
+        match parse_ttfb(&out) {
+            Some(ms) => ttfb = Some(ttfb.map_or(ms, |best| best.min(ms))),
+            // An address that does not carry the node is not asked again.
+            None if ttfb.is_none() => break,
+            None => {}
+        }
+    }
+    if ttfb.is_none() || bytes == 0 {
+        return (ttfb, None, 0);
+    }
+    let url = format!("https://speed.cloudflare.com/__down?bytes={bytes}");
+    let out = curl(
+        &[
+            "-s",
+            "-o",
+            "/dev/null",
+            "-m",
+            "12",
+            "-x",
+            &proxy,
+            "-w",
+            "%{http_code} %{speed_download} %{size_download}",
+            &url,
+        ],
+        15,
+    );
+    let (kbps, size) = parse_speed(&out, bytes);
+    (ttfb, kbps, size)
+}
+/// Which of `verified` (fastest edge handshake first) go through the node: the addresses
+/// in `keep` (in use, backup, DNS answer), then `FINALISTS` new ones, one per data center
+/// first. The leg from the data center to the node's server is what separates them, so
+/// several addresses of one data center say less than one address of each.
+fn finalists(verified: &[Probe], keep: &[&str]) -> Vec<usize> {
+    let mut out: Vec<usize> = (0..verified.len())
+        .filter(|&i| keep.contains(&verified[i].ip.as_str()))
+        .collect();
+    let kept = out.len();
+    let mut colos: HashSet<&str> = HashSet::new();
+    for (i, p) in verified.iter().enumerate() {
+        if out.len() - kept < FINALISTS && !out.contains(&i) && colos.insert(p.colo.as_str()) {
+            out.push(i);
+        }
+    }
+    for i in 0..verified.len() {
+        if out.len() - kept < FINALISTS && !out.contains(&i) {
+            out.push(i);
+        }
+    }
+    out
+}
+/// Whether `held` keeps its place against the best `other`: the other must be clearly
+/// faster, by a share and by an absolute gap, to take it.
+fn stays(held: u32, other: u32) -> bool {
+    f64::from(other) * TTFB_MARGIN > f64::from(held) || other + TTFB_MARGIN_MS > held
+}
+/// The pick and the backup among the finalists, as indexes. An address that did not carry
+/// a request is out, and with downloads measured so is one far behind the best download.
+/// Of the rest the lowest time to first byte wins, except that the addresses in use stay
+/// unless clearly beaten.
+fn select(
+    tested: &[Probe],
+    current: Option<&str>,
+    backup: Option<&str>,
+    speed_test: bool,
+) -> Option<(usize, Option<usize>)> {
+    let mut left: Vec<usize> = (0..tested.len())
+        .filter(|&i| tested[i].ttfb_ms.is_some())
+        .collect();
+    let best = left.iter().filter_map(|&i| tested[i].speed_kbps).max();
+    if let (true, Some(best)) = (speed_test, best) {
+        left.retain(|&i| {
+            tested[i]
+                .speed_kbps
+                .is_some_and(|k| f64::from(k) >= f64::from(best) * SPEED_SHARE)
+        });
+    }
+    left.sort_by_key(|&i| tested[i].ttfb_ms);
+    let ttfb = |i: usize| tested[i].ttfb_ms.unwrap_or(u32::MAX);
+    let prefer = |left: &[usize], held: Option<&str>| -> Option<usize> {
+        let first = *left.first()?;
+        let held = left
+            .iter()
+            .copied()
+            .find(|&i| Some(tested[i].ip.as_str()) == held);
+        Some(match held {
+            Some(h) if stays(ttfb(h), ttfb(first)) => h,
+            _ => first,
+        })
+    };
+    let pick = prefer(&left, current)?;
+    left.retain(|&i| i != pick);
+    Some((pick, prefer(&left, backup)))
+}
+/// Whether the pick still holds between full runs: its delay through the running core
+/// now, against the delay it had when chosen.
+fn still_good(reference: u32, now: u32) -> bool {
+    f64::from(now) <= f64::from(reference) * HOLD_FACTOR + f64::from(HOLD_SLACK_MS)
 }
 
 // ---------- A run ----------
@@ -548,7 +808,11 @@ fn measure(s: &Settings, previous: &State) -> Result<Outcome, String> {
         .as_ref()
         .and_then(|p| p.ip.parse::<Ipv4Addr>().ok());
     let mut ips = sample(SAMPLE, &mut Rng::new());
-    let mut keep: Vec<Ipv4Addr> = current.into_iter().collect();
+    let held = st
+        .backup
+        .as_ref()
+        .and_then(|p| p.ip.parse::<Ipv4Addr>().ok());
+    let mut keep: Vec<Ipv4Addr> = current.into_iter().chain(held).collect();
     keep.extend(dns_ips.iter().take(2));
     keep.extend(
         previous
@@ -565,7 +829,11 @@ fn measure(s: &Settings, previous: &State) -> Result<Outcome, String> {
     let reached = tcp_round(&ips, first.port);
     let mut bytes = ips.len() as u64 * 2 * 200;
     let mut short: Vec<Ipv4Addr> = reached.iter().take(SHORTLIST).map(|r| r.0).collect();
-    for ip in current.iter().chain(dns_ips.iter().take(1)) {
+    for ip in current
+        .iter()
+        .chain(held.iter())
+        .chain(dns_ips.iter().take(1))
+    {
         if !short.contains(ip) {
             short.push(*ip);
         }
@@ -590,61 +858,81 @@ fn measure(s: &Settings, previous: &State) -> Result<Outcome, String> {
         return Err("No Cloudflare address answered; check the mobile data connection".into());
     }
     let cur_ip = current.map(|c| c.to_string());
-    if s.speed_test {
-        phase("speed");
-        let mut tests: Vec<usize> = (0..verified.len().min(SPEED_TESTS)).collect();
-        if let Some(i) = verified.iter().position(|p| Some(&p.ip) == cur_ip.as_ref()) {
-            if !tests.contains(&i) {
-                tests.pop();
-                tests.push(i);
-            }
-        }
-        for i in tests {
-            let (kbps, size) = speed(&verified[i].ip);
-            bytes += size;
-            verified[i].speed_kbps = kbps;
-        }
-    }
-    let best = if s.speed_test {
-        verified
-            .iter()
-            .filter(|p| p.speed_kbps.is_some())
-            .max_by_key(|p| p.speed_kbps)
-            .unwrap_or(&verified[0])
-    } else {
-        &verified[0]
-    }
-    .clone();
-    let cur = verified.iter().find(|p| Some(&p.ip) == cur_ip.as_ref());
-    let switch = choose(cur, &best, s.speed_test);
-    let applied = if switch {
-        best
-    } else {
-        cur.cloned().unwrap_or(best)
+    let held_ip = held.map(|c| c.to_string());
+    let dns_ip = dns_ips.first().map(|d| d.to_string());
+    let keep: Vec<&str> = [&cur_ip, &held_ip, &dns_ip]
+        .into_iter()
+        .filter_map(|ip| ip.as_deref())
+        .collect();
+    let chosen: Vec<(usize, Ipv4Addr)> = finalists(&verified, &keep)
+        .into_iter()
+        .filter_map(|i| Some((i, verified[i].ip.parse().ok()?)))
+        .collect();
+    phase("speed");
+    let node = map
+        .get("proxies")
+        .and_then(Yaml::as_sequence)
+        .into_iter()
+        .flatten()
+        .filter_map(Yaml::as_mapping)
+        .find(|m| text(m, "name") == Some(first.name.as_str()))
+        .ok_or("No node in the active subscription runs through Cloudflare")?;
+    let size = match (s.speed_test, uplink()) {
+        (false, _) => 0,
+        (true, "wifi") => DOWNLOAD_WIFI,
+        (true, _) => DOWNLOAD_CELL,
     };
+    {
+        let ips: Vec<Ipv4Addr> = chosen.iter().map(|c| c.1).collect();
+        let _core = start_test_core(&test_profile(node, &first.domain, &ips), ips.len())?;
+        // Whatever goes through first is slow: measured on the device, the first finalist
+        // took twice the time to first byte and half the download of the same address
+        // tested later, whichever address it was. The first finalist is the one in use,
+        // so without this every run would find it beaten. Not counted, only paid for.
+        let (_, _, used) = through(TEST_PORT, WARM_UP.min(size));
+        bytes += used + TTFB_TRIES as u64 * 6000;
+        for (slot, (i, _)) in chosen.iter().enumerate() {
+            let (ttfb, kbps, used) = through(TEST_PORT + slot as u16, size);
+            bytes += used + TTFB_TRIES as u64 * 6000;
+            verified[*i].ttfb_ms = ttfb;
+            verified[*i].speed_kbps = kbps;
+        }
+    }
+    let mut tested: Vec<Probe> = chosen.iter().map(|c| verified[c.0].clone()).collect();
+    let Some((pick, second)) = select(&tested, cur_ip.as_deref(), held_ip.as_deref(), s.speed_test)
+    else {
+        return Err("No Cloudflare address worked through the node; kept the current one".into());
+    };
+    let applied = tested[pick].clone();
+    let backup = second.map(|i| tested[i].clone());
+    let ip_of = |p: Option<&Probe>| p.map(|p| p.ip.clone());
     let profile_has_it =
         fs::read_to_string(clash::PROFILE).is_ok_and(|p| p.contains(&format!("| {CF_TAG}")));
-    let reload = previous.applied.as_ref().map(|p| &p.ip) != Some(&applied.ip)
+    let moved = ip_of(previous.applied.as_ref()).as_ref() != Some(&applied.ip);
+    let reload = moved
+        || ip_of(previous.backup.as_ref()) != ip_of(backup.as_ref())
         || previous.nodes != st.nodes
         || !profile_has_it;
-    if previous.applied.as_ref().map(|p| &p.ip) != Some(&applied.ip) {
+    if moved {
         st.applied_at = now();
     }
-    st.baseline = dns_ips
-        .first()
-        .and_then(|d| verified.iter().find(|p| p.ip == d.to_string()))
+    st.baseline = dns_ip
+        .as_ref()
+        .and_then(|d| tested.iter().find(|p| &p.ip == d))
         .cloned();
     st.applied = Some(applied);
-    st.candidates = verified.into_iter().take(5).collect();
+    st.backup = backup;
+    tested.sort_by_key(|p| p.ttfb_ms.unwrap_or(u32::MAX));
+    st.candidates = tested.into_iter().take(6).collect();
     st.tested = ips.len() as u32;
     st.data_kb = bytes / 1000;
+    st.uplink = uplink().into();
+    st.full_run = now();
     Ok(Outcome { st, reload })
 }
-/// The delay of the optimized copy of the first node, through the core.
-fn works(st: &State) -> bool {
-    let Some(n) = st.nodes.first() else {
-        return false;
-    };
+/// The delay of the optimized copy of the first node, through the running core.
+fn live_delay(st: &State) -> Option<u32> {
+    let n = st.nodes.first()?;
     let url: String = clash::DELAY_URL
         .bytes()
         .map(|b| match b {
@@ -663,7 +951,10 @@ fn works(st: &State) -> bool {
         None,
         16,
     )
-    .is_ok_and(|v| v["delay"].as_u64().is_some_and(|d| d > 0))
+    .ok()
+    .and_then(|v| v["delay"].as_u64())
+    .filter(|d| *d > 0)
+    .and_then(|d| u32::try_from(d).ok())
 }
 fn optimize() -> Result<(), String> {
     let s = load_settings();
@@ -699,10 +990,12 @@ fn optimize() -> Result<(), String> {
             Ok(()) if REJECTED.lock().unwrap().is_some() => {
                 Some("The core rejected the optimized profile".into())
             }
-            Ok(()) if !works(&st) => {
-                Some("The new address did not work through the node; kept the previous one".into())
+            Ok(()) => {
+                st.ref_delay_ms = live_delay(&st);
+                st.ref_delay_ms.is_none().then(|| {
+                    "The new address did not work through the node; kept the previous one".into()
+                })
             }
-            Ok(()) => None,
         };
         if let Some(e) = failed {
             let mut back = previous;
@@ -712,8 +1005,11 @@ fn optimize() -> Result<(), String> {
             let _ = clash::reload_profile();
             return Err(e);
         }
+    } else {
+        // Same addresses: the reference for the checks between full runs is refreshed.
+        st.ref_delay_ms = live_delay(&st).or(st.ref_delay_ms);
     }
-    Ok(())
+    save_state(&st)
 }
 fn spawn() {
     if RUNNING.swap(true, Ordering::AcqRel) {
@@ -745,17 +1041,52 @@ fn next_run(s: &Settings, st: &State) -> Option<u64> {
         },
     )
 }
-/// Runs when due while Clash runs; checks every minute.
+/// A due run that needs no measuring: the pick was measured on this uplink within the
+/// day and still answers through the running core about as fast as when it was chosen.
+/// Recorded as a run, so the next one is an interval away. Costs one small request.
+fn holds(st: &State, t: u64) -> bool {
+    let fresh = st.full_run <= t && t - st.full_run < FULL_EVERY_SECS;
+    if st.applied.is_none() || st.last_error.is_some() || st.uplink != uplink() || !fresh {
+        return false;
+    }
+    let (Some(reference), Some(delay)) = (st.ref_delay_ms, live_delay(st)) else {
+        return false;
+    };
+    if !still_good(reference, delay) {
+        return false;
+    }
+    let mut st = st.clone();
+    st.last_run = t;
+    st.last_attempt = t;
+    save_state(&st).is_ok()
+}
+/// Runs when due while Clash runs; checks every minute. Also runs once the uplink has
+/// been a different one than the pick was measured on for two checks in a row: the best
+/// address through a Wi-Fi relay is rarely the best on cellular data.
 pub fn start() {
     std::thread::spawn(|| {
+        sweep_test_core();
         std::thread::sleep(Duration::from_secs(90));
+        let mut moved = 0u32;
         loop {
             let (s, st) = (load_settings(), load_state());
             let t = now();
             // A clock set back would otherwise postpone the next run by as much.
             let due = next_run(&s, &st)
                 .is_some_and(|n| t >= n || st.last_attempt.max(st.last_run) > t + 3600);
-            if due && clash::stored_enabled() && clash::core_running() {
+            let elsewhere = s.enabled
+                && s.interval_hours != 0
+                && st.applied.is_some()
+                && !st.uplink.is_empty()
+                && st.uplink != uplink()
+                && (st.last_error.is_none() || t >= st.last_attempt + RETRY_SECS);
+            moved = if elsewhere { moved + 1 } else { 0 };
+            if clash::stored_enabled()
+                && clash::core_running()
+                && !RUNNING.load(Ordering::Acquire)
+                && (moved >= 2 || (due && !holds(&st, t)))
+            {
+                moved = 0;
                 spawn();
             }
             std::thread::sleep(Duration::from_secs(60));
@@ -773,7 +1104,8 @@ fn view() -> Value {
     json!({"revision":s.revision,"enabled":s.enabled,"interval_hours":s.interval_hours,
         "intervals":INTERVALS,"speed_test":s.speed_test,"running":running,
         "phase":running.then(|| *PHASE.lock().unwrap()),
-        "applied":st.applied,"applied_at":st.applied_at,"baseline":st.baseline,
+        "applied":st.applied,"backup":st.backup,"applied_at":st.applied_at,"baseline":st.baseline,
+        "uplink":st.uplink,"full_run_age_s":(st.full_run > 0).then(|| t.saturating_sub(st.full_run)),
         "candidates":st.candidates,"nodes":st.nodes.iter().map(|n| &n.name).collect::<Vec<_>>(),
         "last_run":st.last_run,"last_attempt":st.last_attempt,"error":rejected.or(st.last_error.clone()),
         "next_run":next_run(&s, &st),"tested":st.tested,"data_kb":st.data_kb,
@@ -899,7 +1231,7 @@ rules: [MATCH,Pick]
     fn applying_keeps_names_working_through_a_fallback_group() {
         let mut map = profile();
         let nodes = shaped(&map);
-        assert_eq!(apply_to(&mut map, &nodes, "104.16.1.1"), 3);
+        assert_eq!(apply_to(&mut map, &nodes, "104.16.1.1", None), 3);
         let proxies = map["proxies"].as_sequence().unwrap();
         let find = |name: &str| {
             proxies
@@ -943,7 +1275,77 @@ rules: [MATCH,Pick]
         let mut moved = profile();
         let mut stale = shaped(&moved);
         stale[0].domain = "old.example.com".into();
-        assert_eq!(apply_to(&mut moved, &stale[..1], "104.16.1.1"), 0);
+        assert_eq!(apply_to(&mut moved, &stale[..1], "104.16.1.1", None), 0);
+    }
+    #[test]
+    fn a_backup_address_sits_between_the_pick_and_the_original() {
+        let mut map = profile();
+        let nodes = shaped(&map);
+        assert_eq!(
+            apply_to(&mut map, &nodes[..1], "104.16.1.1", Some("172.64.1.1")),
+            1
+        );
+        let names: Vec<&str> = map["proxies"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["name"].as_str())
+            .collect();
+        assert_eq!(
+            names[..4],
+            ["CDN | CF优选", "CDN | CF备选", "CDN | 原域名", "Bare"]
+        );
+        let backup = map["proxies"][1].as_mapping().unwrap();
+        assert_eq!(text(backup, "server"), Some("172.64.1.1"));
+        assert_eq!(text(backup, "servername"), Some("cdn.example.com"));
+        let group = map["proxy-groups"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|g| g["name"].as_str() == Some("CDN"))
+            .unwrap();
+        let order: Vec<&str> = group["proxies"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(Yaml::as_str)
+            .collect();
+        assert_eq!(order, ["CDN | CF优选", "CDN | CF备选", "CDN | 原域名"]);
+        // A backup equal to the pick adds nothing.
+        let mut same = profile();
+        apply_to(&mut same, &nodes[..1], "104.16.1.1", Some("104.16.1.1"));
+        assert_eq!(same["proxies"][1]["name"].as_str(), Some("CDN | 原域名"));
+    }
+    #[test]
+    fn the_test_core_only_listens_on_loopback_for_its_copies() {
+        let map = profile();
+        let node = map["proxies"][1].as_mapping().unwrap();
+        let ips: Vec<Ipv4Addr> = vec!["104.16.1.1".parse().unwrap(), "172.64.1.1".parse().unwrap()];
+        let t = test_profile(node, "bare.example.com", &ips);
+        let text_of = serde_norway::to_string(&t).unwrap();
+        for absent in [
+            "tun",
+            "external-controller",
+            "mixed-port",
+            "bare.example.com:",
+        ] {
+            assert!(!t.contains_key(absent), "{absent}");
+        }
+        assert_eq!(t["dns"]["enable"].as_bool(), Some(false));
+        assert_eq!(t["allow-lan"].as_bool(), Some(false));
+        let listeners = t["listeners"].as_sequence().unwrap();
+        assert_eq!(listeners.len(), 2);
+        for (i, l) in listeners.iter().enumerate() {
+            assert_eq!(l["listen"].as_str(), Some("127.0.0.1"));
+            assert_eq!(l["port"].as_u64(), Some(u64::from(TEST_PORT) + i as u64));
+            assert_eq!(l["proxy"].as_str(), t["proxies"][i]["name"].as_str());
+        }
+        assert_eq!(t["proxies"][1]["server"].as_str(), Some("172.64.1.1"));
+        assert_eq!(
+            t["proxies"][1]["servername"].as_str(),
+            Some("bare.example.com")
+        );
+        assert!(text_of.contains("MATCH,DIRECT"));
     }
     #[test]
     fn samples_are_cloudflare_addresses_in_distinct_blocks() {
@@ -970,28 +1372,142 @@ rules: [MATCH,Pick]
         );
         assert!(parse_trace("\n000 0.000000 0.000000", ip).is_none());
         assert!(parse_trace("colo=EWR\n\n403 0.03 0.2", ip).is_none());
-        assert_eq!(parse_speed("200 2708269 2000000"), (Some(21666), 2_000_000));
-        assert_eq!(parse_speed("000 0 0"), (None, 0));
+        let size = 2_000_000;
+        assert_eq!(
+            parse_speed("200 2708269 2000000", size),
+            (Some(21666), 2_000_000)
+        );
+        assert_eq!(parse_speed("000 0 0", size), (None, 0));
         // A download cut off at the time limit still counts once it got far enough.
-        assert_eq!(parse_speed("200 50000 300000").0, Some(400));
-        assert_eq!(parse_speed("000 90000 900000").0, Some(720));
+        assert_eq!(parse_speed("200 50000 300000", size).0, Some(400));
+        assert_eq!(parse_speed("000 90000 900000", size).0, Some(720));
+        assert_eq!(parse_speed("000 90000 100000", size).0, None);
+        assert_eq!(parse_ttfb("204 0.425293"), Some(425));
+        assert_eq!(parse_ttfb("200 1.5"), Some(1500));
+        assert_eq!(parse_ttfb("000 0.000000"), None);
+        assert_eq!(parse_ttfb("502 0.3"), None);
+        assert_eq!(parse_ttfb(""), None);
+    }
+    fn tested(ip: &str, colo: &str, ttfb: Option<u32>, kbps: Option<u32>) -> Probe {
+        Probe {
+            ip: ip.into(),
+            colo: colo.into(),
+            connect_ms: 10,
+            tls_ms: Some(200),
+            speed_kbps: kbps,
+            ttfb_ms: ttfb,
+        }
     }
     #[test]
-    fn the_current_address_stays_unless_clearly_beaten() {
-        let p = |ip: &str, tls: u32, kbps: Option<u32>| Probe {
-            ip: ip.into(),
-            colo: "X".into(),
-            connect_ms: 10,
-            tls_ms: Some(tls),
-            speed_kbps: kbps,
+    fn finalists_cover_the_addresses_in_use_and_one_per_data_center_first() {
+        let v: Vec<Probe> = [
+            ("1.0.0.1", "NRT"),
+            ("1.0.0.2", "NRT"),
+            ("1.0.0.3", "NRT"),
+            ("1.0.0.4", "SIN"),
+            ("1.0.0.5", "NRT"),
+            ("1.0.0.6", "HKG"),
+            ("1.0.0.7", "NRT"),
+            ("1.0.0.8", "LAX"),
+        ]
+        .iter()
+        .map(|(ip, colo)| tested(ip, colo, None, None))
+        .collect();
+        let ips = |keep: &[&str]| -> Vec<&str> {
+            finalists(&v, keep)
+                .into_iter()
+                .map(|i| v[i].ip.as_str())
+                .collect()
         };
-        let cur = p("1.1.1.1", 200, Some(20_000));
-        assert!(choose(None, &p("2.2.2.2", 300, None), true));
-        assert!(!choose(Some(&cur), &p("2.2.2.2", 150, Some(22_000)), true));
-        assert!(choose(Some(&cur), &p("2.2.2.2", 250, Some(23_000)), true));
-        assert!(!choose(Some(&cur), &cur, true));
-        assert!(!choose(Some(&cur), &p("2.2.2.2", 190, None), false));
-        assert!(choose(Some(&cur), &p("2.2.2.2", 180, None), false));
+        // One per data center, in edge order; the kept ones come on top of the four.
+        assert_eq!(ips(&[]), ["1.0.0.1", "1.0.0.4", "1.0.0.6", "1.0.0.8"]);
+        assert_eq!(
+            ips(&["1.0.0.5", "9.9.9.9"]),
+            ["1.0.0.5", "1.0.0.1", "1.0.0.4", "1.0.0.6", "1.0.0.8"]
+        );
+        // Fewer data centers than places: the fastest remaining fill up.
+        assert_eq!(
+            finalists(&v[..3], &[]).len().min(FINALISTS),
+            3,
+            "all of a short list"
+        );
+        let two: Vec<Probe> = v[..5].to_vec();
+        let picked: Vec<&str> = finalists(&two, &[])
+            .into_iter()
+            .map(|i| two[i].ip.as_str())
+            .collect();
+        assert_eq!(picked, ["1.0.0.1", "1.0.0.4", "1.0.0.2", "1.0.0.3"]);
+    }
+    #[test]
+    fn the_pick_is_the_fastest_through_the_node_not_at_the_edge() {
+        // The measured case: two data centers alike at the edge, one useless through the node.
+        let t = vec![
+            tested("1.0.0.1", "SIN", Some(2800), Some(300)),
+            tested("1.0.0.2", "NRT", Some(770), Some(140_000)),
+            tested("1.0.0.3", "NRT", Some(790), Some(146_000)),
+            tested("1.0.0.4", "AMS", None, None),
+        ];
+        assert_eq!(select(&t, None, None, true), Some((1, Some(2))));
+        // Without downloads only an address that carried nothing is out.
+        assert_eq!(select(&t, None, None, false), Some((1, Some(2))));
+        let slow_but_quick = vec![
+            tested("1.0.0.1", "A", Some(300), Some(1_000)),
+            tested("1.0.0.2", "B", Some(500), Some(40_000)),
+        ];
+        assert_eq!(select(&slow_but_quick, None, None, true), Some((1, None)));
+        assert_eq!(
+            select(&slow_but_quick, None, None, false),
+            Some((0, Some(1)))
+        );
+        assert_eq!(select(&t[3..], None, None, true), None);
+        // Downloads that all failed do not empty the list.
+        let no_speed = vec![
+            tested("1.0.0.1", "A", Some(300), None),
+            tested("1.0.0.2", "B", Some(500), None),
+        ];
+        assert_eq!(select(&no_speed, None, None, true), Some((0, Some(1))));
+    }
+    #[test]
+    fn the_addresses_in_use_stay_unless_clearly_beaten() {
+        let t = vec![
+            tested("1.0.0.1", "A", Some(430), Some(40_000)),
+            tested("1.0.0.2", "A", Some(470), Some(40_000)),
+            tested("1.0.0.3", "A", Some(480), Some(40_000)),
+            tested("1.0.0.4", "A", Some(900), Some(40_000)),
+        ];
+        // Within the margin: both the pick and the backup in use are kept.
+        assert_eq!(
+            select(&t, Some("1.0.0.2"), Some("1.0.0.3"), true),
+            Some((1, Some(2)))
+        );
+        // Clearly beaten: replaced, and a backup that is gone is replaced too.
+        assert_eq!(
+            select(&t, Some("1.0.0.4"), Some("9.9.9.9"), true),
+            Some((0, Some(1)))
+        );
+        // The pick in use dropped out for its download: the next best takes over.
+        let mut slow = t.clone();
+        slow[1].speed_kbps = Some(2_000);
+        assert_eq!(
+            select(&slow, Some("1.0.0.2"), Some("1.0.0.3"), true),
+            Some((0, Some(2)))
+        );
+        assert!(stays(500, 450) && stays(520, 490) && !stays(600, 500));
+        // A small absolute gap never moves a fast pick, whatever the ratio.
+        assert!(stays(60, 30));
+    }
+    #[test]
+    fn between_full_runs_the_pick_holds_while_its_delay_does() {
+        assert!(still_good(400, 420) && still_good(400, 750));
+        assert!(!still_good(400, 751) && !still_good(200, 900));
+        let saved: State = serde_json::from_str(
+            r#"{"applied":{"ip":"1.0.0.1","colo":"DTW","connect_ms":16,"tls_ms":204,"speed_kbps":40059},
+                "applied_at":5,"nodes":[],"last_run":7}"#,
+        )
+        .unwrap();
+        // A state file from before the backup and the node measurements still loads.
+        assert!(saved.backup.is_none() && saved.uplink.is_empty() && saved.full_run == 0);
+        assert_eq!(saved.applied.unwrap().ttfb_ms, None);
     }
     #[test]
     fn schedule_waits_the_interval_or_the_retry() {

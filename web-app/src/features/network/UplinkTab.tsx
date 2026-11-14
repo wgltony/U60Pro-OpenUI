@@ -163,6 +163,7 @@ function NetworkDialog({
   const [security, setSecurity] = useState<UplinkSecurity>(draft.security)
   const [password, setPassword] = useState('')
   const [hidden, setHidden] = useState(draft.hidden)
+  const [avoidDfs, setAvoidDfs] = useState(!!draft.saved?.avoid_dfs)
   const keeps = !!draft.saved?.has_password && draft.saved.security !== 'open' && security !== 'open' && password === ''
   const ssidBad = draft.scanned || draft.saved ? null : ssidProblem(ssid)
   const passwordBad = keeps ? null : passwordProblem(security, password)
@@ -179,6 +180,7 @@ function NetworkDialog({
         security,
         ...(security !== 'open' && !keeps ? { password } : {}),
         hidden,
+        avoid_dfs: avoidDfs,
       },
       connect,
     )
@@ -221,6 +223,13 @@ function NetworkDialog({
             <span>{t('Hidden network (it does not broadcast its name)')}</span>
           </label>
         )}
+        <label className="flex items-start gap-2 text-[13px] text-ink2">
+          <input type="checkbox" className="mt-0.5" checked={avoidDfs} onChange={(e) => setAvoidDfs(e.target.checked)} />
+          <span>
+            {t('Avoid DFS channels')}
+            <span className="block text-[11px] text-ink3">{t('Join only access points on 2.4 GHz or on 5 GHz channels 36–48 and 149–177. Off by default: any channel is joined.')}</span>
+          </span>
+        </label>
         {!canAdd && !draft.saved && <p className="text-[11px] text-danger">{t('The list is full; delete a saved network first.')}</p>}
         <div className="flex flex-wrap justify-end gap-2 pt-1">
           <Button type="button" variant="ghost" onClick={onClose}>{t('Cancel')}</Button>
@@ -401,6 +410,7 @@ function SavedCard({
                     <div className="mt-0.5 flex flex-wrap gap-1">
                       <Chip>{t(SECURITY[n.security])}</Chip>
                       {n.hidden && <Chip>{t('Hidden')}</Chip>}
+                      {n.avoid_dfs && <Chip>{t('No DFS')}</Chip>}
                       {n.security !== 'open' && !n.has_password && <Chip tone="danger">{t('No password')}</Chip>}
                       {current && <Chip tone={status.online ? 'ok' : 'accent'}>{t('In use')}</Chip>}
                     </div>

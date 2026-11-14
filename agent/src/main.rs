@@ -34,7 +34,6 @@ mod router;
 mod screen;
 mod screen_settings;
 mod screen_shortcut;
-mod screen_touch;
 mod server;
 mod signal_logger;
 mod sim;
@@ -59,6 +58,18 @@ use handlers::AppState;
 
 const DEFAULT_THREADS: usize = 4;
 const STARTUP_SCRIPT: &str = "/data/local/tmp/start_zte_agent.sh";
+const TTL_SCRIPT: &str = "/data/local/tmp/start_ttl.sh";
+
+/// Root's own regular file (not a link), made private before it is run.
+fn ttl_script_trusted(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    meta.file_type().is_file()
+        && meta.uid() == 0
+        && std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).is_ok()
+}
 
 fn main() {
     // The start script pipes the agent's output through a second copy of itself.
@@ -99,10 +110,14 @@ fn main() {
 
     state.charge_limit.start(charger_rx);
 
-    // Apply persisted TTL settings if they exist
-    let _ = std::process::Command::new("sh")
-        .arg("/data/local/tmp/start_ttl.sh")
-        .bounded_output();
+    // Apply persisted TTL settings if they exist. The file is run as root: one left
+    // writable by others (earlier builds wrote it in place and kept such a mode) is
+    // closed first, and a file that is not root's own regular file is not run at all.
+    if ttl_script_trusted(std::path::Path::new(TTL_SCRIPT)) {
+        let _ = std::process::Command::new("sh")
+            .arg(TTL_SCRIPT)
+            .bounded_output();
+    }
 
     // Before Tailscale: a clock stuck in the past after a battery-less reboot breaks its
     // TLS sign-in. Syncs the system clock in the background, for everything, not just this.

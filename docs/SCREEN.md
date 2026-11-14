@@ -3,7 +3,7 @@
 Open **DevUI** in the OpenUI sidebar. This page manages the device's 320×480
 touchscreen, which follows the web panel's language (Chinese or English). It provides
 **Open DevUI screen**, **Restore stock UI**, the ways to open DevUI from the device
-(a two-finger hold, at startup, a four-press power-button shortcut), and saved
+(at startup, a four-press power-button shortcut), and saved
 preferences. Closing the browser does not close the device screen. Leaving DevUI
 never turns a proxy off or changes saved device routing.
 
@@ -12,35 +12,20 @@ never turns a proxy off or changes saved device routing.
 1. Deploy the screen with `--screen` (together with the agent of the same version) and
    run `scripts/verify-screen.py` once; until it passes, DevUI does not open from the
    webpage or the device.
-2. Open it with **DevUI → Open DevUI screen**, or on the lit stock UI hold two fingers
-   still on the screen for two seconds. **Open DevUI at startup** and the four-press
-   power-button shortcut are optional.
-3. Tap a menu row or tile to open it; **‹ Back** is at the top left and **Stock UI** on
-   the main menu leaves DevUI. A short power press turns the display off or on; holding
+2. Open it with **DevUI → Open DevUI screen**, or from the device with the four-press
+   power-button shortcut once it is switched on. **Open DevUI at startup** is optional.
+3. The home screen shows the uplink in use, the speed, the proxy and the devices
+   online; tap a tile to open a feature. **‹** at the top left goes back and
+   **Stock UI** at the bottom of the home screen leaves DevUI. A short power press turns the display off or on; holding
    the power key opens the power menu (shut down, restart, stock UI). After the
    idle time (two minutes by default) the screen turns off and DevUI stays, or, if
    chosen, the stock UI returns.
 
 ## Opening DevUI from the device
 
-**Two-finger hold** (on by default). On the lit stock UI, hold two fingers still on the
-screen for **two seconds**; DevUI opens through its normal startup path. Put the
-fingers where the stock UI has no button: the stock UI also receives the touches.
-- The agent reads the `sitronix` touchscreen without EVIOCGRAB, beside the stock touch
-  bridge (`mtdev2tuio`).
-- Exactly two fingers count. One finger (a stock long press), a third finger, a finger
-  lifted early, or moving more than a twelfth of the screen does not open DevUI.
-- Touches already down when the agent starts, or across dropped events, count only
-  after every finger has lifted. The screen must stay lit for the whole hold: a hold
-  that starts in the dark does not count, even when touch wake-up lights the screen.
-- After a launch, a five-second cooldown applies, and the fingers must lift before
-  another hold counts.
-- Like the shortcut, it needs a verified screen component, and the supervisor still
-  checks the factory boot handshake before it takes over.
-
-**The stock lock screen does not protect DevUI.** The stock UI's lock is a hold on the
-screen followed by its PIN, and the agent cannot see whether it is locked, so the hold
-opens DevUI from the lock screen too. The four-press shortcut behaves the same.
+The two-finger hold of earlier versions has been removed; from the device, the
+four-press shortcut is the way in. A settings file that still carries the old switch
+loads as before.
 
 **Open DevUI at startup** (off by default). Once per boot, after the firmware's boot
 barrier (`/tmp/zte_boot_done`), with `zte_topsw_devui` running and the stock daemons
@@ -97,7 +82,6 @@ modify factory menus, binaries, boot scripts, power-off or hardware-reset behavi
 
 | Setting | Behavior |
 | --- | --- |
-| Two-finger hold | Open DevUI from the lit stock UI; on by default |
 | Open at startup | Open DevUI once per boot after the stock UI has started; off by default |
 | Four-press shortcut | Enable or disable entry from stock UI with the power button; off by default |
 | Brightness | 20–255, shown as a percentage; updates while awake without waking a sleeping panel |
@@ -121,8 +105,7 @@ light the stock display again if it was previously awake.
 
 Click **Save DevUI settings** to persist edits. The screen picks up brightness,
 idle time and action, and menu visibility within its two-second polling interval.
-The two-finger hold and four-press switches apply at once, opening at startup from
-the next boot. Revision
+The four-press switch applies at once, opening at startup from the next boot. Revision
 checks reject stale saves from another browser session; **Reload settings**
 reloads the device's saved version. Settings contain no passwords, VPN keys, HTML,
 scripts or shell commands.
@@ -232,8 +215,8 @@ sh screen/build.sh --preview
 
 Deployment snapshots the previous components and verification marker for rollback.
 Restore stock UI before replacing a running screen executable. A new screen binary
-invalidates the marker until the device recovery checks pass. The webpage, the
-two-finger hold, opening at startup and the power-button shortcut all respect this gate.
+invalidates the marker until the device recovery checks pass. The webpage,
+opening at startup and the power-button shortcut all respect this gate.
 
 The following command temporarily takes over the screen and tests backlight
 sleep/wake, startup without touch, crash and stall recovery, web open/close,
@@ -265,7 +248,7 @@ python3 scripts/verify-devui-settings.py --gateway 192.168.0.1 --port 2222 \
 ## Interfaces and process ownership
 
 - Authenticated `GET /api/screen`: availability, verification, lifecycle state,
-  settings revision and the status of the shortcut and two-finger-hold listeners.
+  settings revision and the status of the shortcut listener.
 - Authenticated `POST /api/screen` / `DELETE /api/screen`: asynchronous open and
   restore. A single startup reservation and supervisor lock prevent duplicate owners.
 - Authenticated `GET /api/screen/settings` / `PUT /api/screen/settings`: typed,
@@ -355,9 +338,7 @@ profiles, concurrent revision capture, pagination, drafts, HTML escaping,
 confirmation, stale controls, hidden features, battery states and rotation.
 Agent tests cover settings validation and conflicts plus four-press recognition,
 slow sequences, long presses, repeats, bounce and dropped events. They also cover
-the two-finger hold: one or three fingers, a lifted finger, drift, fingers already
-down or across dropped events, and the hold-off while DevUI runs; and the
-power-off-charging check for opening at startup. Optimized screen builds retain
+the power-off-charging check for opening at startup. Optimized screen builds retain
 self-test assertions.
 
 Drawing: each status poll (every two seconds) rebuilds the page's HTML, which is cheap,
@@ -373,8 +354,7 @@ actual touch axes and checks the dedicated power input. `--power-check` performs
 supervised five-second off/on/off cycle with sysfs readback and stock recovery.
 It does not inject power events into the factory input device. Recovery checks
 also verify stock synchronization, HTTP access, default route and unchanged
-WireGuard configuration hashes. Physical four-press interaction, the two-finger
-hold beside the stock UI, opening at startup and first-open screen appearance
+WireGuard configuration hashes. Physical four-press interaction, opening at startup and first-open screen appearance
 require confirmation on the device; a successful ioctl alone cannot prove the LCD's
 visual appearance. VPN exit verification is separate.
 

@@ -680,7 +680,12 @@ pub fn ttl_set(body: &[u8]) -> (u16, Value) {
     let script = format!(
         "#!/bin/sh\niptables  -t mangle -C PREROUTING -i br-lan -j TTL --ttl-set {ttl} 2>/dev/null ||   iptables  -t mangle -A PREROUTING -i br-lan -j TTL --ttl-set {ttl}\nip6tables -t mangle -C PREROUTING -i br-lan -j HL  --hl-set  {ttl} 2>/dev/null ||   ip6tables -t mangle -A PREROUTING -i br-lan -j HL  --hl-set  {ttl}\n"
     );
-    let _ = std::fs::write("/data/local/tmp/start_ttl.sh", script);
+    // Replaced, never rewritten in place: the agent runs this file as root at every
+    // start, so it must not keep a mode that lets another user edit it.
+    let _ = crate::storage::atomic_write(
+        std::path::Path::new("/data/local/tmp/start_ttl.sh"),
+        script.as_bytes(),
+    );
     if ok4 || ok6 {
         (
             200,
@@ -702,9 +707,9 @@ pub fn ttl_clear() -> (u16, Value) {
         "ip6tables -t mangle -S PREROUTING 2>/dev/null | grep 'HL --hl-set' | while read -r rule; do ip6tables -t mangle $(echo \"$rule\" | sed 's/-A/-D/'); done"
     ]).bounded_output();
     // Remove persistence script content (keep file but make it a no-op)
-    let _ = std::fs::write(
-        "/data/local/tmp/start_ttl.sh",
-        "#!/bin/sh\n# TTL disabled\n",
+    let _ = crate::storage::atomic_write(
+        std::path::Path::new("/data/local/tmp/start_ttl.sh"),
+        b"#!/bin/sh\n# TTL disabled\n",
     );
     (200, json!({"ok": true}))
 }

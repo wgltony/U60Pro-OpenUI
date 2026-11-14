@@ -4,6 +4,9 @@
 use crate::{process::BoundedCommand, storage};
 use std::{path::Path, process::Command, time::Duration};
 
+/// Tailscale's tunnel device, which runs beside a backend when it has no exit node.
+const TAILNET: &str = "tailscale0";
+
 pub struct Egress {
     /// User-facing backend name used in error messages.
     pub label: &'static str,
@@ -170,7 +173,12 @@ ip -4 route flush table {table} 2>/dev/null || true
         if self.masquerade {
             out.push_str(&format!("iptables -w 2 -t nat -A {p}_NAT -o {iface} -m mark --mark {mark}/{mark} -j MASQUERADE\n"));
         }
-        out.push_str(&format!("iptables -w 2 -A {p}_FWD -i {iface} -o br-lan -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\niptables -w 2 -A {p}_FWD -i br-lan -o {iface} -m mark --mark {mark}/{mark} -j ACCEPT\niptables -w 2 -A {p}_FWD -i br-lan -m mark --mark {mark}/{mark} ! -o br-lan -j REJECT\niptables -w 2 -t mangle -A {p}_MSS -o {iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\n"));
+        // Tailscale's own rule (table 52, before every backend's) already sent a marked
+        // device's packets for a tailnet peer to its tunnel. Accept them there: the
+        // reject below is for packets about to leave over the WAN, and without this a
+        // device the backend routes cannot reach the tailnet while Tailscale runs
+        // beside it. Nothing matches while Tailscale is off or holds no route.
+        out.push_str(&format!("iptables -w 2 -A {p}_FWD -i {iface} -o br-lan -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\niptables -w 2 -A {p}_FWD -i br-lan -o {iface} -m mark --mark {mark}/{mark} -j ACCEPT\niptables -w 2 -A {p}_FWD -i br-lan -o {TAILNET} -m mark --mark {mark}/{mark} -j ACCEPT\niptables -w 2 -A {p}_FWD -i br-lan -m mark --mark {mark}/{mark} ! -o br-lan -j REJECT\niptables -w 2 -t mangle -A {p}_MSS -o {iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\n"));
         out.push_str(&format!("ip6tables -w 2 -A {p}_V6 ! -i br-lan -j RETURN\nip6tables -w 2 -A {p}_V6 -o br-lan -j RETURN\nip6tables -w 2 -A {p}_DNS6 ! -i br-lan -j RETURN\n"));
         out.push_str(&self.selection(
             mode,

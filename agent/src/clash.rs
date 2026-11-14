@@ -1737,6 +1737,11 @@ mod tests {
         assert!(p.contains("ip -4 route replace default dev ou-clash0 metric 10 table 10421"));
         assert!(p.contains("iptables -w 2 -A OUCL_DNS4 -i ou-clash0 -j ACCEPT"));
         assert!(!p.contains("OUWG") && !p.contains("0x40000000"));
+        // A routed device still reaches the tailnet: accepted before the WAN reject.
+        let tailnet = p
+            .find("-A OUCL_FWD -i br-lan -o tailscale0 -m mark --mark 0x20000000/0x20000000 -j ACCEPT")
+            .expect("tailnet accept");
+        assert!(tailnet < p.find("! -o br-lan -j REJECT").unwrap());
     }
     #[test]
     fn proxies_are_ordered_like_the_profile() {

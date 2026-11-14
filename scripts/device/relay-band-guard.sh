@@ -27,6 +27,20 @@ AP_5G=wlan2
 CTRL=/data/vendor/wifi/hostapd
 STATE=/data/local/tmp/relay-band-guard.disabled   # the AP this guard disabled, if any
 BOOT_GRACE=180   # seconds after boot to wait for the relay before giving a band back
+# The relay interface also vanishes for a moment on an agent restart, a reconnect
+# and every firmware Wi-Fi reload. Giving the band back then makes things worse:
+# the AP comes up only to be paused again, and when its interface is gone too the
+# restore is a second Wi-Fi reload, which removes the new relay interface (three
+# such losses in ten minutes pause the relay). So while the relay is still saved
+# as on, the band is given back only after the interface stayed away this long.
+# A relay that was turned off gives the band back at once.
+ABSENT_GRACE=90
+RELAY_CONFIG=/data/local/tmp/openui-uplink/config.json
+# Seconds between passes: while something may change, with no relay at all, and
+# once the relay is associated and its band is already paused.
+PACE_ACTIVE=1
+PACE_IDLE=2
+PACE_STEADY=5
 PIDFILE=/var/run/relay-band-guard.pid
 
 LOG=/data/local/tmp/openui-logs/relay-guard.log   # shown on the web page's log card
@@ -42,6 +56,12 @@ hapd() { hostapd_cli -p "$CTRL" -i "$1" "$2" 2>/dev/null; }
 ap_state() { hapd "$1" status | sed -n 's/^state=//p'; }
 radio_of() { [ "$1" = "$AP_2G" ] && echo wifi0 || echo wifi1; }
 uptime_s() { cut -d. -f1 /proc/uptime; }
+# Whether the relay is saved as on. The agent writes compact JSON with the top-level
+# switch second; an unreadable file counts as on, which only delays a restore.
+relay_enabled() {
+	[ -r "$RELAY_CONFIG" ] || return 0
+	! grep -q '^{"revision":[0-9]*,"enabled":false' "$RELAY_CONFIG"
+}
 
 # Mark the paused band as off in UCI for the UI, without a Wi-Fi reload.
 uci_pause() {
@@ -131,8 +151,11 @@ trap cleanup EXIT
 trap 'exit 0' HUP INT TERM
 log "guard started"
 
+absent_since=
 while :; do
+	pace=$PACE_ACTIVE
 	if [ -d "/sys/class/net/$STA" ]; then
+		absent_since=
 		freq=$(sta_freq)
 		if [ -n "$freq" ]; then
 			if [ "$freq" -lt 3000 ]; then want=$AP_2G; band=2.4G; else want=$AP_5G; band=5G; fi
@@ -141,11 +164,24 @@ while :; do
 				ap_restore "relay moved to $band"
 			fi
 			ap_disable "$want" "$band ($freq MHz)"
+			[ "$(cat "$STATE" 2>/dev/null)" != "$want" ] || pace=$PACE_STEADY
 		fi
 		# Not associated yet / between networks: keep whatever is disabled.
+	elif [ ! -s "$STATE" ]; then
+		# No relay and nothing paused.
+		absent_since=
+		pace=$PACE_IDLE
 	elif [ "$(uptime_s)" -ge "$BOOT_GRACE" ]; then
 		# Right after boot the relay may not be up yet; don't give the band back early.
-		ap_restore "relay off"
+		now=$(uptime_s)
+		[ -n "$absent_since" ] || absent_since=$now
+		if ! relay_enabled; then
+			ap_restore "relay off"
+			absent_since=
+		elif [ $((now - absent_since)) -ge "$ABSENT_GRACE" ]; then
+			ap_restore "relay gone for ${ABSENT_GRACE}s"
+			absent_since=
+		fi
 	fi
-	sleep 1
+	sleep "$pace"
 done

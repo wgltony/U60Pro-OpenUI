@@ -17,11 +17,16 @@ use std::{
 };
 
 const CURL: &str = "/usr/bin/curl";
-/// Domestic, plain-HTTP, DIRECT-routed by Clash; each answers with a `Date` header.
-const SOURCES: [&str; 3] = [
+/// Plain-HTTP sites that answer with a live `Date` header. The first three are domestic
+/// and DIRECT-routed by Clash; the last two are reachable where those are not, so the
+/// clock does not depend on one region. (Not captive.apple.com: its `Date` is a cached
+/// one, seen a day old.)
+const SOURCES: [&str; 5] = [
     "http://www.baidu.com",
     "http://www.qq.com",
     "http://www.taobao.com",
+    "http://www.gstatic.com/generate_204",
+    "http://www.msftconnecttest.com/connecttest.txt",
 ];
 /// Any epoch below this is implausible: a system clock under it is wrong and a fetched
 /// time under it is rejected. 2026-06-01 UTC, comfortably before this build.

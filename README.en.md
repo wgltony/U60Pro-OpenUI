@@ -149,8 +149,7 @@ The dashboard is in Simplified Chinese by default, with an English switch. See t
 ## DevUI quick start
 
 1. Open **DevUI** in the dashboard sidebar and select **Open DevUI screen**.
-2. To enter on the device, hold two fingers still on the lit stock UI for 2 seconds,
-   where the stock UI has no button. Two more ways are switched on in the webpage and saved:
+2. To enter on the device, two ways are switched on in the webpage and saved:
    - **Open DevUI at startup**: opens once the stock UI has finished starting, never
      while the device charges switched off;
    - **Press four times to open DevUI**: four short power-button presses within
@@ -163,8 +162,8 @@ The dashboard is in Simplified Chinese by default, with an English switch. See t
    page and visible menu features on the same webpage. Saving applies display and
    menu changes live; the startup page applies the next time DevUI opens.
 
-The two-finger hold is on by default; opening at startup and the four-press shortcut
-are off. The stock lock screen does not stop the two-finger hold or the four presses.
+Opening at startup and the four-press shortcut are off by default. The stock lock
+screen does not stop the four presses.
 **Stock UI** and **Back** (top left) are always on screen. Leaving DevUI does not affect
 the network.
 

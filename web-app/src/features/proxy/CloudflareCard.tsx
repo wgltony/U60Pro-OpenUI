@@ -99,7 +99,7 @@ export default function CloudflareCard() {
         <div className="flex items-start justify-between gap-4">
           <div>
             <p className="text-[13px] font-medium text-ink">{t('Optimize automatically')}</p>
-            <p className="mt-1 text-xs leading-relaxed text-ink2">{t('For nodes served through Cloudflare (TLS over WebSocket or gRPC): tests Cloudflare edge addresses from this router and points those nodes at the fastest. The domain stays as a fallback.')}</p>
+            <p className="mt-1 text-xs leading-relaxed text-ink2">{t('For nodes served through Cloudflare (TLS over WebSocket or gRPC): shortlists Cloudflare edge addresses from this router, then measures the best of each data center through the node itself and points those nodes at the fastest. The runner-up and the domain stay as fallbacks.')}</p>
           </div>
           <Toggle label={t('Optimize automatically')} checked={!!opt?.enabled} disabled={!opt || busy} onChange={v => void save({ enabled: v })} />
         </div>
@@ -114,7 +114,7 @@ export default function CloudflareCard() {
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-[13px] font-medium text-ink">{t('Speed test')}</p>
-                <p className="mt-1 text-xs text-ink2">{t('Downloads 2 MB from each of the 3 best addresses, about 6 MB a run. Off: picks by latency only.')}</p>
+                <p className="mt-1 text-xs text-ink2">{t('Downloads through the node from each finalist: 4 MB on the Wi-Fi relay, 1 MB on mobile data. Off: picks by time to first byte only. A full run happens at most once a day unless the pick slows down or the uplink changes.')}</p>
               </div>
               <Toggle label={t('Speed test')} checked={opt.speed_test} disabled={busy} onChange={v => void save({ speed_test: v })} />
             </div>
@@ -130,9 +130,12 @@ export default function CloudflareCard() {
             <p className="mt-1 flex flex-wrap items-center gap-2">
               <span className="font-mono text-base font-semibold text-ink">{a.ip}</span>
               <Chip>{a.colo}</Chip>
-              {a.tls_ms != null && <span className="text-[13px] text-ink2">{t('TLS {n} ms', { n: a.tls_ms })}</span>}
+              {a.ttfb_ms != null
+                ? <span className="text-[13px] text-ink2">{t('First byte {n} ms', { n: a.ttfb_ms })}</span>
+                : a.tls_ms != null && <span className="text-[13px] text-ink2">{t('TLS {n} ms', { n: a.tls_ms })}</span>}
               {a.speed_kbps != null && <span className="text-[13px] text-ink2">{mbps(a.speed_kbps)} Mbps</span>}
             </p>
+            {opt.backup && <p className="mt-1 text-xs text-ink2">{t('Backup: {ip} ({colo})', { ip: opt.backup.ip, colo: opt.backup.colo })}</p>}
             {gain != null && gain > 0 && opt.baseline && <p className="mt-1 text-xs text-ok">{t('{n} ms faster than the domain’s own address ({colo})', { n: gain, colo: opt.baseline.colo })}</p>}
             {opt.nodes.length > 0 && <p className="mt-1 text-xs text-ink2">{t('Used by: {nodes}', { nodes: opt.nodes.join(', ') })}</p>}
           </div>}
@@ -144,9 +147,10 @@ export default function CloudflareCard() {
                 <li key={c.ip} className="flex items-center gap-2 py-1.5">
                   <span className="w-32 font-mono text-ink">{c.ip}</span>
                   <span className="w-10 text-ink2">{c.colo}</span>
-                  <span className="w-20 text-ink2">{c.tls_ms != null ? t('TLS {n} ms', { n: c.tls_ms }) : '—'}</span>
+                  <span className="w-28 text-ink2">{c.ttfb_ms != null ? t('First byte {n} ms', { n: c.ttfb_ms }) : c.tls_ms != null ? t('TLS {n} ms', { n: c.tls_ms }) : '—'}</span>
                   <span className="text-ink2">{c.speed_kbps != null ? `${mbps(c.speed_kbps)} Mbps` : ''}</span>
                   {c.ip === a?.ip && <span className="ml-auto"><Chip tone="ok">{t('In use')}</Chip></span>}
+                  {c.ip === opt.backup?.ip && <span className="ml-auto"><Chip>{t('Backup')}</Chip></span>}
                 </li>
               ))}
             </ul>

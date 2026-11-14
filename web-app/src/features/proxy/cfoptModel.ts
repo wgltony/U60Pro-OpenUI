@@ -18,11 +18,15 @@ export function cfState(o: ClashCfOpt): 'off' | 'running' | 'clash_off' | 'no_no
 export function dailyMb(o: ClashCfOpt): number | null {
   if (!o.interval_hours) return null
   const perRun = o.data_kb > 0 ? o.data_kb / 1000 : o.speed_test ? 6.5 : 0.5
-  return Math.round((perRun * 24) / o.interval_hours)
+  // A full run happens at most once a day; the runs in between are one small request.
+  return Math.round(perRun * Math.min(1, 24 / o.interval_hours))
 }
 
-/** How much faster the TLS handshake is than at the domain's own DNS answer, in ms. */
+/** How much faster the pick is than the domain's own DNS answer, in ms: through the node
+ * when both were measured that way, else the TLS handshake at the edge. */
 export function gainMs(o: ClashCfOpt): number | null {
-  const a = o.applied?.tls_ms, b = o.baseline?.tls_ms
+  const both = o.applied?.ttfb_ms != null && o.baseline?.ttfb_ms != null
+  const a = both ? o.applied?.ttfb_ms : o.applied?.tls_ms
+  const b = both ? o.baseline?.ttfb_ms : o.baseline?.tls_ms
   return a != null && b != null && o.applied?.ip !== o.baseline?.ip ? b - a : null
 }

@@ -737,8 +737,12 @@ export interface CfProbe {
   /** Cloudflare data center (IATA code). */
   colo: string
   connect_ms: number
+  /** TLS handshake at the edge. */
   tls_ms: number | null
+  /** Download through the node, for the addresses tested through it. */
   speed_kbps: number | null
+  /** Time to first byte of a new HTTPS request through the node. */
+  ttfb_ms?: number | null
 }
 export type CfOptPhase = 'nodes' | 'probing' | 'verifying' | 'speed' | 'applying'
 /** `GET/PUT /api/clash/cfopt`, `POST /api/clash/cfopt/run` — agent/src/clash_cfopt.rs.
@@ -753,6 +757,10 @@ export interface ClashCfOpt {
   running: boolean
   phase: CfOptPhase | null
   applied: CfProbe | null
+  /** The runner-up, used when the pick stops answering. */
+  backup?: CfProbe | null
+  /** The uplink the pick was measured on. */
+  uplink?: '' | 'wifi' | 'cell'
   applied_at: number
   /** The node domain's own DNS answer, measured the same way. */
   baseline: CfProbe | null
@@ -832,8 +840,6 @@ export type DevUIPageId = 'tailscale' | 'overview' | 'proxy' | 'wireguard' | 'cl
 export interface DevUISettings {
   revision: number
   shortcut_enabled: boolean
-  /** Two fingers held still on the lit stock UI open DevUI. Absent from older agents. */
-  touch_enabled?: boolean
   /** DevUI opens once the stock UI has started after a boot. */
   open_at_boot?: boolean
   /** When idle: true turns the screen off and stays in DevUI, false returns to the stock UI. */
@@ -848,8 +854,6 @@ export interface DevUISettings {
 export interface ScreenStatus {
   settings_revision: number
   shortcut: { available: boolean; message: string }
-  /** The two-finger hold listener; absent from older agents. */
-  touch?: { available: boolean; message: string }
 
   available: boolean
   verified: boolean
@@ -951,6 +955,8 @@ export interface UplinkNetwork {
   ssid: string
   security: UplinkSecurity
   hidden: boolean
+  /** Join only access points on channels without radar detection. Off unless set. */
+  avoid_dfs?: boolean
   has_password: boolean
 }
 
@@ -1007,6 +1013,8 @@ export interface UplinkNetworkEdit {
   security: UplinkSecurity
   password?: string
   hidden: boolean
+  /** Omitted keeps the saved choice. */
+  avoid_dfs?: boolean
 }
 
 export interface UplinkUpdate {

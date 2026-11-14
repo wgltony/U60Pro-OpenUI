@@ -215,7 +215,7 @@ pub fn get() -> (u16, Value) {
     let state = fs::read_to_string(format!("{DIR}/state")).unwrap_or_else(|_| "idle".into());
     (
         200,
-        json!({"ok":true,"data":{"available":Path::new(BIN).is_file(),"verified":Path::new(VERIFIED).is_file(),"running":running,"shortcut":crate::screen_shortcut::status(),"touch":crate::screen_touch::status(),"settings_revision":crate::screen_settings::current().revision,"state":if STARTING.load(Ordering::Acquire) && owner().is_none() { "starting" } else if running || state.trim()=="error" {state.trim()} else {"idle"}}}),
+        json!({"ok":true,"data":{"available":Path::new(BIN).is_file(),"verified":Path::new(VERIFIED).is_file(),"running":running,"shortcut":crate::screen_shortcut::status(),"settings_revision":crate::screen_settings::current().revision,"state":if STARTING.load(Ordering::Acquire) && owner().is_none() { "starting" } else if running || state.trim()=="error" {state.trim()} else {"idle"}}}),
     )
 }
 pub fn open() -> (u16, Value) {
@@ -1112,7 +1112,6 @@ pub fn start(state: Arc<AppState>) {
         return;
     }
     crate::screen_shortcut::start();
-    crate::screen_touch::start();
     open_after_boot();
     let polled = || mono().saturating_sub(INTEREST.load(Ordering::Relaxed)) < 10;
     let clients_state = state.clone();
