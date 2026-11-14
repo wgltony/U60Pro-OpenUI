@@ -16,6 +16,12 @@ and FONT-COPYING. No system/vendor fonts are bundled.
 Source: https://unifoundry.com/unifont/index.html
 Pinned font download and reproducible build: devui/build.py.
 
+The screen also embeds the unmodified Noto Sans SC Regular (SubsetOTF, release
+Sans2.004) as its text face; Unifont remains the fallback for symbols.
+Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.
+The font is distributed under the SIL Open Font License 1.1; see FONT-LICENSE.
+Source: https://github.com/notofonts/noto-cjk
+
 Fork packaging and modifications: Copyright (c) 2026 ZweiChen.
 GPL-3.0-or-later.
 

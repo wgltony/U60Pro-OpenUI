@@ -110,7 +110,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         pins = next(ast.literal_eval(node.value) for node in tree.body
                     if isinstance(node, ast.Assign)
                     and any(isinstance(target, ast.Name) and target.id == "PINS" for target in node.targets))
-        self.assertEqual(set(pins), {"litehtml", "freetype", "unifont"})
+        self.assertEqual(set(pins), {"litehtml", "freetype", "unifont", "notosanssc"})
         for url, digest in pins.values():
             self.assertTrue(url.startswith("https://"))
             self.assertRegex(digest, r"^[0-9a-f]{64}$")

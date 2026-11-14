@@ -581,8 +581,8 @@ static void render_cfopt(void) {
   switch_row(12,156,296,56,"cfauto","cfauto",L("Auto optimize","自动优选"),tmp,c->has&&c->enabled,c->has&&!blocked());
   linkbox(12,220,296,56,"cfrun",c->running||(pending&&pending_kind==JOB_CFOPT)?L("Optimizing, about 1 min","正在优选，约 1 分钟"):
           L("Optimize now","立即优选"),cfopt_can_run(),PRIMARY);
-  box(28,288,264,124,"wrap muted",L("Tests about 260 Cloudflare addresses from here and points nodes behind Cloudflare at the fastest. The domain stays as a fallback. About 6 MB per run.",
-      "测试约 260 个 Cloudflare 地址，让经过 Cloudflare 的节点使用最快的一个，原域名保留为备用。每次约 6 MB 流量。"));
+  box(28,288,264,124,"wrap muted",L("Shortlists Cloudflare addresses, then measures the best ones through the node itself and uses the fastest. The runner-up and the domain stay as fallbacks. A full run at most once a day.",
+      "先粗筛 Cloudflare 地址，再让最好的几个真实经过节点测量，使用最快的一个；第二名和原域名保留为备用。完整测试每天最多一次。"));
   footer(418,40,notice[0]?"":L("Interval and speed test: OpenUI → Proxy → Clash","间隔与测速设置：OpenUI → 代理 → Clash"),"muted");
 }
 static void render_diag(void) {

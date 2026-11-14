@@ -38,8 +38,9 @@ static void usblan_tests(struct drm_buf *b,const char *dir) {
   /* Main menu top bar: carrier name and bars, no figures (-88 dBm is three bars). */
   usblan_fixture("\t1\t2\trndis0\t100\t100\t19\t18\tT-Mobile");page=MENU;
   assert(!strcmp(data.toolbox.carrier,"T-Mobile"));
-  render(b);assert(strstr(html,"T-Mobile")&&!strstr(html,"dBm")&&!strstr(html,"5G SA"));
-  assert(strstr(html,"left:287px;top:82px;width:3px;height:12px;background:#4cc97a")&&strstr(html,"left:292px;top:79px;width:3px;height:15px;background:#323a47"));
+  /* The status card names the radio type beside "Mobile data"; the bar keeps the carrier. */
+  render(b);assert(strstr(html,"T-Mobile")&&!strstr(html,"dBm")&&strstr(html," · 5G SA"));
+  assert(strstr(html,"left:28px;top:20px;width:4px;height:12px;background:#4cc97a")&&strstr(html,"left:34px;top:16px;width:4px;height:16px;background:#323a47"));
   capture_both(b,dir,"menu-carrier");
   /* An older agent's H39, or no service name: the radio type stands in. */
   usblan_fixture("\t1\t2\trndis0\t100\t100\t19\t18");page=MENU;render(b);
@@ -56,7 +57,7 @@ static void usblan_tests(struct drm_buf *b,const char *dir) {
   }
   assert(data.toolbox.sim==0&&data.toolbox.rsrp==NO_FIGURE&&data.toolbox.sinr==NO_FIGURE&&data.toolbox.rsrq==NO_FIGURE);
   page=MENU;render(b);assert(strstr(html,"No SIM")&&!strstr(html,"dBm")&&!strstr(html,"LIMITED"));
-  assert(strstr(html,"left:277px;top:88px;width:3px;height:6px;background:#323a47"));
+  assert(strstr(html,"left:16px;top:28px;width:4px;height:4px;background:#323a47"));
   capture_both(b,dir,"menu-no-sim");
   page=SIGNAL_PAGE;render(b);assert(strstr(html,"No SIM")&&!strstr(html," dBm")&&!strstr(html,"LIMITED"));
   capture_both(b,dir,"signal-no-sim");

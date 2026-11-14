@@ -1030,8 +1030,10 @@ static int input_self_test(void) {
   const struct input_event events[] = {
       {.type = EV_ABS, .code = ABS_MT_SLOT, .value = 0},
       {.type = EV_ABS, .code = ABS_MT_TRACKING_ID, .value = 1},
-      {.type = EV_ABS, .code = ABS_MT_POSITION_X, .value = 69},
-      {.type = EV_ABS, .code = ABS_MT_POSITION_Y, .value = 459},
+      /* The panel is mounted upside down: this is (68, 450) on screen, the middle of
+       * the home screen's Stock UI button in its bottom bar. */
+      {.type = EV_ABS, .code = ABS_MT_POSITION_X, .value = 251},
+      {.type = EV_ABS, .code = ABS_MT_POSITION_Y, .value = 29},
       {.type = EV_SYN, .code = SYN_REPORT},
       {.type = EV_ABS, .code = ABS_MT_TRACKING_ID, .value = -1},
       {.type = EV_SYN, .code = SYN_REPORT}};
@@ -1059,7 +1061,7 @@ static int input_self_test(void) {
     struct input_event e=repeated[0]; input_event(&t,&e);
     e=(struct input_event){.type=EV_ABS,
       .code=axis_only?ABS_MT_POSITION_Y:ABS_MT_POSITION_X,
-      .value=axis_only?458:70}; input_event(&t,&e);
+      .value=axis_only?30:252}; input_event(&t,&e);
     for (size_t i=1;i<sizeof(repeated)/sizeof(repeated[0]);i++) {
       e=repeated[i]; input_event(&t,&e);
     }

@@ -71,7 +71,28 @@ static bool pt_in_round(int x, int y, int fx, int fy, int fw, int fh,
 
 /* ---- FreeType ---- */
 static FT_Library g_ft;
+/* The text face, and the bitmap-style face used for the glyphs it lacks. */
 static FT_Face    g_face;
+static FT_Face    g_fallback;
+/* Loads `cp` at `size` px from the text face, else from the fallback, into that face's
+ * glyph slot. Null when neither has it. Metrics (ascent, line height) stay the text face's,
+ * so a fallback glyph sits on the same baseline. */
+/* Line metrics from the em square, not the face's own: a CJK face reserves a tall line
+ * (ascender 1.16 em, plus a gap), which pushes text out of the 20 px rows the pages are
+ * laid out in and clips descenders. Ideographs fill 0.88 em above the baseline and Latin
+ * descenders reach 0.24 em below it, so 16 px text is 18 px tall: it sits where the
+ * bitmap face it replaced did. */
+static int em_ascent(int size) { return (size * 88 + 50) / 100; }
+static int em_descent(int size) { return (size * 24 + 50) / 100; }
+static FT_GlyphSlot load_glyph(unsigned cp, int size, FT_Int32 flags)
+{
+    FT_Face face = g_face;
+    if (!FT_Get_Char_Index(g_face, cp) && g_fallback && FT_Get_Char_Index(g_fallback, cp)) {
+        face = g_fallback;
+        FT_Set_Pixel_Sizes(face, 0, size);
+    }
+    return FT_Load_Char(face, cp, flags) ? nullptr : face->glyph;
+}
 
 struct ft_font { int size; int ascent, descent, height; bool bold; };
 
@@ -172,6 +193,28 @@ static unsigned utf8_next(const char *&s)
     return c;
 }
 
+/* How much of pixel (x, y) a rounded rectangle covers, 0..16, from a 4x4 grid of samples.
+ * Only pixels in a corner square are sampled; elsewhere the answer is all or nothing.
+ * Smooth corners: at this panel's density a hard-edged arc shows its steps. */
+static int round_cover(int x, int y, int fx, int fy, int fw, int fh,
+                       int rtl, int rtr, int rbr, int rbl)
+{
+    if (x < fx || y < fy || x >= fx + fw || y >= fy + fh) return 0;
+    int r = 0; float cx = 0, cy = 0;
+    if      (x < fx + rtl       && y < fy + rtl)       { r = rtl; cx = fx + rtl;      cy = fy + rtl; }
+    else if (x >= fx + fw - rtr && y < fy + rtr)       { r = rtr; cx = fx + fw - rtr; cy = fy + rtr; }
+    else if (x >= fx + fw - rbr && y >= fy + fh - rbr) { r = rbr; cx = fx + fw - rbr; cy = fy + fh - rbr; }
+    else if (x < fx + rbl       && y >= fy + fh - rbl) { r = rbl; cx = fx + rbl;      cy = fy + fh - rbl; }
+    if (r <= 0) return 16;
+    int n = 0;
+    for (int j = 0; j < 4; j++)
+        for (int i = 0; i < 4; i++) {
+            float dx = x + (i + 0.5f) / 4 - cx, dy = y + (j + 0.5f) / 4 - cy;
+            if (dx * dx + dy * dy <= (float)r * r) n++;
+        }
+    return n;
+}
+
 /* ---- container ---- */
 class fb_container : public document_container {
     std::vector<position> m_clip;
@@ -209,13 +252,8 @@ class fb_container : public document_container {
         int x2 = std::min(fx + fw, (int)cl.right()), y2 = std::min(fy + fh, (int)cl.bottom());
         for (int y = y1; y < y2; y++) {
             for (int x = x1; x < x2; x++) {
-                int r = 0, cx = 0, cy = 0;
-                if      (x < fx + rtl       && y < fy + rtl)       { r = rtl; cx = fx + rtl;          cy = fy + rtl; }
-                else if (x >= fx + fw - rtr && y < fy + rtr)       { r = rtr; cx = fx + fw - 1 - rtr; cy = fy + rtr; }
-                else if (x >= fx + fw - rbr && y >= fy + fh - rbr) { r = rbr; cx = fx + fw - 1 - rbr; cy = fy + fh - 1 - rbr; }
-                else if (x < fx + rbl       && y >= fy + fh - rbl) { r = rbl; cx = fx + rbl;          cy = fy + fh - 1 - rbl; }
-                if (r > 0) { int dx = x - cx, dy = y - cy; if (dx * dx + dy * dy > r * r) continue; }
-                put_px(x, y, c.red, c.green, c.blue, c.alpha);
+                int cover = round_cover(x, y, fx, fy, fw, fh, rtl, rtr, rbr, rbl);
+                if (cover) put_px(x, y, c.red, c.green, c.blue, c.alpha * cover / 16);
             }
         }
     }
@@ -235,9 +273,11 @@ class fb_container : public document_container {
         int x2 = std::min(fx + fw, (int)cl.right()), y2 = std::min(fy + fh, (int)cl.bottom());
         for (int y = y1; y < y2; y++)
             for (int x = x1; x < x2; x++)
-                if (pt_in_round(x, y, fx, fy, fw, fh, rtl, rtr, rbr, rbl) &&
-                    !pt_in_round(x, y, fx + t, fy + t, fw - 2 * t, fh - 2 * t, itl, itr, ibr, ibl))
-                    put_px(x, y, c.red, c.green, c.blue, c.alpha);
+            {
+                int cover = round_cover(x, y, fx, fy, fw, fh, rtl, rtr, rbr, rbl)
+                          - round_cover(x, y, fx + t, fy + t, fw - 2 * t, fh - 2 * t, itl, itr, ibr, ibl);
+                if (cover > 0) put_px(x, y, c.red, c.green, c.blue, c.alpha * cover / 16);
+            }
     }
 
     void fill_background_box(const background_layer &layer, web_color c) {
@@ -255,11 +295,11 @@ public:
     uint_ptr create_font(const font_description &d, const document *, font_metrics *fm) override {
         auto *f = new ft_font();
         f->size = (int)d.size;
-        f->bold = d.weight >= 600; /* Unifont has one weight: embolden by overstriking. */
+        f->bold = d.weight >= 600; /* One weight is embedded: embolden by overstriking. */
         FT_Set_Pixel_Sizes(g_face, 0, f->size);
-        f->ascent  = g_face->size->metrics.ascender >> 6;
-        f->descent = -(g_face->size->metrics.descender >> 6);
-        f->height  = g_face->size->metrics.height >> 6;
+        f->ascent  = em_ascent(f->size);
+        f->descent = em_descent(f->size);
+        f->height  = f->ascent + f->descent;
         if (fm) {
             fm->font_size = d.size;
             fm->ascent = f->ascent; fm->descent = f->descent;
@@ -277,8 +317,8 @@ public:
         pixel_t w = 0;
         for (const char *s = text; *s; ) {
             unsigned cp = utf8_next(s);
-            if (FT_Load_Char(g_face, cp, FT_LOAD_DEFAULT)) continue;
-            w += g_face->glyph->advance.x >> 6;
+            FT_GlyphSlot gl = load_glyph(cp, f->size, FT_LOAD_DEFAULT);
+            if (gl) w += gl->advance.x >> 6;
         }
         return w;
     }
@@ -291,8 +331,8 @@ public:
         position cl = eff_clip();
         for (const char *s = text; *s; ) {
             unsigned cp = utf8_next(s);
-            if (FT_Load_Char(g_face, cp, FT_LOAD_RENDER)) continue;
-            FT_GlyphSlot gl = g_face->glyph;
+            FT_GlyphSlot gl = load_glyph(cp, f->size, FT_LOAD_RENDER);
+            if (!gl) continue;
             FT_Bitmap &bm = gl->bitmap;
             for (int pass = 0; pass < (f->bold ? 2 : 1); pass++) {
             int ox = pen + gl->bitmap_left + pass, oy = base - gl->bitmap_top;
@@ -396,7 +436,8 @@ extern "C" void html_view_init(uint16_t *fb, int w, int h, int pitch_px, int rot
 {
     g_fb = fb; g_w = w; g_h = h; g_pitch_px = pitch_px; g_rotate = rotate;
     (void)font_path;
-    if (FT_Init_FreeType(&g_ft) || FT_New_Memory_Face(g_ft, devui_font, sizeof(devui_font), 0, &g_face)) {
+    if (FT_Init_FreeType(&g_ft) || FT_New_Memory_Face(g_ft, devui_font, sizeof(devui_font), 0, &g_face) ||
+        FT_New_Memory_Face(g_ft, devui_fallback_font, sizeof(devui_fallback_font), 0, &g_fallback)) {
         fprintf(stderr, "html_view: cannot load embedded OFL font\n");
         std::abort();
     }
@@ -553,8 +594,8 @@ extern "C" int html_view_text_width_px(const char *text, int size)
     int w = 0;
     for (const char *s = text; *s; ) {
         unsigned cp = utf8_next(s);
-        if (FT_Load_Char(g_face, cp, FT_LOAD_DEFAULT)) continue;
-        w += g_face->glyph->advance.x >> 6;
+        FT_GlyphSlot gl = load_glyph(cp, size, FT_LOAD_DEFAULT);
+        if (gl) w += gl->advance.x >> 6;
     }
     return w;
 }
@@ -568,12 +609,12 @@ extern "C" void html_view_text_bounds_px(const char *text, int size,
     if (y1) *y1 = 0;
     if (!g_face || !text) return;
     FT_Set_Pixel_Sizes(g_face, 0, size);
-    int ascent = g_face->size->metrics.ascender >> 6;
+    int ascent = em_ascent(size);
     int pen = 0, minx = 0, miny = 0, maxx = 0, maxy = 0, seen = 0;
     for (const char *s = text; *s; ) {
         unsigned cp = utf8_next(s);
-        if (FT_Load_Char(g_face, cp, FT_LOAD_RENDER)) continue;
-        FT_GlyphSlot gl = g_face->glyph;
+        FT_GlyphSlot gl = load_glyph(cp, size, FT_LOAD_RENDER);
+        if (!gl) continue;
         int gx0 = pen + gl->bitmap_left;
         int gy0 = ascent - gl->bitmap_top;
         int gx1 = gx0 + (int)gl->bitmap.width;
@@ -600,12 +641,12 @@ extern "C" void html_view_draw_text_px(int x, int y, const char *text, int size,
 {
     if (!g_face || !text) return;
     FT_Set_Pixel_Sizes(g_face, 0, size);
-    int ascent = g_face->size->metrics.ascender >> 6;
+    int ascent = em_ascent(size);
     int pen = x, base = y + ascent;
     for (const char *s = text; *s; ) {
         unsigned cp = utf8_next(s);
-        if (FT_Load_Char(g_face, cp, FT_LOAD_RENDER)) continue;
-        FT_GlyphSlot gl = g_face->glyph;
+        FT_GlyphSlot gl = load_glyph(cp, size, FT_LOAD_RENDER);
+        if (!gl) continue;
         FT_Bitmap &bm = gl->bitmap;
         for (int pass = 0; pass < (bold ? 2 : 1); pass++) {
             int ox = pen + gl->bitmap_left + pass, oy = base - gl->bitmap_top;
@@ -624,12 +665,12 @@ extern "C" void html_view_draw_text_contrast_px(int x, int y, const char *text, 
 {
     if (!g_face || !text) return;
     FT_Set_Pixel_Sizes(g_face, 0, size);
-    int ascent = g_face->size->metrics.ascender >> 6;
+    int ascent = em_ascent(size);
     int pen = x, base = y + ascent;
     for (const char *s = text; *s; ) {
         unsigned cp = utf8_next(s);
-        if (FT_Load_Char(g_face, cp, FT_LOAD_RENDER)) continue;
-        FT_GlyphSlot gl = g_face->glyph;
+        FT_GlyphSlot gl = load_glyph(cp, size, FT_LOAD_RENDER);
+        if (!gl) continue;
         FT_Bitmap &bm = gl->bitmap;
         for (int pass = 0; pass < (bold ? 2 : 1); pass++) {
             int ox = pen + gl->bitmap_left + pass, oy = base - gl->bitmap_top;

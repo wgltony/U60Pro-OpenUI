@@ -9,13 +9,17 @@ PINS = {
  'litehtml': ('https://codeload.github.com/litehtml/litehtml/tar.gz/9bc84b8b8d15a4e50f18b327aa30955048b441c2', 'ff09151e75079bad74cb4f1dc5411e4cbc39452a9e86834df7c56289833dc53f'),
  'freetype': ('https://codeload.github.com/freetype/freetype/tar.gz/refs/tags/VER-2-13-3', 'bc5c898e4756d373e0d991bab053036c5eb2aa7c0d5c67e8662ddc6da40c4103'),
  'unifont': ('https://unifoundry.com/pub/unifont/unifont-17.0.05/font-builds/unifont-17.0.05.otf', '85701ab9b1e251ee16f4df00b13f22eac311d72b7dab427a7d975fe7f5064702'),
+ # The text face: smooth outlines at any size. Unifont stays as the fallback for the
+ # symbols it lacks (arrows, marks, box drawing) and for scripts outside its subset.
+ 'notosanssc': ('https://github.com/notofonts/noto-cjk/raw/Sans2.004/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf', 'faa6c9df652116dde789d351359f3d7e5d2285a2b2a1f04a2d7244df706d5ea9'),
 }
+FONTS = ('unifont', 'notosanssc')
 def source(name):
  url, digest = PINS[name]
- p = DEPS / (name + ('.otf' if name == 'unifont' else '.tar.gz'))
+ p = DEPS / (name + ('.otf' if name in FONTS else '.tar.gz'))
  if not p.exists(): p.write_bytes(urllib.request.urlopen(url, timeout=60).read())
  if hashlib.sha256(p.read_bytes()).hexdigest() != digest: raise RuntimeError(name + ' checksum mismatch')
- if name == 'unifont': return p
+ if name in FONTS: return p
  with tarfile.open(p) as t:
   top = t.getnames()[0].split('/')[0]
   if not (DEPS / top).exists():
@@ -24,7 +28,7 @@ def source(name):
      raise RuntimeError('Unsafe archive member')
    t.extractall(DEPS)
  return DEPS / top
-lh, ft, font = (source(n) for n in PINS)
+lh, ft, font, text_font = (source(n) for n in PINS)
 preview = '--preview' in sys.argv
 out = ROOT / ('build/devui-native' if preview else 'build/devui-aarch64')
 out.mkdir(parents=True, exist_ok=True)
@@ -34,8 +38,9 @@ modules = ['autofit_module_class','tt_driver_class','cff_driver_class','psaux_mo
 (out/'ftmodule_min.h').write_text('\n'.join('FT_USE_MODULE( %s, %s )' % ('FT_Driver_ClassRec' if m in ('tt_driver_class','cff_driver_class') else 'FT_Renderer_Class' if m=='ft_smooth_renderer_class' else 'FT_Module_Class',m) for m in modules))
 # Embed an OFL font so device and preview use identical glyphs, no vendor assets.
 font_header = out / 'devui_font.h'
-if not font_header.exists():
- raw=font.read_bytes();font_header.write_text('static const unsigned char devui_font[] = {\n'+','.join(map(str,raw))+'\n};\n')
+font_key = hashlib.sha256(font.read_bytes()+text_font.read_bytes()).hexdigest()
+if not font_header.exists() or font_key not in font_header.read_text()[:120]:
+ font_header.write_text('/* '+font_key+' */\n'+''.join('static const unsigned char '+name+'[] = {\n'+','.join(map(str,f.read_bytes()))+'\n};\n' for name,f in (('devui_font',text_font),('devui_fallback_font',font))))
 # HTML/CSS is compiled into the component so deployment/rollback stays one-file atomic.
 ui_header=out/'devui_assets.h'
 ui_header.write_text('\n'.join('static const char '+p.stem.replace('-','_')+'_asset[] = '+json.dumps(p.read_text())+';' for p in sorted((ROOT/'screen/devui/ui').glob('*'))))

@@ -1,51 +1,74 @@
 * { box-sizing: border-box; }
-/* Unifont is a 16 px bitmap design: 16 and 32 px render crisp, 24 px is used only for titles.
- * Colours follow the OpenUI web panel's dark theme. */
-html, body { margin:0; padding:0; width:320px; height:480px; background:#0b0d11; color:#e8eaee; font-family: sans-serif; font-size:16px; line-height:20px; }
+/* DevUI's look. The text face is an outline font, so any size renders smoothly; rounded
+ * corners are anti-aliased by the renderer.
+ *
+ * Palette (dark): three surface steps over the background, one accent, three state
+ * colours. A colour always means the same thing: blue is "yours to tap or chosen",
+ * green is "working", amber is "attention", red is "broken or destructive".
+ *   background #0b0e13   surface #151a22   raised #1c232e   hairline #252d3a
+ *   text #eef1f5         secondary #a3acb8  tertiary #717a87
+ *   accent #4f9cf9       good #3fcf8e       warn #f0b04f     bad #f2706f */
+html, body { margin:0; padding:0; width:320px; height:480px; background:#0b0e13; color:#eef1f5; font-family: sans-serif; font-size:16px; line-height:20px; }
 .box { position:absolute; overflow:hidden; white-space:nowrap; }
 .wrap { white-space:normal; }
-a { text-decoration:none; color:#e8eaee; }
-/* The title bar: page title and the back button. */
-.bar { background:#12161d; border-bottom:1px solid #212833; }
-.btn { display:block; background:#1b2029; border:1px solid #2c3441; border-radius:12px; text-align:center; font-weight:bold; }
-.primary { background:#2d7bd0; border-color:#4c9eeb; color:#ffffff; }
-.danger { background:#2c1519; border-color:#6b2a33; color:#ff9d9d; }
-.disabled { background:#12151b; color:#4f5662; border-color:#1c2028; }
-/* The current choice among buttons (backend, proxy mode, presets). */
-.chosen { background:#0f2a1c; border-color:#2f8a55; color:#6be39a; }
-.card { background:#151920; border:1px solid #232934; border-radius:14px; }
-.title { font-size:24px; line-height:32px; font-weight:bold; }
+a { text-decoration:none; color:#eef1f5; }
+/* The title bar: a round back button, then the page title. */
+.bar { background:#0b0e13; border-bottom:1px solid #1b222c; }
+.btn { display:block; background:#1c232e; border:1px solid #2a3341; border-radius:14px; text-align:center; font-weight:bold; }
+/* After .btn, which it refines. */
+.back { font-size:28px; border-radius:24px; background:#151a22; border-color:#252d3a; color:#c9d1dc; font-weight:normal; }
+.primary { background:#2f7fe0; border-color:#2f7fe0; color:#ffffff; }
+.danger { background:#2a1517; border-color:#6e2b30; color:#ff9a98; }
+.disabled { background:#11151b; color:#4b5361; border-color:#1a2029; }
+/* The current choice among buttons (backend, proxy mode, presets): the accent, filled. */
+.chosen { background:#13294a; border-color:#3f86e0; color:#9ccbff; }
+.card { background:#151a22; border:1px solid #212935; border-radius:16px; }
+.title { font-size:22px; line-height:30px; font-weight:bold; }
 .head { font-weight:bold; }
 .big { font-size:32px; line-height:36px; font-weight:bold; }
 .right { text-align:right; }
 .center { text-align:center; }
-.row { display:block; background:#1a1f28; border:1px solid #2a313d; border-radius:12px; }
-.row.current { background:#0f2a1c; border-color:#2f8a55; }
-.row.off { background:#13161c; border-color:#1d2129; color:#4f5662; }
-.tile { display:block; background:#1a1f28; border:1px solid #2a313d; border-radius:14px; }
+.row { display:block; background:#151a22; border:1px solid #212935; border-radius:14px; }
+.row.current { background:#13294a; border-color:#3f86e0; }
+.row.off { background:#0f1318; border-color:#191f28; color:#4b5361; }
+.tile { display:block; background:#151a22; border:1px solid #212935; border-radius:16px; }
 .tile.stock { background:#1d2538; border-color:#3b4d71; }
-.icon { color:#4c9eeb; font-weight:bold; }
-.pill { background:#1a1f28; border:1px solid #2a313d; border-radius:8px; text-align:center; }
+.icon { color:#4f9cf9; font-weight:bold; }
+.pill { background:#1c232e; border:1px solid #2a3341; border-radius:8px; text-align:center; }
 /* Section label above a group of controls. */
-.label { color:#9aa1ac; font-weight:bold; }
+.label { color:#a3acb8; font-weight:bold; font-size:14px; }
 .name { position:absolute; left:14px; top:9px; right:34px; font-weight:bold; overflow:hidden; white-space:nowrap; }
-.sub { position:absolute; left:14px; top:31px; right:34px; color:#9aa1ac; overflow:hidden; white-space:nowrap; }
-.chev { position:absolute; right:12px; top:0; color:#646c78; font-size:24px; }
-.bar-track { background:#262d38; border-radius:3px; }
+.sub { position:absolute; left:14px; top:31px; right:34px; color:#a3acb8; font-size:14px; overflow:hidden; white-space:nowrap; }
+.chev { position:absolute; right:12px; top:0; color:#5d6673; font-size:22px; }
+.bar-track { background:#232b37; border-radius:3px; }
 .fill { border-radius:3px; }
 /* An on/off switch at the right of a row. */
-.track { background:#2c3441; border-radius:12px; }
-.track.on { background:#2f8a55; }
-.knob { background:#e8eaee; border-radius:9px; }
-.check { border:2px solid #4a5260; border-radius:6px; text-align:center; font-weight:bold; line-height:18px; color:#0b0d11; }
-.check.on { background:#4cc97a; border-color:#4cc97a; }
-.badge { border-radius:10px; text-align:center; font-weight:bold; background:#2f8a55; color:#effff5; }
-.line { background:#212833; }
+.track { background:#2a3341; border-radius:12px; }
+.track.on { background:#2fae74; }
+.knob { background:#f4f6f9; border-radius:9px; }
+.check { border:2px solid #4a5463; border-radius:7px; text-align:center; font-weight:bold; line-height:18px; color:#0b0e13; }
+.check.on { background:#3fcf8e; border-color:#3fcf8e; }
+.badge { border-radius:11px; text-align:center; font-weight:bold; font-size:13px; background:#13294a; color:#9ccbff; }
+.line { background:#212935; }
 .shade { background:#05070a; }
 /* State colours last so they win over .sub and .row. */
-.muted { color:#9aa1ac; }
-.faint { color:#646c78; }
-.good { color:#4cc97a; }
-.warn { color:#eaa646; }
-.bad { color:#f06a6a; }
-.accent { color:#4c9eeb; }
+.muted { color:#a3acb8; }
+.faint { color:#717a87; }
+.good { color:#3fcf8e; }
+.warn { color:#f0b04f; }
+.bad { color:#f2706f; }
+.accent { color:#4f9cf9; }
+/* Home: the status card, its large speed figures and the small print. */
+.hero { background:#101a2b; border-color:#1c3252; border-radius:18px; }
+.speed { font-size:30px; line-height:38px; font-weight:bold; }
+.arrow { font-size:20px; line-height:26px; font-weight:bold; }
+.small { font-size:13px; line-height:18px; }
+.tiny { font-size:12px; line-height:16px; }
+/* Home tiles: a tinted chip carries the mark, coloured by what the feature is about. */
+.chip { border-radius:9px; text-align:center; font-size:16px; line-height:26px; }
+.chip.net { background:#12284a; color:#6cb0ff; }
+.chip.proxy { background:#271f47; color:#b29bff; }
+.chip.power { background:#0f2b21; color:#4fd69a; }
+.chip.tool { background:#30250f; color:#f0b04f; }
+.chip.sys { background:#1f2733; color:#b4bfcc; }
+.ring { border:2px solid #6cb0ff; }
